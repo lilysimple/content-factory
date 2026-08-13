@@ -231,7 +231,7 @@ async def run(chat_id: int, urls: list[str], self_text: str) -> Draft:
         "research", chat_id,
         "Распакуй бренд по материалам ниже. Верни только JSON по схеме из "
         "инструкции, без markdown-обёртки.\n\n" + document,
-        max_tokens=3000, temperature=0.3)
+        max_tokens=12000)
 
     draft.data = _parse(answer)
     return draft

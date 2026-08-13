@@ -19,7 +19,28 @@ def _chats(raw: str) -> set[int]:
 @dataclass(frozen=True)
 class Config:
     anthropic_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
+    model: str = os.getenv("ANTHROPIC_MODEL", "claude-opus-5")
+
+    # Модель и усилие можно задать отдельно на роль: MODEL_EDITOR, EFFORT_EDITOR.
+    # Распаковка и стратегия это суждение, публикация это форматирование —
+    # платить за них одинаково смысла нет.
+    role_models: dict[str, str] = field(default_factory=lambda: {
+        role: os.getenv(f"MODEL_{role.upper()}", "")
+        for role in ("assistant", "research", "strategy", "editor",
+                     "reels", "design", "publisher")
+    })
+    role_effort: dict[str, str] = field(default_factory=lambda: {
+        role: os.getenv(f"EFFORT_{role.upper()}", "")
+        for role in ("assistant", "research", "strategy", "editor",
+                     "reels", "design", "publisher")
+    })
+    default_effort: str = os.getenv("ANTHROPIC_EFFORT", "high")
+
+    def model_for(self, role: str) -> str:
+        return self.role_models.get(role) or self.model
+
+    def effort_for(self, role: str) -> str:
+        return self.role_effort.get(role) or self.default_effort
 
     tokens: dict[str, str] = field(default_factory=lambda: {
         "assistant": os.getenv("BOT_ASSISTANT", ""),

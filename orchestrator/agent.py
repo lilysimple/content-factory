@@ -91,10 +91,18 @@ async def ask(
     brand_name: str = "",
     persona_id: str = "",
     extra_system: str = "",
-    max_tokens: int = 2000,
-    temperature: float = 1.0,
+    max_tokens: int = 8000,
+    effort: str = "",
 ) -> str:
-    """Спросить модель от лица роли. Возвращает текст."""
+    """Спросить модель от лица роли. Возвращает текст.
+
+    Про max_tokens: на Opus 5 мышление включено по умолчанию, и лимит
+    считает мышление вместе с ответом. Скупой max_tokens обрезает ответ
+    на середине, поэтому запас здесь не роскошь.
+
+    Параметра temperature нет намеренно: на Opus 5 он снят и возвращает 400.
+    Тон задаётся промптом, а не сэмплингом.
+    """
     used = db.bump_llm(chat_id, date.today().isoformat())
     if used > cfg.llm_budget_day:
         raise BudgetExceeded(
@@ -102,15 +110,16 @@ async def ask(
 
     system = build_system(role, brand_name=brand_name,
                           persona_id=persona_id, extra=extra_system)
+    model = cfg.model_for(role)
 
     delay = 2.0
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             resp = await client().messages.create(
-                model=cfg.model,
+                model=model,
                 max_tokens=max_tokens,
-                temperature=temperature,
                 system=system,
+                output_config={"effort": effort or cfg.effort_for(role)},
                 messages=[{"role": "user", "content": prompt}],
             )
             return "".join(b.text for b in resp.content
