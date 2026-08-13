@@ -15,7 +15,7 @@ import asyncio
 import logging
 from datetime import date
 from functools import lru_cache
-from pathlib import Path
+from typing import Any
 
 from anthropic import APIError, AsyncAnthropic, RateLimitError
 
@@ -57,7 +57,12 @@ def _read_role(name: str) -> str:
 # Минимум кешируемого префикса на Opus 5 — 512 токенов. Ставить точку на
 # более коротком блоке не ошибка, но и не кеширует: молча платим за запись.
 MIN_CACHE_CHARS = 2000
-CACHE = {"type": "ephemeral"}
+
+
+def _cache() -> dict[str, str]:
+    """Новый объект на каждый блок: общий словарь на несколько блоков
+    сегодня безобиден, а завтра ломает сразу все точки кеша."""
+    return {"type": "ephemeral"}
 
 
 def build_system(role: str, *, brand_name: str = "", persona_id: str = "",
@@ -80,7 +85,7 @@ def build_system(role: str, *, brand_name: str = "", persona_id: str = "",
     if core:
         block: dict[str, Any] = {"type": "text", "text": core}
         if len(core) >= MIN_CACHE_CHARS:
-            block["cache_control"] = CACHE
+            block["cache_control"] = _cache()
         blocks.append(block)
 
     tenant_parts = []
@@ -98,7 +103,7 @@ def build_system(role: str, *, brand_name: str = "", persona_id: str = "",
         tenant = "\n\n---\n\n".join(tenant_parts)
         block = {"type": "text", "text": tenant}
         if len(tenant) >= MIN_CACHE_CHARS:
-            block["cache_control"] = CACHE
+            block["cache_control"] = _cache()
         blocks.append(block)
 
     # Изменчивое идёт последним и точкой не помечается никогда.
