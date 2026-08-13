@@ -4,6 +4,6 @@ __pycache__/
 .env
 *.db
 tmp/
-Brands/*/
-!Brands/.gitkeep
+# Brands живут в соседнем репозитории content-factory-brands
+
 .DS_Store
