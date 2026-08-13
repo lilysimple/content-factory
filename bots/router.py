@@ -1,0 +1,100 @@
+"""Маршрутизация: кому из ролей уходит сообщение.
+
+Три сигнала по приоритету: явное упоминание → топик → смысл.
+При неоднозначности не угадываем, а спрашиваем одной кнопкой.
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+# Топик задаёт роль по умолчанию: написанное в «Дизайн» идёт дизайнеру.
+TOPIC_DEFAULT: dict[str, str] = {
+    "research": "research",
+    "strategy": "strategy",
+    "review":   "editor",
+    "reels":    "reels",
+    "design":   "design",
+    "photos":   "design",
+    "queue":    "publisher",
+    "metrics":  "research",
+}
+
+TRIGGERS: dict[str, tuple[str, ...]] = {
+    "research": (
+        "сводк", "дайджест", "что нового", "тренд", "новости ниши",
+        "конкурент", "разбери рилс", "статистик", "метрик", "что зашло",
+    ),
+    "strategy": (
+        "план", "контент-план", "тем", "что постить", "спланируй",
+        "идеи постов", "рубрик", "стратеги",
+    ),
+    "editor": (
+        "напиши пост", "текст", "перепиши", "поправь", "сделай короче",
+        "адаптируй", "анонс", "описание для youtube",
+    ),
+    "reels": (
+        "сценари", "рилс", "reels", "shorts", "суфл", "сними ролик", "хук",
+    ),
+    "design": (
+        "обложк", "карусел", "превью", "оформи", "карточк", "визуал",
+        "сверстай",
+    ),
+    "publisher": (
+        "опубликуй", "в очередь", "перенеси на", "когда выходит",
+        "отмени публикацию", "расписани",
+    ),
+    "assistant": (
+        "что в очереди", "статус", "что вышло", "найди пост", "покажи ядро",
+        "стоп-слов", "поменяй правило", "настрой", "выгрузи",
+    ),
+}
+
+# Коллизии, разведённые явно: проверяются до общего словаря.
+OVERRIDES: tuple[tuple[str, str], ...] = (
+    ("когда выходит", "publisher"),
+    ("что там с",     "assistant"),
+    ("покажи ядро",   "assistant"),
+)
+
+# Фразы, которые честно неоднозначны — спрашиваем, а не гадаем.
+AMBIGUOUS = re.compile(r"сделай (что-нибудь|материал|контент)", re.I)
+
+
+@dataclass(frozen=True)
+class Route:
+    role: str | None            # None → надо спросить
+    reason: str                 # mention | topic | intent | ambiguous
+
+
+def resolve(text: str, topic_key: str | None, usernames: dict[str, str]) -> Route:
+    low = (text or "").lower()
+
+    # 1. Явное упоминание бота выигрывает у всего.
+    for role, username in usernames.items():
+        if username and f"@{username.lower()}" in low:
+            return Route(role, "mention")
+
+    # 2. Явные коллизии.
+    for phrase, role in OVERRIDES:
+        if phrase in low:
+            return Route(role, "intent")
+
+    if AMBIGUOUS.search(low):
+        return Route(None, "ambiguous")
+
+    # 3. Смысл: считаем попадания, берём роль с наибольшим числом.
+    hits = {
+        role: sum(1 for t in triggers if t in low)
+        for role, triggers in TRIGGERS.items()
+    }
+    best = max(hits, key=lambda r: hits[r])
+    if hits[best] > 0:
+        return Route(best, "intent")
+
+    # 4. Топик как контекст по умолчанию.
+    if topic_key and topic_key in TOPIC_DEFAULT:
+        return Route(TOPIC_DEFAULT[topic_key], "topic")
+
+    # 5. Ничего не сработало — разбирается Ассистент.
+    return Route("assistant", "intent")
