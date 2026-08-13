@@ -54,21 +54,76 @@ def _read_role(name: str) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
-def build_system(role: str, *, brand_name: str = "", persona_id: str = "",
-                 extra: str = "") -> str:
-    """Собрать системный промпт роли."""
-    parts = [_read_role("frame"), _read_role(role)]
+# Минимум кешируемого префикса на Opus 5 — 512 токенов. Ставить точку на
+# более коротком блоке не ошибка, но и не кеширует: молча платим за запись.
+MIN_CACHE_CHARS = 2000
+CACHE = {"type": "ephemeral"}
 
+
+def build_system(role: str, *, brand_name: str = "", persona_id: str = "",
+                 profile: str = "", extra: str = "") -> list[dict[str, Any]]:
+    """Собрать системный промпт роли блоками, от стабильного к изменчивому.
+
+    Кеширование это совпадение префикса: любое изменение обесценивает всё,
+    что стоит после него. Поэтому порядок блоков — не стиль, а деньги.
+
+      1. frame + роль   одинаково у ВСЕХ тенантов → кешируется, читается всеми
+      2. маска + бренд  стабильно внутри тенанта  → кешируется на тенанта
+      3. extra          меняется от вызова к вызову → без точки
+
+    Чтение закешированного стоит примерно десятую часть обычного.
+    """
+    blocks: list[dict[str, Any]] = []
+
+    core = "\n\n---\n\n".join(
+        p for p in (_read_role("frame"), _read_role(role)) if p.strip())
+    if core:
+        block: dict[str, Any] = {"type": "text", "text": core}
+        if len(core) >= MIN_CACHE_CHARS:
+            block["cache_control"] = CACHE
+        blocks.append(block)
+
+    tenant_parts = []
+    if brand_name:
+        tenant_parts.append(f"Бренд, с которым ты работаешь: {brand_name}.")
     if role == "assistant" and persona_id:
         persona = PERSONAS.get(persona_id, default_persona())
-        parts.append("## Маска\n\n" + persona.system_block())
+        tenant_parts.append("## Маска\n\n" + persona.system_block())
+    # Секции профиля читаются на каждом посте и внутри тенанта не меняются —
+    # им место в кешируемом блоке, а не в хвосте.
+    if profile:
+        tenant_parts.append("## Профиль бренда\n\n" + profile)
 
-    if brand_name:
-        parts.append(f"Бренд, с которым ты работаешь: {brand_name}.")
+    if tenant_parts:
+        tenant = "\n\n---\n\n".join(tenant_parts)
+        block = {"type": "text", "text": tenant}
+        if len(tenant) >= MIN_CACHE_CHARS:
+            block["cache_control"] = CACHE
+        blocks.append(block)
+
+    # Изменчивое идёт последним и точкой не помечается никогда.
     if extra:
-        parts.append(extra)
+        blocks.append({"type": "text", "text": extra})
 
-    return "\n\n---\n\n".join(p for p in parts if p.strip())
+    return blocks
+
+
+def _log_usage(role: str, resp: Any) -> None:
+    """Кеш работает молча, поэтому его надо видеть в логе.
+
+    Если cache_read стабильно нулевой при одинаковом префиксе — где-то
+    в начало промпта попало что-то изменчивое.
+    """
+    u = getattr(resp, "usage", None)
+    if u is None:
+        return
+    read = getattr(u, "cache_read_input_tokens", 0) or 0
+    write = getattr(u, "cache_creation_input_tokens", 0) or 0
+    fresh = getattr(u, "input_tokens", 0) or 0
+    total = read + write + fresh
+    share = f"{read * 100 // total}%" if total else "—"
+    log.info("%s: вход %s (из кеша %s, %s), выход %s",
+             role, total, read, share, getattr(u, "output_tokens", 0))
 
 
 _client: AsyncAnthropic | None = None
@@ -90,6 +145,7 @@ async def ask(
     *,
     brand_name: str = "",
     persona_id: str = "",
+    profile: str = "",
     extra_system: str = "",
     max_tokens: int = 8000,
     effort: str = "",
@@ -108,8 +164,8 @@ async def ask(
         raise BudgetExceeded(
             f"дневной лимит {cfg.llm_budget_day} вызовов исчерпан")
 
-    system = build_system(role, brand_name=brand_name,
-                          persona_id=persona_id, extra=extra_system)
+    system = build_system(role, brand_name=brand_name, persona_id=persona_id,
+                          profile=profile, extra=extra_system)
     model = cfg.model_for(role)
 
     delay = 2.0
@@ -122,6 +178,7 @@ async def ask(
                 output_config={"effort": effort or cfg.effort_for(role)},
                 messages=[{"role": "user", "content": prompt}],
             )
+            _log_usage(role, resp)
             return "".join(b.text for b in resp.content
                            if getattr(b, "type", "") == "text").strip()
 
