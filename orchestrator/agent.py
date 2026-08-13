@@ -33,6 +33,21 @@ class BudgetExceeded(RuntimeError):
     """Тенант выбрал дневной лимит вызовов."""
 
 
+def _reason(e: APIError) -> str:
+    """Человеческая причина отказа, а не дамп JSON в чат."""
+    body = getattr(e, "body", None) or {}
+    msg = (body.get("error") or {}).get("message", "") if isinstance(body, dict) else ""
+    low = msg.lower()
+    if "credit balance" in low:
+        return ("на аккаунте API закончились средства. "
+                "console.anthropic.com → Plans & Billing")
+    if "authentication" in low or "invalid x-api-key" in low:
+        return "ключ API не принят, проверь ANTHROPIC_API_KEY"
+    if "max_tokens" in low or "too long" in low:
+        return "запрос длиннее лимита модели"
+    return msg or str(e)
+
+
 @lru_cache(maxsize=32)
 def _read_role(name: str) -> str:
     path = ROLES_DIR / f"{name}.md"
@@ -104,6 +119,14 @@ async def ask(
         except RateLimitError:
             log.warning("rate limit, попытка %s из %s", attempt, MAX_ATTEMPTS)
         except APIError as e:
+            # 4xx кроме 429 это отказ по сути запроса: нет средств, кривой
+            # ключ, слишком длинный контекст. Повтор ничего не изменит,
+            # только съест время и запутает лог.
+            status = getattr(e, "status_code", None)
+            if status is not None and 400 <= status < 500 and status != 429:
+                log.error("запрос отклонён (%s), повторять нечего: %s",
+                          status, _reason(e))
+                raise
             log.error("ошибка API (%s из %s): %s", attempt, MAX_ATTEMPTS, e)
             if attempt == MAX_ATTEMPTS:
                 raise
