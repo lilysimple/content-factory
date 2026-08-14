@@ -167,8 +167,19 @@ class Draft:
 # ── сборка входа для модели ───────────────────────────────────────────
 
 def _document(srcs: list[sources.Source], self_text: str,
-              uploads: list = None) -> str:
+              uploads: list = None, current: str = "") -> str:
     blocks: list[str] = []
+
+    # Текущий профиль идёт первым: задача не собрать заново, а поправить
+    # по новым материалам. Иначе каждая пересборка теряет уточнения,
+    # которые человек уже подтвердил.
+    if current.strip():
+        blocks.append(
+            "## Текущий профиль бренда\n\n"
+            "Он уже собран и подтверждён человеком. Твоя задача — уточнить "
+            "его по материалам ниже, а не написать с нуля. Что новые данные "
+            "не затрагивают, оставь как есть. Что противоречит — исправь и "
+            "назови это в поле divergence.\n\n" + current.strip()[:12000])
 
     if self_text.strip():
         blocks.append(f"## Что человек сказал о себе\n\n{self_text.strip()}")
@@ -220,7 +231,7 @@ def _parse(raw: str) -> dict[str, Any]:
 
 
 async def run(chat_id: int, urls: list[str], self_text: str,
-              uploads: list | None = None) -> Draft:
+              uploads: list | None = None, current: str = "") -> Draft:
     """Прочитать источники и собрать черновик профиля."""
     srcs = await sources.fetch_all(urls, limit=MAX_POSTS)
     uploads = uploads or []
@@ -235,15 +246,17 @@ async def run(chat_id: int, urls: list[str], self_text: str,
                   if u.ok and u.kind == "telegram-export"), "")),
     )
 
-    document = _document(srcs, self_text, uploads)
+    document = _document(srcs, self_text, uploads, current)
     if not document.strip():
         log.warning("нечего распаковывать: ни один источник не открылся")
         return draft
 
     answer = await agent.ask(
         "research", chat_id,
-        "Распакуй бренд по материалам ниже. Верни только JSON по схеме из "
-        "инструкции, без markdown-обёртки.\n\n" + document,
+        ("Уточни профиль бренда по новым материалам."
+         if current else "Распакуй бренд по материалам ниже.") +
+        " Верни только JSON по схеме из инструкции, без markdown-обёртки."
+        "\n\n" + document,
         max_tokens=12000)
 
     draft.data = _parse(answer)

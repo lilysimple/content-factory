@@ -18,7 +18,7 @@ from bots import topics
 from bots.registry import ROLES, STUBS, registry
 from bots.router import resolve
 from config import cfg
-from orchestrator import onboarding, reply
+from orchestrator import onboarding, refresh, reply
 from storage import db
 
 log = logging.getLogger("handlers")
@@ -112,8 +112,22 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             await onboarding.handle(registry, msg)
             return
 
+        raw = msg.text or msg.caption or ""
+
+        # Материалы после онбординга уточняют существующий профиль,
+        # а не создают новый бренд.
+        if refresh.wants_refresh(msg):
+            await refresh.start(registry, msg)
+            return
+
+        # Просьба поправить профиль словами: «давай обновим стратегию»,
+        # «добавь стоп-слово». Иначе такое уходило Стратегу в заглушку.
+        if refresh.wants_edit(raw):
+            await refresh.edit(registry, chat_id, raw)
+            return
+
         tkey = topic_key_of(chat_id, msg.message_thread_id)
-        route = resolve(msg.text or msg.caption or "", tkey, registry.me)
+        route = resolve(raw, tkey, registry.me)
 
         if route.role is None:
             await onboarding.ask_which_role(registry, chat_id)
@@ -151,7 +165,16 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         if cb.message is None or not cfg.chat_allowed(cb.message.chat.id):
             return
         role = registry.role_of(bot)
+        chat_id = cb.message.chat.id
         log.info("callback %s от роли %s", cb.data, role)
+
+        kind, _, action = (cb.data or "").partition(":")
+        if kind == "refresh":
+            await refresh.on_callback(registry, chat_id, action)
+            return
+        if kind == "edit":
+            await refresh.on_edit_callback(registry, chat_id, action)
+            return
         await onboarding.on_callback(registry, cb, role)
 
     dp_assistant.callback_query()(on_callback)
