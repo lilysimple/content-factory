@@ -24,6 +24,35 @@ log = logging.getLogger("registry")
 # Пауза между сообщениями в один чат. 3.2 с ≈ 18 в минуту, с запасом под 20.
 CHAT_INTERVAL = 3.2
 
+# Потолок Telegram — 4096 знаков. Берём с запасом на служебную разметку.
+MAX_LEN = 3800
+
+
+def _split(text: str) -> list[str]:
+    """Разрезать длинный текст по границам абзацев, потом строк.
+
+    Рвать посреди фразы плохо, а посреди HTML-тега — ещё и ломает разметку,
+    поэтому сначала пробуем пустые строки, затем переносы, и только в
+    безвыходном случае режем по длине.
+    """
+    if len(text) <= MAX_LEN:
+        return [text]
+
+    out: list[str] = []
+    for para in text.split("\n\n"):
+        if out and len(out[-1]) + len(para) + 2 <= MAX_LEN:
+            out[-1] += "\n\n" + para
+            continue
+        while len(para) > MAX_LEN:
+            cut = para.rfind("\n", 0, MAX_LEN)
+            if cut <= 0:
+                cut = MAX_LEN
+            out.append(para[:cut].rstrip())
+            para = para[cut:].lstrip()
+        if para:
+            out.append(para)
+    return out or [text[:MAX_LEN]]
+
 
 @dataclass(frozen=True)
 class Role:
@@ -107,8 +136,23 @@ class Registry:
 
         `topic` это ключ из TOPICS, не message_thread_id. У General нет
         message_thread_id, поэтому параметр не передаётся вовсе.
+
+        Длинный текст режется на части: у Telegram потолок 4096 знаков,
+        и без разрезания сообщение просто не уходит. Кнопки вешаются на
+        последнюю часть, иначе человек нажимает раньше, чем дочитал.
         """
         body = f"<b>{ROLES[role].label}</b>\n{text}" if with_label else text
+        chunks = _split(body)
+
+        last = None
+        for i, chunk in enumerate(chunks):
+            last = await self._send(role, chat_id, chunk, topic,
+                                    kb if i == len(chunks) - 1 else None)
+        return last
+
+    async def _send(self, role: str, chat_id: int, text: str, topic: str,
+                    kb: InlineKeyboardMarkup | None):
+        body = text
         thread = db.topic_id(chat_id, topic)
 
         for attempt in range(3):
