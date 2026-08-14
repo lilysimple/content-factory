@@ -20,7 +20,7 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import cfg
-from orchestrator import agent
+from orchestrator import agent, design
 from orchestrator.strategy import AUTO_PUBLISH, PLATFORMS
 from storage import brand as brand_store
 from storage import db
@@ -380,7 +380,22 @@ async def on_callback(reg, chat_id: int, action: str,
         return
 
     if action == "design":
+        _pending.pop(chat_id, None)
+        _awaiting_fix.discard(chat_id)
+        if draft is None:
+            await reg.say("editor", chat_id, "Этот текст уже неактуален.",
+                          topic=topic)
+            return
+
+        # «В дизайн» это и приёмка текста тоже: Дизайнер работает только с
+        # `ready`, а отправлять в вёрстку неутверждённый текст незачем.
+        tid = draft.theme["id"]
+        with db.tx() as c:
+            c.execute("UPDATE themes SET status = 'ready', "
+                      "updated_at = datetime('now') "
+                      "WHERE id = ? AND chat_id = ?", (tid, chat_id))
         await reg.say("editor", chat_id,
-                      "Дизайнер ещё не подключён, это следующий шаг сборки. "
-                      "Текст лежит готовый, обложку пока делаешь сама.",
+                      f"Принял текст <code>{tid}</code> и передаю Дизайнеру.",
                       topic=topic)
+        await design.run(reg, chat_id, f"свёрстай макет по теме {tid}",
+                         topic="design")

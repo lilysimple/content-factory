@@ -549,8 +549,8 @@ async def on_callback(reg, chat_id: int, action: str,
             "strategy", chat_id,
             f"Утвердил, {len(ids)} тем в плане. Выгрузка лежит в "
             "<code>plans/</code> в папке бренда.\n\n"
-            "Дальше темы уходят Редактору, а он ещё не подключён: "
-            "это следующий шаг сборки.", topic=topic)
+            "Дальше за Редактором: скажи «напиши пост», и он возьмёт "
+            "ближайшую тему.", topic=topic)
         return
 
     if action == "fix":
