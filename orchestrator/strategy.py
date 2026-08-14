@@ -50,6 +50,10 @@ class NoBrand(RuntimeError):
     """Профиля нет — планировать не по чему."""
 
 
+class NoSlots(RuntimeError):
+    """Все дни окна заняты — ставить новые темы некуда."""
+
+
 @dataclass(frozen=True)
 class Plan:
     themes: list[dict[str, Any]]
@@ -97,6 +101,44 @@ def _busy(chat_id: int, window: list[date]) -> dict[str, str]:
     return {r["date"]: r["title"] or "тема без заголовка" for r in rows}
 
 
+def _free(chat_id: int, window: list[date]) -> tuple[dict[str, str], list[date]]:
+    busy = _busy(chat_id, window)
+    return busy, [d for d in window if d.isoformat() not in busy]
+
+
+def _fit(themes: list[dict[str, Any]],
+         free: list[date]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Оставить темы, которые попали в свободные даты.
+
+    Промпт велит брать даты только из списка свободных и запрещает второй
+    пост в занятый день, но промпт это просьба, а не гарантия. Модель уже
+    приносила дату вне окна, дату в прошлом и строку «как-нибудь на неделе»:
+    такая тема встаёт в базу с битым id и ломает и сетку, и расписание.
+
+    Отброшенное не пропадает молча — оно уезжает в «не сошлось».
+    """
+    allowed = {d.isoformat() for d in free}
+    kept: list[dict[str, Any]] = []
+    rejected: list[str] = []
+    taken: set[str] = set()
+
+    for t in themes:
+        day = str(t.get("date") or "").strip()
+        title = t.get("title") or "без заголовка"
+        if day not in allowed:
+            rejected.append(f"«{title}» отброшена: {day or 'дата не указана'} "
+                            "не входит в свободные даты недели")
+            continue
+        if day in taken:
+            rejected.append(f"«{title}» отброшена: на {day} в этом же плане "
+                            "уже стоит другая тема")
+            continue
+        taken.add(day)
+        kept.append(t)
+
+    return kept, rejected
+
+
 def _archive(chat_id: int) -> list[str]:
     rows = db.q("SELECT date, title, goal FROM themes WHERE chat_id = ? "
                 "ORDER BY date DESC LIMIT ?", chat_id, ARCHIVE_LIMIT)
@@ -113,11 +155,9 @@ def _leftovers(chat_id: int) -> list[str]:
     return [f"{r['date']} · {r['title'] or '—'}" for r in rows]
 
 
-def _layers(chat_id: int, window: list[date], ask: str) -> str:
+def _layers(chat_id: int, busy: dict[str, str], free: list[date],
+            ask: str) -> str:
     """Блок «Слои недели». Недоступный слой называется вслух."""
-    busy = _busy(chat_id, window)
-    free = [d for d in window if d.isoformat() not in busy]
-
     lines = ["## Слои недели", ""]
 
     lines.append("### 0. Календарь событий")
@@ -301,22 +341,32 @@ async def build(chat_id: int, ask: str) -> tuple[str, Plan, list[dict[str, Any]]
     """Собрать план недели, положить в базу и выгрузить файлом."""
     brand_name, profile, b = _profile(chat_id)
     window = _window(chat_id)
+    busy, free = _free(chat_id, window)
+
+    # Спрашивать модель некуда, если ставить некуда. Заодно не платим
+    # за вызов, который всё равно нечем закрыть.
+    if not free:
+        raise NoSlots(
+            f"все дни с {window[0].isoformat()} по {window[-1].isoformat()} "
+            "уже заняты темами")
 
     answer = await agent.ask(
         "strategy", chat_id,
         "Собери план на неделю по слоям ниже. Ответь одним JSON-объектом "
         "в формате из твоей секции «Формат выдачи».\n\n"
-        + _layers(chat_id, window, ask),
+        + _layers(chat_id, busy, free, ask),
         brand_name=brand_name, profile=profile, max_tokens=MAX_TOKENS)
 
     data = agent.parse_json(answer, who="стратег")
-    themes = [t for t in (data.get("themes") or []) if t.get("date")]
+    themes, rejected = _fit(data.get("themes") or [], free)
+    if rejected:
+        log.warning("отброшено тем: %s", len(rejected))
     plan = Plan(themes=themes,
                 context=[str(c) for c in (data.get("context") or [])],
-                unmet=[str(u) for u in (data.get("unmet") or [])])
+                unmet=[str(u) for u in (data.get("unmet") or [])] + rejected)
 
     if not plan.themes:
-        raise RuntimeError("Стратег не вернул ни одной темы")
+        raise RuntimeError("Стратег не вернул ни одной темы на свободную дату")
 
     saved = _save(chat_id, plan, b.version())
     week = window[0].isocalendar()
@@ -370,6 +420,11 @@ async def run(reg, chat_id: int, ask: str, topic: str = "strategy") -> None:
     except NoBrand as e:
         await reg.say("strategy", chat_id,
                       f"Планировать не по чему: {e}.", topic=topic)
+        return
+    except NoSlots as e:
+        await reg.say("strategy", chat_id,
+                      f"Ставить некуда: {e}. Освободи день или сдвинь "
+                      "существующие темы, тогда соберу.", topic=topic)
         return
     except agent.BudgetExceeded as e:
         await reg.say("strategy", chat_id, f"Остановился: {e}", topic=topic)
