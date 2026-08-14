@@ -3,6 +3,10 @@ __pycache__/
 *.pyc
 .env
 *.db
+# WAL и shm под «*.db» не попадают: имя кончается на -wal и -shm.
+# Без этих двух строк состояние тенанта уезжает в репозиторий.
+*.db-wal
+*.db-shm
 tmp/
 # Brands живут в соседнем репозитории content-factory-brands
 
