@@ -150,6 +150,31 @@ class Registry:
                                     kb if i == len(chunks) - 1 else None)
         return last
 
+    async def send_file(self, role: str, chat_id: int, blob: bytes, name: str,
+                        *, caption: str = "", topic: str = "general",
+                        kb: InlineKeyboardMarkup | None = None,
+                        as_photo: bool = False):
+        """Отправить файл от лица роли.
+
+        Картинку шлём и превью, и документом: превью видно сразу, документ
+        сохраняет пиксели без пережатия Telegram. Макет, ужатый до
+        неразличимого шрифта, невозможно принять или отклонить.
+        """
+        from aiogram.types import BufferedInputFile
+
+        await self._throttle(chat_id)
+        thread = db.topic_id(chat_id, topic)
+        kw: dict = {"chat_id": chat_id, "caption": caption or None,
+                    "reply_markup": kb}
+        if thread is not None:
+            kw["message_thread_id"] = thread
+
+        file = BufferedInputFile(blob, name)
+        bot = self.bot(role)
+        if as_photo:
+            return await bot.send_photo(photo=file, **kw)
+        return await bot.send_document(document=file, **kw)
+
     async def _send(self, role: str, chat_id: int, text: str, topic: str,
                     kb: InlineKeyboardMarkup | None):
         body = text

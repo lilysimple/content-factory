@@ -18,7 +18,8 @@ from bots import topics
 from bots.registry import ROLES, STUBS, registry
 from bots.router import resolve
 from config import cfg
-from orchestrator import editor, onboarding, refresh, reply, strategy
+from orchestrator import (design, editor, onboarding, refresh, reply,
+                          strategy)
 from storage import db
 
 log = logging.getLogger("handlers")
@@ -128,6 +129,11 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
                                 topic=tkey or "review")
             return
 
+        if design.wants_fix(chat_id):
+            await design.revise(registry, chat_id, raw,
+                                topic=tkey or "design")
+            return
+
         # Материалы после онбординга уточняют существующий профиль,
         # а не создают новый бренд.
         if refresh.wants_refresh(msg):
@@ -154,6 +160,10 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             await editor.run(registry, chat_id, raw, topic=tkey or "review")
             return
 
+        if route.role == "design":
+            await design.run(registry, chat_id, raw, topic=tkey or "design")
+            return
+
         # Всё, что не производственная задача, разбирает Ассистент — и
         # разбирает по-настоящему: с профилем бренда и состоянием из базы.
         if route.role == "assistant":
@@ -166,7 +176,6 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         pending = {
             "research": "внешний ресёрч и метрики",
             "reels": "сценарии",
-            "design": "визуал",
             "publisher": "публикацию",
         }
         what = pending.get(route.role, "эту работу")
@@ -203,6 +212,11 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             tkey = topic_key_of(chat_id, cb.message.message_thread_id)
             await editor.on_callback(registry, chat_id, action,
                                      topic=tkey or "review")
+            return
+        if kind == "art":
+            tkey = topic_key_of(chat_id, cb.message.message_thread_id)
+            await design.on_callback(registry, chat_id, action,
+                                     topic=tkey or "design")
             return
         await onboarding.on_callback(registry, cb, role)
 
