@@ -17,7 +17,7 @@ from aiogram.types import (CallbackQuery, InlineKeyboardButton,
 
 from bots.registry import ROLES
 from config import cfg
-from orchestrator import agent, files, sources, unpack
+from orchestrator import agent, files, materials, sources, unpack
 from orchestrator.personas import PERSONAS, default_persona
 from storage import brand as brand_store
 from storage import db
@@ -125,7 +125,6 @@ async def ask_intro(reg, chat_id: int, persona_id: str) -> None:
 
 # ── O2: распаковка в фоне ─────────────────────────────────────────────
 
-UPLOADS = cfg.brands_path.parent / "tmp" / "uploads"
 MAX_UPLOAD_MB = 20          # потолок скачивания у Bot API
 
 
@@ -137,8 +136,7 @@ async def _save_upload(reg, chat_id: int, doc) -> files.Extracted | None:
                       "такие ботам. Пришли частями или выжимкой.")
         return None
 
-    folder = UPLOADS / str(chat_id)
-    folder.mkdir(parents=True, exist_ok=True)
+    folder = materials.stage_dir(chat_id)
     name = doc.file_name or f"{doc.file_unique_id}.bin"
 
     buf = await reg.bot("assistant").download(doc.file_id)
@@ -152,7 +150,7 @@ async def _save_upload(reg, chat_id: int, doc) -> files.Extracted | None:
 
 def _stored_uploads(chat_id: int, names: list[str]) -> list[files.Extracted]:
     """Перечитать сохранённые файлы. Состояние переживает перезапуск."""
-    folder = UPLOADS / str(chat_id)
+    folder = materials.stage_dir(chat_id)
     out = []
     for name in names:
         path = folder / name
@@ -278,6 +276,9 @@ async def _finish(reg, chat_id: int) -> None:
                 "\n".join(f"- **{q}** {a}" for q, a in ans)
 
     version = b.write("core", core, reason="подтверждено ЯДРО на онбординге")
+    moved, samples = materials.adopt(chat_id, b)
+    if moved or samples:
+        b.write("core", core, reason="исходники перенесены в бренд")
     _save(chat_id, st, "O9")
     # Без этого тенант навсегда остаётся в онбординге: каждое следующее
     # сообщение уходит в анкету, а маршрутизация по ролям не включается.
@@ -285,7 +286,8 @@ async def _finish(reg, chat_id: int) -> None:
 
     await reg.say(
         "assistant", chat_id,
-        f"Записал. Профиль <code>{b.slug}</code>, версия <code>{version}</code>.\n\n"
+        f"Записал. Профиль <code>{b.slug}</code>, версия <code>{version}</code>.\n"
+        f"{materials.summary(moved, samples)}\n\n"
         "Дальше идут цифры, площадки и оформление — они ещё не подключены, "
         "это следующий коммит.\n\n"
         "Команды, которые уже работают: «покажи ядро», «выгрузи всё».")

@@ -14,7 +14,7 @@ import logging
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import cfg
-from orchestrator import agent, sources, unpack
+from orchestrator import agent, materials, sources, unpack
 from storage import brand as brand_store
 from storage import db
 
@@ -216,10 +216,12 @@ async def on_callback(reg, chat_id: int, action: str) -> None:
     name = draft.brand_name() or b.name()
     core = draft.to_core_md(name, owner=b.owner())
     version = b.write("core", core, reason="профиль уточнён по новым материалам")
+    moved, samples = materials.adopt(chat_id, b)
     db.set_tenant(chat_id, brand_name=name)
 
     await reg.say(
         "assistant", chat_id,
-        f"Профиль обновлён. Версия <code>{version}</code>.\n\n"
+        f"Профиль обновлён. Версия <code>{version}</code>.\n"
+        f"{materials.summary(moved, samples)}\n\n"
         "Прошлая версия никуда не делась — история хранится, откатить можно.\n"
         "Посмотреть целиком: «покажи ядро».")

@@ -544,3 +544,26 @@ Traceback (most recent call last):
   File "/Users/userr/code/content-factory/.venv/lib/python3.13/site-packages/aiogram/client/session/base.py", line 121, in check_response
     raise TelegramBadRequest(method=method, message=description)
 aiogram.exceptions.TelegramBadRequest: Telegram server says - Bad Request: message is too long
+22:35:21 WARNING main         нет токенов для ролей: design, publisher
+22:35:21 INFO    registry     🤝 Ассистент → @lily_cf_assistant_bot
+22:35:21 INFO    registry     🔍 Ресёрчер → @lily_cf_research_bot
+22:35:22 INFO    registry     🎯 Стратег → @lily_cf_strategy_bot
+22:35:22 INFO    registry     ✍️ Редактор → @lily_cf_editor_bot
+22:35:22 INFO    registry     🎬 Редактор Reels → @lily_cf_reels_bot
+22:35:22 WARNING registry     нет токена для роли design, пропускаю
+22:35:22 WARNING registry     нет токена для роли publisher, пропускаю
+22:35:22 INFO    main         поехали: 1 ассистент + 4 рабочих
+22:35:22 INFO    aiogram.dispatcher Start polling
+22:35:22 INFO    aiogram.dispatcher Start polling
+22:35:23 INFO    aiogram.dispatcher Run polling for bot @lily_cf_assistant_bot id=8934702483 - 'assistant'
+22:35:23 INFO    aiogram.dispatcher Run polling for bot @lily_cf_research_bot id=8949908437 - 'research'
+22:35:23 INFO    aiogram.dispatcher Run polling for bot @lily_cf_editor_bot id=8350571752 - 'editor'
+22:35:23 INFO    aiogram.dispatcher Run polling for bot @lily_cf_reels_bot id=8913255045 - 'reels'
+22:35:23 INFO    aiogram.dispatcher Run polling for bot @lily_cf_strategy_bot id=8821337816 - 'strategy'
+22:40:07 INFO    onboarding   файл ЯДРО. Распаковка бренда Лили.md → ЯДРО. Распаковка бренда Лили.md: text, 14022 знаков
+22:42:07 INFO    httpx        HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+22:42:07 INFO    agent        research: вход 13530 (из кеша 0, 0%), выход 7590
+22:42:10 INFO    aiogram.event Update id=556520958 is handled. Duration 123713 ms by bot id=8934702483
+22:44:55 INFO    handlers     callback refresh:ok от роли assistant
+22:44:55 INFO    aiogram.event Update id=556520959 is handled. Duration 369 ms by bot id=8934702483
+22:45:22 INFO    aiogram.event Update id=556520960 is handled. Duration 182 ms by bot id=8934702483
