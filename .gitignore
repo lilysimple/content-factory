@@ -7,3 +7,6 @@ tmp/
 # Brands живут в соседнем репозитории content-factory-brands
 
 .DS_Store
+
+# лог работы бота, не для репозитория
+bot.log
