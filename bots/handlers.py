@@ -18,7 +18,7 @@ from bots import topics
 from bots.registry import ROLES, STUBS, registry
 from bots.router import resolve
 from config import cfg
-from orchestrator import onboarding, refresh, reply
+from orchestrator import onboarding, refresh, reply, strategy
 from storage import db
 
 log = logging.getLogger("handlers")
@@ -113,6 +113,15 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             return
 
         raw = msg.text or msg.caption or ""
+        tkey = topic_key_of(chat_id, msg.message_thread_id)
+
+        # Человек нажал «Правки» под планом и сейчас пишет, что поправить.
+        # Это ответ Стратегу, а не новая задача: маршрутизировать заново
+        # значит потерять правку в общем разборе.
+        if strategy.wants_fix(chat_id):
+            await strategy.revise(registry, chat_id, raw,
+                                  topic=tkey or "general")
+            return
 
         # Материалы после онбординга уточняют существующий профиль,
         # а не создают новый бренд.
@@ -126,11 +135,14 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             await refresh.edit(registry, chat_id, raw)
             return
 
-        tkey = topic_key_of(chat_id, msg.message_thread_id)
         route = resolve(raw, tkey, registry.me)
 
         if route.role is None:
             await onboarding.ask_which_role(registry, chat_id)
+            return
+
+        if route.role == "strategy":
+            await strategy.run(registry, chat_id, raw, topic=tkey or "strategy")
             return
 
         # Всё, что не производственная задача, разбирает Ассистент — и
@@ -144,7 +156,6 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         # будет ждать результат, которого не будет.
         pending = {
             "research": "внешний ресёрч и метрики",
-            "strategy": "план недели",
             "editor": "тексты постов",
             "reels": "сценарии",
             "design": "визуал",
@@ -174,6 +185,11 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             return
         if kind == "edit":
             await refresh.on_edit_callback(registry, chat_id, action)
+            return
+        if kind == "plan":
+            tkey = topic_key_of(chat_id, cb.message.message_thread_id)
+            await strategy.on_callback(registry, chat_id, action,
+                                       topic=tkey or "strategy")
             return
         await onboarding.on_callback(registry, cb, role)
 

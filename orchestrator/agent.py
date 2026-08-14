@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 from datetime import date
 from functools import lru_cache
 from typing import Any
@@ -129,6 +131,31 @@ def _log_usage(role: str, resp: Any) -> None:
     share = f"{read * 100 // total}%" if total else "—"
     log.info("%s: вход %s (из кеша %s, %s), выход %s",
              role, total, read, share, getattr(u, "output_tokens", 0))
+
+
+JSON_BLOCK = re.compile(r"\{.*\}", re.S)
+
+
+def parse_json(raw: str, *, who: str = "модель") -> dict[str, Any]:
+    """Разобрать JSON-ответ роли. Просили чистый, но подстраховаться дешевле.
+
+    Роли, у которых выход это структура, а не текст, отвечают JSON. Модель
+    иногда оборачивает его в ``` или приписывает строку до. Пустой словарь
+    означает «разобрать не удалось» — вызывающий обязан это заметить.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.S)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        if m := JSON_BLOCK.search(text):
+            try:
+                return json.loads(m.group())
+            except json.JSONDecodeError:
+                pass
+    log.error("%s вернула не JSON: %s", who, raw[:200])
+    return {}
 
 
 _client: AsyncAnthropic | None = None

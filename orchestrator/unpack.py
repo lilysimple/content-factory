@@ -6,7 +6,6 @@
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -19,6 +18,20 @@ log = logging.getLogger("unpack")
 MAX_POSTS = 40
 MAX_POST_CHARS = 1200
 LOW_CONFIDENCE = 0.6
+NAME_CHARS = 40
+
+
+def _head(who: str) -> str:
+    """Первое звено описания как имя: «Лили: консультант по AI, мама» → «Лили».
+
+    Описание из распаковки это фраза, а не имя. Резать её по счётчику
+    знаков нельзя: получается «Лили: консультант по AI-трансформации би»,
+    и этот обрубок навсегда остаётся в slug.
+    """
+    head = re.split(r"[:,;.(]", who.strip(), maxsplit=1)[0].strip()
+    if not head or len(head) > NAME_CHARS:
+        head = (head or who.strip())[:NAME_CHARS].rsplit(" ", 1)[0]
+    return head.strip(" -—")
 
 
 @dataclass
@@ -36,9 +49,10 @@ class Draft:
         Заголовок канала лучше описания из распаковки: «Лили про AI» это
         имя, а «Консультант по AI в маркетинге» это профессия.
         """
+        ident = self.data.get("identity", {}) or {}
         return (self.suggested_name
-                or (self.data.get("identity", {}) or {}).get("brand")
-                or (self.data.get("identity", {}) or {}).get("who", "")[:40]
+                or ident.get("brand")
+                or _head(ident.get("who", ""))
                 or "Новый бренд")
 
     @property
@@ -210,26 +224,6 @@ def _document(srcs: list[sources.Source], self_text: str,
     return "\n\n---\n\n".join(blocks)
 
 
-JSON_BLOCK = re.compile(r"\{.*\}", re.S)
-
-
-def _parse(raw: str) -> dict[str, Any]:
-    """Модель просили отдать чистый JSON, но подстраховаться дешевле."""
-    text = raw.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.S)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        if m := JSON_BLOCK.search(text):
-            try:
-                return json.loads(m.group())
-            except json.JSONDecodeError:
-                pass
-    log.error("распаковка вернула не JSON: %s", raw[:200])
-    return {}
-
-
 async def run(chat_id: int, urls: list[str], self_text: str,
               uploads: list | None = None, current: str = "") -> Draft:
     """Прочитать источники и собрать черновик профиля."""
@@ -259,5 +253,5 @@ async def run(chat_id: int, urls: list[str], self_text: str,
         "\n\n" + document,
         max_tokens=12000)
 
-    draft.data = _parse(answer)
+    draft.data = agent.parse_json(answer, who="распаковка")
     return draft
