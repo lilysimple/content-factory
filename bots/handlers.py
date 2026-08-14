@@ -100,26 +100,41 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             return
 
         tenant = db.ensure_tenant(chat_id, cfg.default_tz)
+        text = (msg.text or msg.caption or "").strip().lower()
+
+        # Работа с профилем доступна всегда, а не только внутри анкеты.
+        if text in {"покажи ядро", "выгрузи всё", "выгрузи все"}:
+            await onboarding.send_files(registry, chat_id,
+                                        zip_it="выгрузи" in text)
+            return
+
         if tenant["status"] in {"new", "onboarding"}:
             await onboarding.handle(registry, msg)
             return
 
         tkey = topic_key_of(chat_id, msg.message_thread_id)
-        route = resolve(msg.text or "", tkey, registry.me)
+        route = resolve(msg.text or msg.caption or "", tkey, registry.me)
 
         if route.role is None:
             await onboarding.ask_which_role(registry, chat_id)
             return
-        if route.role in STUBS:
-            await registry.say(
-                route.role, chat_id,
-                "Эта роль пока не подключена. Она появится следующей версией.",
-                topic=tkey or "general")
-            return
 
+        # Роли ещё не подключены к работе. Врать «принял» нельзя: человек
+        # будет ждать результат, которого не будет.
+        pending = {
+            "research": "внешний ресёрч и метрики",
+            "strategy": "план недели",
+            "editor": "тексты постов",
+            "reels": "сценарии",
+            "design": "визуал",
+            "publisher": "публикацию",
+        }
+        what = pending.get(route.role, "эту работу")
         await registry.say(
             route.role, chat_id,
-            f"Принял. (маршрут: {route.reason})",
+            f"Понял, это ко мне — {what}. Но я ещё не подключён к работе, "
+            "это следующий шаг сборки.\n\nПока работает: «покажи ядро», "
+            "«выгрузи всё».",
             topic=tkey or "general")
 
     # ── нажатие кнопки: слушают все семеро ────────────────────────────

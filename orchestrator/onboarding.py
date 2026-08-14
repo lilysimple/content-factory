@@ -279,6 +279,9 @@ async def _finish(reg, chat_id: int) -> None:
 
     version = b.write("core", core, reason="подтверждено ЯДРО на онбординге")
     _save(chat_id, st, "O9")
+    # Без этого тенант навсегда остаётся в онбординге: каждое следующее
+    # сообщение уходит в анкету, а маршрутизация по ролям не включается.
+    db.set_tenant(chat_id, status="ready")
 
     await reg.say(
         "assistant", chat_id,
@@ -299,10 +302,6 @@ async def handle(reg, msg: Message) -> None:
 
     if text.lower() in {"команда на месте", "все на месте"}:
         await ask_persona(reg, chat_id)
-        return
-
-    if text.lower() in {"покажи ядро", "выгрузи всё", "выгрузи все"}:
-        await _send_files(reg, chat_id, zip_it="выгрузи" in text.lower())
         return
 
     if st["step"] == "O0":
@@ -387,7 +386,7 @@ async def _record_disputed(reg, chat_id: int, idx: int, answer: str) -> None:
     await _ask_disputed(reg, chat_id, idx + 1)
 
 
-async def _send_files(reg, chat_id: int, *, zip_it: bool) -> None:
+async def send_files(reg, chat_id: int, *, zip_it: bool) -> None:
     from aiogram.types import BufferedInputFile
 
     row = db.one("SELECT brand_slug FROM tenants WHERE chat_id = ?", chat_id)
