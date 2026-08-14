@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>space.lily.content-factory</string>
+
+  <!-- Абсолютный путь: launchd не знает про PATH и про venv. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__ROOT__/.venv/bin/python</string>
+    <string>main.py</string>
+  </array>
+
+  <!-- .env и factory.db читаются относительно рабочей папки. -->
+  <key>WorkingDirectory</key>
+  <string>__ROOT__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Упал или убит — поднять снова. Один инстанс на Label гарантирует
+       сам launchd, поэтому Conflict от второго поллинга здесь не грозит. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Пауза перед перезапуском. Без неё сломанный конфиг крутит цикл
+       рестартов и забивает лог за секунды. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>__ROOT__/bot.log</string>
+  <key>StandardErrorPath</key>
+  <string>__ROOT__/bot.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
