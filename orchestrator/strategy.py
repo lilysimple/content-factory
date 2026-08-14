@@ -45,6 +45,22 @@ BACKUP_FUNNEL = {"warm": 60, "prod": 20, "pers": 20}
 
 WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 
+# Площадки и допустимые на них форматы. Планируются все три, публикуется
+# автоматом только Telegram: Instagram требует Business-аккаунт с ревью
+# приложения, YouTube — OAuth владельца, и то и другое это v2.
+#
+# Норм площадок в профиле пока нет: `platforms.md` собирается на шагах
+# онбординга O13–O15. Поэтому набор здесь технический, а раскладка по нему
+# это предложение Стратега, которое человек утверждает.
+PLATFORMS: dict[str, tuple[str, ...]] = {
+    "telegram":  ("пост", "анонс", "раздача", "опрос"),
+    "instagram": ("карусель", "reels", "сторис"),
+    "youtube":   ("видео", "shorts"),
+}
+AUTO_PUBLISH = ("telegram",)
+
+Slot = tuple[str, str]                      # (дата, площадка)
+
 
 class NoBrand(RuntimeError):
     """Профиля нет — планировать не по чему."""
@@ -93,47 +109,70 @@ def _window(chat_id: int) -> list[date]:
     return [start + timedelta(days=i) for i in range(DAYS)]
 
 
-def _busy(chat_id: int, window: list[date]) -> dict[str, str]:
-    """Занятые слоты: на эти даты тема уже стоит, второй пост не ставим."""
+def _busy(chat_id: int, window: list[date]) -> dict[Slot, str]:
+    """Занятые слоты.
+
+    Слот это пара «дата плюс площадка», а не день целиком: в один день
+    выходят и пост в Telegram, и карусель в Instagram. Второй пост в тот
+    же день на ТУ ЖЕ площадку не ставится.
+    """
     lo, hi = window[0].isoformat(), window[-1].isoformat()
-    rows = db.q("SELECT date, title FROM themes WHERE chat_id = ? "
+    rows = db.q("SELECT date, plat, title FROM themes WHERE chat_id = ? "
                 "AND date BETWEEN ? AND ? AND status != 'skip'", chat_id, lo, hi)
-    return {r["date"]: r["title"] or "тема без заголовка" for r in rows}
+    return {(r["date"], r["plat"] or "telegram"):
+            r["title"] or "тема без заголовка" for r in rows}
 
 
-def _free(chat_id: int, window: list[date]) -> tuple[dict[str, str], list[date]]:
+def _free(chat_id: int, window: list[date]) -> tuple[dict[Slot, str], list[Slot]]:
     busy = _busy(chat_id, window)
-    return busy, [d for d in window if d.isoformat() not in busy]
+    free = [(d.isoformat(), p) for d in window for p in PLATFORMS
+            if (d.isoformat(), p) not in busy]
+    return busy, free
 
 
 def _fit(themes: list[dict[str, Any]],
-         free: list[date]) -> tuple[list[dict[str, Any]], list[str]]:
-    """Оставить темы, которые попали в свободные даты.
+         free: list[Slot]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Оставить темы, попавшие в свободные слоты.
 
-    Промпт велит брать даты только из списка свободных и запрещает второй
-    пост в занятый день, но промпт это просьба, а не гарантия. Модель уже
-    приносила дату вне окна, дату в прошлом и строку «как-нибудь на неделе»:
-    такая тема встаёт в базу с битым id и ломает и сетку, и расписание.
+    Промпт велит брать слоты только из списка свободных, но промпт это
+    просьба, а не гарантия. Модель уже приносила дату вне окна, дату в
+    прошлом и строку «как-нибудь на неделе»: такая тема встаёт в базу с
+    битым id и ломает и сетку, и расписание.
 
     Отброшенное не пропадает молча — оно уезжает в «не сошлось».
     """
-    allowed = {d.isoformat() for d in free}
+    allowed = set(free)
     kept: list[dict[str, Any]] = []
     rejected: list[str] = []
-    taken: set[str] = set()
+    taken: set[Slot] = set()
 
     for t in themes:
         day = str(t.get("date") or "").strip()
+        plat = str(t.get("plat") or "").strip().lower()
         title = t.get("title") or "без заголовка"
-        if day not in allowed:
+
+        if plat not in PLATFORMS:
+            rejected.append(f"«{title}» отброшена: площадка "
+                            f"{plat or 'не указана'} не подключена")
+            continue
+        if (day, plat) not in allowed:
             rejected.append(f"«{title}» отброшена: {day or 'дата не указана'} "
-                            "не входит в свободные даты недели")
+                            f"на {plat} не входит в свободные слоты недели")
             continue
-        if day in taken:
-            rejected.append(f"«{title}» отброшена: на {day} в этом же плане "
-                            "уже стоит другая тема")
+        if (day, plat) in taken:
+            rejected.append(f"«{title}» отброшена: на {day} в {plat} "
+                            "в этом же плане уже стоит другая тема")
             continue
-        taken.add(day)
+
+        # Формат вне набора площадки не повод выбрасывать тему: смысл в
+        # ней есть, а формат человек поправит кнопкой «Правки».
+        fmt = str(t.get("format") or "").strip().lower()
+        if fmt and fmt not in PLATFORMS[plat]:
+            rejected.append(f"«{title}»: формат «{fmt}» не из набора "
+                            f"{plat}, поставил как есть — проверь")
+
+        t["plat"] = plat
+        taken.add((day, plat))
         kept.append(t)
 
     return kept, rejected
@@ -155,7 +194,7 @@ def _leftovers(chat_id: int) -> list[str]:
     return [f"{r['date']} · {r['title'] or '—'}" for r in rows]
 
 
-def _layers(chat_id: int, busy: dict[str, str], free: list[date],
+def _layers(chat_id: int, busy: dict[Slot, str], free: list[Slot],
             ask: str) -> str:
     """Блок «Слои недели». Недоступный слой называется вслух."""
     lines = ["## Слои недели", ""]
@@ -164,14 +203,23 @@ def _layers(chat_id: int, busy: dict[str, str], free: list[date],
     lines.append("Календаря в v1 нет: события вносятся темой. "
                  "Занятые слоты ниже — это и есть учтённые события.")
     if busy:
-        lines += [f"- {d} занято: {t}" for d, t in sorted(busy.items())]
+        lines += [f"- {d} · {p} занято: {t}"
+                  for (d, p), t in sorted(busy.items())]
     else:
         lines.append("- занятых слотов нет")
     lines.append("")
 
-    lines.append("### Свободные даты")
-    lines += [f"- {d.isoformat()} ({WEEKDAYS[d.weekday()]})" for d in free] \
-        or ["- свободных дат нет"]
+    lines.append("### Свободные слоты")
+    lines.append("Слот это дата плюс площадка. Бери `date` и `plat` только "
+                 "отсюда, пару целиком.")
+    by_day: dict[str, list[str]] = {}
+    for day, plat in free:
+        by_day.setdefault(day, []).append(plat)
+    for day in sorted(by_day):
+        wd = WEEKDAYS[date.fromisoformat(day).weekday()]
+        lines.append(f"- {day} ({wd}): " + ", ".join(sorted(by_day[day])))
+    if not by_day:
+        lines.append("- свободных слотов нет")
     lines.append("")
 
     lines.append("### 1. Дайджест недели")
@@ -206,9 +254,15 @@ def _layers(chat_id: int, busy: dict[str, str], free: list[date],
                  "утверждённых батчей меньше одного.")
     lines.append("")
 
-    lines.append("### Площадки")
-    lines.append("В v1 подключён только Telegram. Все темы ставь "
-                 "с `plat` равным `telegram`.")
+    lines.append("### Площадки и форматы")
+    lines.append("Норм площадок в профиле нет: `platforms.md` ещё не собран. "
+                 "Раскладка по площадкам это твоё предложение, человек его "
+                 "утверждает. Скажи об этом строкой в «Контексте».")
+    for plat, formats in PLATFORMS.items():
+        lines.append(f"- `{plat}`: {', '.join(formats)}")
+    lines.append("Публикуется автоматом только Telegram. Слоты Instagram и "
+                 "YouTube человек выкладывает руками, поэтому не ставь их "
+                 "больше, чем можно реально снять и смонтировать за неделю.")
     lines.append("")
 
     lines.append("### Запрос человека")
@@ -302,33 +356,63 @@ def _markdown(brand_name: str, plan: Plan, themes: list[dict[str, Any]],
     return "\n".join(lines)
 
 
+def by_platform(themes: list[dict[str, Any]]) -> dict[str, int]:
+    """Сколько тем на каждой площадке. Порядок как в PLATFORMS."""
+    counts = {p: 0 for p in PLATFORMS}
+    for t in themes:
+        plat = t.get("plat", "")
+        counts[plat] = counts.get(plat, 0) + 1
+    return {p: n for p, n in counts.items() if n}
+
+
 def card(brand_name: str, plan: Plan, themes: list[dict[str, Any]]) -> str:
-    """Карточка батча для чата. Режется по абзацам в registry.say."""
+    """Карточка батча для чата. Режется по абзацам в registry.say.
+
+    Темы сгруппированы по дню: в один день теперь попадает несколько
+    площадок, и списком подряд неделя перестаёт читаться расписанием.
+    """
     out = ["🎯 <b>План недели</b>", ""]
     out += [c for c in plan.context]
     out.append("")
 
+    days: dict[str, list[dict[str, Any]]] = {}
     for t in themes:
-        day = t.get("date", "")
+        days.setdefault(t.get("date", ""), []).append(t)
+
+    for day in sorted(days):
         try:
             wd = WEEKDAYS[date.fromisoformat(day).weekday()]
         except ValueError:
             wd = "—"
-        goal = GOALS.get(t.get("goal", ""), t.get("goal", "—"))
-        out.append(f"<b>{day} {wd}</b> · {t.get('rubric') or '—'} · {goal}")
-        out.append(f"{t.get('title') or '—'}")
-        if t.get("hook"):
-            out.append(f"<i>{t['hook']}</i>")
-        if t.get("why"):
-            out.append(f"зачем: {t['why']}")
-        for v in t.get("variants") or []:
-            out.append(f"  ↳ {v.get('angle', '—')} · {v.get('charge', '—')}: "
-                       f"{v.get('hook', '')}")
-        out.append("")
+        out.append(f"<b>━━ {day} {wd}</b>")
 
+        for t in sorted(days[day], key=lambda x: x.get("plat", "")):
+            goal = GOALS.get(t.get("goal", ""), t.get("goal", "—"))
+            hand = "" if t.get("plat") in AUTO_PUBLISH else " ✋"
+            out.append(f"<b>{t.get('plat') or '—'}</b> · "
+                       f"{t.get('format') or '—'} · "
+                       f"{t.get('rubric') or '—'} · {goal}{hand}")
+            out.append(f"{t.get('title') or '—'}")
+            if t.get("hook"):
+                out.append(f"<i>{t['hook']}</i>")
+            if t.get("why"):
+                out.append(f"зачем: {t['why']}")
+            for v in t.get("variants") or []:
+                out.append(f"  ↳ {v.get('angle', '—')} · {v.get('charge', '—')}: "
+                           f"{v.get('hook', '')}")
+            out.append("")
+
+    if plats := by_platform(themes):
+        out.append("Площадки: " + ", ".join(f"{p} {n}" for p, n in plats.items()))
     if bal := plan.balance():
         out.append("Баланс: " + ", ".join(
             f"{GOALS.get(g, g)} {p}%" for g, p in bal.items()))
+
+    manual = sum(n for p, n in by_platform(themes).items()
+                 if p not in AUTO_PUBLISH)
+    if manual:
+        out.append(f"✋ {manual} слотов вне Telegram — их выкладываешь руками, "
+                   "Публикатор туда не ходит.")
     if plan.unmet:
         out.append("")
         out.append("⚠️ Не сошлось: " + "; ".join(plan.unmet))
@@ -347,8 +431,8 @@ async def build(chat_id: int, ask: str) -> tuple[str, Plan, list[dict[str, Any]]
     # за вызов, который всё равно нечем закрыть.
     if not free:
         raise NoSlots(
-            f"все дни с {window[0].isoformat()} по {window[-1].isoformat()} "
-            "уже заняты темами")
+            f"с {window[0].isoformat()} по {window[-1].isoformat()} заняты "
+            f"все слоты на всех площадках ({', '.join(PLATFORMS)})")
 
     answer = await agent.ask(
         "strategy", chat_id,
@@ -366,7 +450,7 @@ async def build(chat_id: int, ask: str) -> tuple[str, Plan, list[dict[str, Any]]
                 unmet=[str(u) for u in (data.get("unmet") or [])] + rejected)
 
     if not plan.themes:
-        raise RuntimeError("Стратег не вернул ни одной темы на свободную дату")
+        raise RuntimeError("Стратег не вернул ни одной темы на свободный слот")
 
     saved = _save(chat_id, plan, b.version())
     week = window[0].isocalendar()
