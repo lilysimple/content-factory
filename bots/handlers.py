@@ -18,7 +18,7 @@ from bots import topics
 from bots.registry import ROLES, STUBS, registry
 from bots.router import resolve
 from config import cfg
-from orchestrator import onboarding, refresh, reply, strategy
+from orchestrator import editor, onboarding, refresh, reply, strategy
 from storage import db
 
 log = logging.getLogger("handlers")
@@ -123,6 +123,11 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
                                   topic=tkey or "general")
             return
 
+        if editor.wants_fix(chat_id):
+            await editor.revise(registry, chat_id, raw,
+                                topic=tkey or "review")
+            return
+
         # Материалы после онбординга уточняют существующий профиль,
         # а не создают новый бренд.
         if refresh.wants_refresh(msg):
@@ -145,6 +150,10 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             await strategy.run(registry, chat_id, raw, topic=tkey or "strategy")
             return
 
+        if route.role == "editor":
+            await editor.run(registry, chat_id, raw, topic=tkey or "review")
+            return
+
         # Всё, что не производственная задача, разбирает Ассистент — и
         # разбирает по-настоящему: с профилем бренда и состоянием из базы.
         if route.role == "assistant":
@@ -156,7 +165,6 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         # будет ждать результат, которого не будет.
         pending = {
             "research": "внешний ресёрч и метрики",
-            "editor": "тексты постов",
             "reels": "сценарии",
             "design": "визуал",
             "publisher": "публикацию",
@@ -190,6 +198,11 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             tkey = topic_key_of(chat_id, cb.message.message_thread_id)
             await strategy.on_callback(registry, chat_id, action,
                                        topic=tkey or "strategy")
+            return
+        if kind == "post":
+            tkey = topic_key_of(chat_id, cb.message.message_thread_id)
+            await editor.on_callback(registry, chat_id, action,
+                                     topic=tkey or "review")
             return
         await onboarding.on_callback(registry, cb, role)
 
