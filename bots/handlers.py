@@ -18,7 +18,7 @@ from bots import topics
 from bots.registry import ROLES, STUBS, registry
 from bots.router import resolve
 from config import cfg
-from orchestrator import onboarding
+from orchestrator import onboarding, reply
 from storage import db
 
 log = logging.getLogger("handlers")
@@ -117,6 +117,13 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
 
         if route.role is None:
             await onboarding.ask_which_role(registry, chat_id)
+            return
+
+        # Всё, что не производственная задача, разбирает Ассистент — и
+        # разбирает по-настоящему: с профилем бренда и состоянием из базы.
+        if route.role == "assistant":
+            await reply.answer(registry, chat_id, msg.text or msg.caption or "",
+                               topic=tkey or "general")
             return
 
         # Роли ещё не подключены к работе. Врать «принял» нельзя: человек

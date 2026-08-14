@@ -417,3 +417,19 @@ anthropic.BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type':
 22:11:52 INFO    aiogram.dispatcher Run polling for bot @lily_cf_strategy_bot id=8821337816 - 'strategy'
 22:14:19 INFO    aiogram.event Update id=556520955 is handled. Duration 580 ms by bot id=8934702483
 22:14:44 INFO    aiogram.event Update id=556520956 is handled. Duration 167 ms by bot id=8934702483
+22:19:15 WARNING main         нет токенов для ролей: design, publisher
+22:19:16 INFO    registry     🤝 Ассистент → @lily_cf_assistant_bot
+22:19:16 INFO    registry     🔍 Ресёрчер → @lily_cf_research_bot
+22:19:16 INFO    registry     🎯 Стратег → @lily_cf_strategy_bot
+22:19:17 INFO    registry     ✍️ Редактор → @lily_cf_editor_bot
+22:19:17 INFO    registry     🎬 Редактор Reels → @lily_cf_reels_bot
+22:19:17 WARNING registry     нет токена для роли design, пропускаю
+22:19:17 WARNING registry     нет токена для роли publisher, пропускаю
+22:19:17 INFO    main         поехали: 1 ассистент + 4 рабочих
+22:19:17 INFO    aiogram.dispatcher Start polling
+22:19:17 INFO    aiogram.dispatcher Start polling
+22:19:17 INFO    aiogram.dispatcher Run polling for bot @lily_cf_strategy_bot id=8821337816 - 'strategy'
+22:19:17 INFO    aiogram.dispatcher Run polling for bot @lily_cf_assistant_bot id=8934702483 - 'assistant'
+22:19:17 INFO    aiogram.dispatcher Run polling for bot @lily_cf_reels_bot id=8913255045 - 'reels'
+22:19:17 INFO    aiogram.dispatcher Run polling for bot @lily_cf_editor_bot id=8350571752 - 'editor'
+22:19:17 INFO    aiogram.dispatcher Run polling for bot @lily_cf_research_bot id=8949908437 - 'research'
