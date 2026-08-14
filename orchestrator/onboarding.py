@@ -17,7 +17,7 @@ from aiogram.types import (CallbackQuery, InlineKeyboardButton,
 
 from bots.registry import ROLES
 from config import cfg
-from orchestrator import agent, sources, unpack
+from orchestrator import agent, files, sources, unpack
 from orchestrator.personas import PERSONAS, default_persona
 from storage import brand as brand_store
 from storage import db
@@ -125,10 +125,48 @@ async def ask_intro(reg, chat_id: int, persona_id: str) -> None:
 
 # ── O2: распаковка в фоне ─────────────────────────────────────────────
 
-async def _unpack_task(reg, chat_id: int, urls: list[str], text: str) -> None:
+UPLOADS = cfg.brands_path.parent / "tmp" / "uploads"
+MAX_UPLOAD_MB = 20          # потолок скачивания у Bot API
+
+
+async def _save_upload(reg, chat_id: int, doc) -> files.Extracted | None:
+    """Скачать документ и вытащить из него текст."""
+    if doc.file_size and doc.file_size > MAX_UPLOAD_MB * 1024 * 1024:
+        await reg.say("research", chat_id,
+                      f"Файл больше {MAX_UPLOAD_MB} МБ — Telegram не отдаёт "
+                      "такие ботам. Пришли частями или выжимкой.")
+        return None
+
+    folder = UPLOADS / str(chat_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    name = doc.file_name or f"{doc.file_unique_id}.bin"
+
+    buf = await reg.bot("assistant").download(doc.file_id)
+    blob = buf.read()
+    (folder / name).write_bytes(blob)
+
+    item = files.extract(blob, name)
+    log.info("файл %s → %s", name, item.summary())
+    return item
+
+
+def _stored_uploads(chat_id: int, names: list[str]) -> list[files.Extracted]:
+    """Перечитать сохранённые файлы. Состояние переживает перезапуск."""
+    folder = UPLOADS / str(chat_id)
+    out = []
+    for name in names:
+        path = folder / name
+        if path.exists():
+            out.append(files.extract(path.read_bytes(), name))
+    return out
+
+
+async def _unpack_task(reg, chat_id: int, urls: list[str], text: str,
+                       upload_names: list[str] | None = None) -> None:
     """Читает источники и собирает черновик. Идёт параллельно с O3."""
+    uploads = _stored_uploads(chat_id, upload_names or [])
     try:
-        draft = await unpack.run(chat_id, urls, text)
+        draft = await unpack.run(chat_id, urls, text, uploads)
     except agent.BudgetExceeded as e:
         await reg.say("research", chat_id, f"Остановился: {e}")
         return
@@ -284,23 +322,58 @@ async def handle(reg, msg: Message) -> None:
     })
     _save(chat_id, st)
 
-    if st["step"] == "O1":
-        urls = sources.extract_urls(text)
-        if not urls:
-            await reg.say("assistant", chat_id,
-                          "Нужна хотя бы одна ссылка: канал, сайт или пост.")
-            return
-        await reg.say("research", chat_id,
-                      f"Взял {len(urls)}. Читаю, вернусь через пару минут.")
-        asyncio.create_task(_unpack_task(reg, chat_id, urls, text))
-        _save(chat_id, st, "O3")
-        await ask_goal(reg, chat_id)
-        return
-
     if st["step"] == "O8q":                      # свободный ответ на спорное
         idx = st["answers"].get("disputed_idx", 0)
         await _record_disputed(reg, chat_id, idx, text)
         return
+
+    # Ссылки и файлы запускают распаковку на любом шаге, пока профиль не
+    # собран. Первая попытка могла упасть — сеть, лимит, отказ модели — и
+    # человек просто присылает материалы ещё раз. Это самый естественный
+    # повтор, и привязывать его к одному шагу значит терять сообщение.
+    if not st["answers"].get("draft"):
+        names: list[str] = st["answers"].get("uploads", [])
+
+        if msg.document:
+            item = await _save_upload(reg, msg.chat.id, msg.document)
+            if item is None:
+                return
+            if not item.ok:
+                await reg.say("research", chat_id, item.summary())
+                return
+            if item.name not in names:
+                names.append(item.name)
+            st["answers"]["uploads"] = names
+            _save(chat_id, st)
+
+        urls = sources.extract_urls(text)
+        if urls or (msg.document and names):
+            what = []
+            if urls:
+                what.append(f"{len(urls)} ссыл.")
+            if names:
+                what.append(f"{len(names)} файл.")
+            again = "ещё раз " if st["step"] != "O1" else ""
+            await reg.say("research", chat_id,
+                          f"Взял {' и '.join(what)}. Читаю {again}— вернусь "
+                          "через пару минут.")
+            asyncio.create_task(
+                _unpack_task(reg, chat_id, urls, text, names))
+            if st["step"] == "O1":
+                _save(chat_id, st, "O3")
+                await ask_goal(reg, chat_id)
+            return
+
+        if st["step"] == "O1":
+            await reg.say("assistant", chat_id,
+                          "Нужна хотя бы одна ссылка: канал, сайт или пост. "
+                          "Подойдёт и @имя канала.")
+            return
+
+    # Молчание хуже отказа: человек не понимает, дошло сообщение или нет.
+    await reg.say("assistant", chat_id,
+                  "Записал. Сейчас жду ответа на вопрос выше — нажми кнопку "
+                  "или пришли ссылки, если хочешь, чтобы я перечитал.")
 
 
 async def _record_disputed(reg, chat_id: int, idx: int, answer: str) -> None:

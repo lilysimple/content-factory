@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from orchestrator import agent, sources
+from orchestrator import agent, files, sources
 
 log = logging.getLogger("unpack")
 
@@ -166,11 +166,18 @@ class Draft:
 
 # ── сборка входа для модели ───────────────────────────────────────────
 
-def _document(srcs: list[sources.Source], self_text: str) -> str:
+def _document(srcs: list[sources.Source], self_text: str,
+              uploads: list = None) -> str:
     blocks: list[str] = []
 
     if self_text.strip():
         blocks.append(f"## Что человек сказал о себе\n\n{self_text.strip()}")
+
+    # Приложенные файлы идут первыми после рассказа о себе: стратегия или
+    # экспорт канала точнее, чем что угодно собранное из открытых источников.
+    if uploads:
+        if doc := files.as_document(uploads):
+            blocks.append(doc)
 
     for s in srcs:
         if not s.ok:
@@ -212,17 +219,23 @@ def _parse(raw: str) -> dict[str, Any]:
     return {}
 
 
-async def run(chat_id: int, urls: list[str], self_text: str) -> Draft:
+async def run(chat_id: int, urls: list[str], self_text: str,
+              uploads: list | None = None) -> Draft:
     """Прочитать источники и собрать черновик профиля."""
     srcs = await sources.fetch_all(urls, limit=MAX_POSTS)
+    uploads = uploads or []
     draft = Draft(
-        read=[s.summary() for s in srcs if s.ok],
-        failed=[s.summary() for s in srcs if not s.ok],
-        suggested_name=next((s.title for s in srcs
-                             if s.ok and s.kind == "telegram" and s.title), ""),
+        read=[s.summary() for s in srcs if s.ok]
+             + [u.summary() for u in uploads if u.ok],
+        failed=[s.summary() for s in srcs if not s.ok]
+               + [u.summary() for u in uploads if not u.ok],
+        suggested_name=next(
+            (s.title for s in srcs if s.ok and s.kind == "telegram" and s.title),
+            next((u.name for u in uploads
+                  if u.ok and u.kind == "telegram-export"), "")),
     )
 
-    document = _document(srcs, self_text)
+    document = _document(srcs, self_text, uploads)
     if not document.strip():
         log.warning("нечего распаковывать: ни один источник не открылся")
         return draft
