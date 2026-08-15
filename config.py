@@ -54,6 +54,10 @@ class Config:
 
     allowed_chats: set[int] = field(
         default_factory=lambda: _chats(os.getenv("ALLOWED_CHATS", "")))
+    # Куда публикует Публикатор. Числовой id канала (-100…) или @имя.
+    # Пусто — публикация выключена, и он об этом говорит вслух.
+    publish_channel: str = os.getenv("PUBLISH_CHANNEL", "")
+
     miniapp_secret: str = os.getenv("MINIAPP_SECRET", "change-me")
     miniapp_url: str = os.getenv("MINIAPP_URL", "")
 

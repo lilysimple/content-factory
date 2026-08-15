@@ -18,8 +18,8 @@ from bots import topics
 from bots.registry import ROLES, STUBS, registry
 from bots.router import resolve
 from config import cfg
-from orchestrator import (design, editor, onboarding, refresh, reply,
-                          strategy)
+from orchestrator import (design, editor, onboarding, publisher, refresh,
+                          reply, strategy)
 from storage import db
 
 log = logging.getLogger("handlers")
@@ -134,6 +134,11 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
                                 topic=tkey or "design")
             return
 
+        if publisher.wants_reason(chat_id):
+            await publisher.take_reason(registry, chat_id, raw,
+                                        topic=tkey or "queue")
+            return
+
         # Материалы после онбординга уточняют существующий профиль,
         # а не создают новый бренд.
         if refresh.wants_refresh(msg):
@@ -164,6 +169,10 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             await design.run(registry, chat_id, raw, topic=tkey or "design")
             return
 
+        if route.role == "publisher":
+            await publisher.run(registry, chat_id, raw, topic=tkey or "queue")
+            return
+
         # Всё, что не производственная задача, разбирает Ассистент — и
         # разбирает по-настоящему: с профилем бренда и состоянием из базы.
         if route.role == "assistant":
@@ -176,7 +185,6 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         pending = {
             "research": "внешний ресёрч и метрики",
             "reels": "сценарии",
-            "publisher": "публикацию",
         }
         what = pending.get(route.role, "эту работу")
         await registry.say(
@@ -212,6 +220,11 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             tkey = topic_key_of(chat_id, cb.message.message_thread_id)
             await editor.on_callback(registry, chat_id, action,
                                      topic=tkey or "review")
+            return
+        if kind == "pub":
+            tkey = topic_key_of(chat_id, cb.message.message_thread_id)
+            await publisher.on_callback(registry, chat_id, action,
+                                        topic=tkey or "queue")
             return
         if kind == "art":
             tkey = topic_key_of(chat_id, cb.message.message_thread_id)
