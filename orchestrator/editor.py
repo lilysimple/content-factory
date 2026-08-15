@@ -172,8 +172,13 @@ def _brief(theme: dict[str, Any], spec: str) -> str:
 
 # ── сборка ────────────────────────────────────────────────────────────
 
-async def build(chat_id: int, ask: str) -> Draft:
-    """Написать текст по теме, переписывая пока скрипт даёт отказ."""
+async def build(chat_id: int, ask: str, *, say=None) -> Draft:
+    """Написать текст по теме, переписывая пока скрипт даёт отказ.
+
+    `say` — куда сообщать о ходе работы. Круг модели это десятки секунд,
+    два круга уходят за минуту, и молчащий бот в это время неотличим от
+    сломанного.
+    """
     b = _brand(chat_id)
     if b is None:
         raise NoTheme("профиль бренда ещё не собран")
@@ -188,6 +193,11 @@ async def build(chat_id: int, ask: str) -> Draft:
 
     draft = Draft(theme=theme)
     extra = ""
+
+    if say:
+        await say(f"Пишу текст по теме <b>{theme.get('title') or theme['id']}</b> "
+                  f"({theme.get('plat')} · {theme.get('format')}).\n"
+                  "Это займёт до минуты.")
 
     for attempt in range(1, MAX_ROUNDS + 1):
         draft.rounds = attempt
@@ -222,6 +232,14 @@ async def build(chat_id: int, ask: str) -> Draft:
             why = "; ".join(str(f) for f in findings[:5]) or \
                   f"балл voice {draft.voice} ниже {VOICE_FLOOR}"
             raise VoiceRefused(why)
+
+        if say:
+            # Называем правило, а не находку целиком: в находке лежит
+            # кусок забракованного текста, и ему в чате не место.
+            why = ", ".join(dict.fromkeys(f.rule for f in findings)) \
+                or f"балл voice {draft.voice}"
+            await say(f"Первый вариант не прошёл проверку голоса ({why}). "
+                      "Переписываю.")
 
         # Находки возвращаются текстом: модель должна видеть, что именно
         # поймал скрипт, иначе второй круг повторит ту же ошибку.
@@ -261,11 +279,19 @@ _pending: dict[int, Draft] = {}
 _awaiting_fix: set[int] = set()
 
 
-def _kb() -> InlineKeyboardMarkup:
+def _kb(theme_id: str) -> InlineKeyboardMarkup:
+    """id темы едет в самой кнопке.
+
+    Черновик живёт в памяти процесса, а бот перезапускается. Без id
+    любая кнопка под карточкой, пережившей рестарт, отвечает «уже
+    неактуален» — и человек, который вчера согласовал текст, сегодня
+    не может его принять. 64 байта Telegram на это хватает.
+    """
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Ок", callback_data="post:ok"),
-        InlineKeyboardButton(text="✏️ Правки", callback_data="post:fix"),
-        InlineKeyboardButton(text="🎨 В дизайн", callback_data="post:design"),
+        InlineKeyboardButton(text="✅ Ок", callback_data=f"post:ok:{theme_id}"),
+        InlineKeyboardButton(text="✏️ Правки", callback_data=f"post:fix:{theme_id}"),
+        InlineKeyboardButton(text="🎨 В дизайн",
+                             callback_data=f"post:design:{theme_id}"),
     ]])
 
 
@@ -287,8 +313,11 @@ def wants_fix(chat_id: int) -> bool:
 async def run(reg, chat_id: int, ask: str, topic: str = "review") -> None:
     _awaiting_fix.discard(chat_id)
 
+    async def say(text: str) -> None:
+        await reg.say("editor", chat_id, text, topic=topic)
+
     try:
-        draft = await build(chat_id, ask)
+        draft = await build(chat_id, ask, say=say)
     except NoTheme as e:
         await reg.say("editor", chat_id,
                       f"Писать не о чем: {e}. Сначала план недели.",
@@ -316,7 +345,8 @@ async def run(reg, chat_id: int, ask: str, topic: str = "review") -> None:
 
     log.info("%s: hold=%s | breaks=%s", draft.theme["id"], draft.hold,
              draft.breaks)
-    await reg.say("editor", chat_id, card(draft), kb=_kb(), topic=topic)
+    await reg.say("editor", chat_id, card(draft),
+                  kb=_kb(draft.theme["id"]), topic=topic)
 
 
 async def revise(reg, chat_id: int, instruction: str,
@@ -343,9 +373,29 @@ async def revise(reg, chat_id: int, instruction: str,
               topic=topic)
 
 
+def _recover(chat_id: int, theme_id: str) -> Draft | None:
+    """Поднять черновик из базы, если память процесса его не помнит."""
+    row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
+                 theme_id, chat_id)
+    if row is None:
+        return None
+    b = _brand(chat_id)
+    text = ""
+    if b is not None and row["asset"]:
+        raw = b.read(row["asset"])
+        text = raw.split("-->", 1)[-1].strip() if raw.startswith("<!--") else raw
+    return Draft(theme=dict(row), text=text)
+
+
 async def on_callback(reg, chat_id: int, action: str,
                       topic: str = "review") -> None:
+    action, _, theme_id = action.partition(":")
     draft = _pending.get(chat_id)
+    if draft is None and theme_id:
+        draft = _recover(chat_id, theme_id)
+    elif draft is not None and theme_id and draft.theme["id"] != theme_id:
+        # Нажали кнопку под старой карточкой, а в памяти уже другая тема.
+        draft = _recover(chat_id, theme_id)
 
     if action == "ok":
         _pending.pop(chat_id, None)

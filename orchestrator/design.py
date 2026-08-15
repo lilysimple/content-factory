@@ -304,7 +304,7 @@ def _brief(theme: dict[str, Any], copy: str, spec: str, photos: list[str],
     return "\n".join(lines)
 
 
-async def build(chat_id: int, ask: str) -> Layout:
+async def build(chat_id: int, ask: str, *, say=None) -> Layout:
     b = _brand(chat_id)
     if b is None:
         raise NoText("профиль бренда ещё не собран")
@@ -322,6 +322,13 @@ async def build(chat_id: int, ask: str) -> Layout:
     copy = _copy(b, theme)
     photos = _photos(b)
 
+    if say:
+        n = len(refs)
+        await say(f"Верстаю {'макет' if n == 1 else f'{n} карточки'} по теме "
+                  f"<b>{theme.get('title') or theme['id']}</b> "
+                  f"({plat} · {size[0]}×{size[1]}).\n"
+                  "Сборка и рендер займут до минуты.")
+
     answer = await agent.ask(
         "design", chat_id,
         _brief(theme, copy, spec, photos, size, refs) +
@@ -338,6 +345,10 @@ async def build(chat_id: int, ask: str) -> Layout:
     lay = Layout(theme=theme, cards=cards,
                  accent=str(data.get("accent") or ""),
                  notes=[str(n) for n in (data.get("notes") or [])])
+
+    if say:
+        await say(f"Макет собран, рендерю {len(cards)} "
+                  f"{'картинку' if len(cards) == 1 else 'картинок'}.")
 
     for i, c in enumerate(cards, 1):
         html = str(c["html"]).strip()
@@ -364,11 +375,13 @@ _pending: dict[int, Layout] = {}
 _awaiting_fix: set[int] = set()
 
 
-def _kb() -> InlineKeyboardMarkup:
+def _kb(theme_id: str) -> InlineKeyboardMarkup:
+    """id темы в кнопке: макет в памяти не переживает перезапуск бота."""
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Ок", callback_data="art:ok"),
-        InlineKeyboardButton(text="✏️ Правки", callback_data="art:fix"),
-        InlineKeyboardButton(text="📤 В очередь", callback_data="art:queue"),
+        InlineKeyboardButton(text="✅ Ок", callback_data=f"art:ok:{theme_id}"),
+        InlineKeyboardButton(text="✏️ Правки", callback_data=f"art:fix:{theme_id}"),
+        InlineKeyboardButton(text="📤 В очередь",
+                             callback_data=f"art:queue:{theme_id}"),
     ]])
 
 
@@ -396,8 +409,11 @@ def wants_fix(chat_id: int) -> bool:
 async def run(reg, chat_id: int, ask: str, topic: str = "design") -> None:
     _awaiting_fix.discard(chat_id)
 
+    async def say(text: str) -> None:
+        await reg.say("design", chat_id, text, topic=topic)
+
     try:
-        lay = await build(chat_id, ask)
+        lay = await build(chat_id, ask, say=say)
     except NoSpec as e:
         await reg.say("design", chat_id,
                       f"ТЗ площадки нет: {e}. Собирать на глаз не буду, "
@@ -439,7 +455,8 @@ async def run(reg, chat_id: int, ask: str, topic: str = "design") -> None:
     for html in lay.htmls:
         await reg.send_file("design", chat_id, html.read_bytes(), html.name,
                             topic=topic)
-    await reg.say("design", chat_id, "Принимаем?", kb=_kb(), topic=topic)
+    await reg.say("design", chat_id, "Принимаем?",
+                  kb=_kb(lay.theme["id"]), topic=topic)
 
 
 async def revise(reg, chat_id: int, instruction: str,
@@ -463,7 +480,17 @@ async def revise(reg, chat_id: int, instruction: str,
 
 async def on_callback(reg, chat_id: int, action: str,
                       topic: str = "design") -> None:
+    action, _, theme_id = action.partition(":")
     lay = _pending.get(chat_id)
+    if lay is not None and theme_id and lay.theme["id"] != theme_id:
+        lay = None
+    if lay is None and theme_id:
+        row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
+                     theme_id, chat_id)
+        if row is not None:
+            b = _brand(chat_id)
+            files = sorted(b.path("posts").glob(f"{theme_id}-*")) if b else []
+            lay = Layout(theme=dict(row), files=list(files))
 
     if action == "ok":
         _pending.pop(chat_id, None)
