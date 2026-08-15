@@ -21,7 +21,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import cfg
 from orchestrator import agent, design
-from orchestrator.strategy import AUTO_PUBLISH, PLATFORMS
+from orchestrator.strategy import AUTO_PUBLISH, SPOKEN
 from storage import brand as brand_store
 from storage import db
 from validators import check_voice
@@ -96,17 +96,24 @@ def _pick(chat_id: int, ask: str) -> dict[str, Any]:
     По убыванию точности: явный id в сообщении, совпадение по заголовку,
     ближайшая по дате неначатая тема. Угадывать молча нельзя, поэтому
     выбранная тема всегда называется человеку в шапке.
+
+    Названная по id тема берётся и в статусе `draft`: правка приходит к
+    уже написанному тексту. Требовать от него `idea` значит на каждую
+    правку отвечать «темы нет среди неначатых» — а это ровно та тема,
+    которую человек сейчас правит.
     """
-    rows = db.q("SELECT * FROM themes WHERE chat_id = ? AND status = 'idea' "
-                "ORDER BY date", chat_id)
-    if not rows:
-        raise NoTheme("в плане нет ни одной неначатой темы")
+    rows = db.q("SELECT * FROM themes WHERE chat_id = ? AND "
+                "status IN ('idea', 'draft') ORDER BY date", chat_id)
 
     if m := ID_RX.search(ask):
         for r in rows:
             if r["id"] == m.group():
                 return dict(r)
-        raise NoTheme(f"темы {m.group()} нет среди неначатых")
+        raise NoTheme(f"темы {m.group()} нет среди начатых и неначатых")
+
+    rows = [r for r in rows if r["status"] == "idea"]
+    if not rows:
+        raise NoTheme("в плане нет ни одной неначатой темы")
 
     # Совпадение по словам заголовка: «напиши пост про файл ЯДРО».
     words = {w for w in re.findall(r"\w{4,}", ask.lower())}
@@ -120,7 +127,15 @@ def _pick(chat_id: int, ask: str) -> dict[str, Any]:
         if best is not None and hits >= 2:
             return dict(best)
 
-    return dict(rows[0])
+    # Ролики пишет Редактор Reels: суфлёрный текст это другая работа.
+    # Названную явно тему берём любую, а вот на «напиши пост» ближайший
+    # слот под ролик утаскивать нельзя — Редактору Reels нечего будет
+    # снимать, а человек получит пост вместо сценария.
+    mine = [r for r in rows if (r["format"] or "").lower() not in SPOKEN]
+    if not mine:
+        raise NoTheme("неначатые темы есть, но все под ролики — "
+                      "это к Редактору Reels")
+    return dict(mine[0])
 
 
 # ── профиль ───────────────────────────────────────────────────────────
@@ -131,25 +146,8 @@ def _brand(chat_id: int):
 
 
 def _stopwords(b) -> list[str]:
-    """Стоп-слова бренда из раздела «Голос» профиля.
-
-    Их проверяет скрипт, а не модель: слово из стоп-листа это отказ, и
-    отказ должен быть детерминированным.
-    """
-    voice = b.section("core", "Голос")
-    if not voice:
-        return []
-    tail = voice.split("Стоп-слова", 1)
-    if len(tail) < 2:
-        return []
-    out = []
-    for line in tail[1].splitlines():
-        line = line.strip()
-        if line.startswith("###") or line.startswith("##"):
-            break
-        if line.startswith("- "):
-            out.append(line[2:].strip())
-    return [w for w in out if w]
+    """Стоп-слова бренда. Живут в хранилище профиля: их читает и Reels."""
+    return b.stopwords()
 
 
 def _brief(theme: dict[str, Any], spec: str) -> str:
@@ -409,10 +407,16 @@ async def on_callback(reg, chat_id: int, action: str,
             c.execute("UPDATE themes SET status = 'ready', "
                       "updated_at = datetime('now') "
                       "WHERE id = ? AND chat_id = ?", (tid, chat_id))
+        # Состояние берётся из данных, а не из вшитой фразы: Публикатор
+        # подключён, а кнопка полторы недели отвечала, что его нет.
         plat = draft.theme.get("plat")
-        tail = ("Публикатор ещё не подключён, выкладываешь сама."
-                if plat in AUTO_PUBLISH else
-                f"{plat} публикуется руками в любом случае.")
+        if plat not in AUTO_PUBLISH:
+            tail = f"{plat} публикуется руками в любом случае."
+        elif not cfg.publish_channel:
+            tail = ("Публикатор возьмёт его в очередь, когда будет задан "
+                    "канал: <code>PUBLISH_CHANNEL</code> пуст.")
+        else:
+            tail = "Публикатор покажет превью в «Очередь», когда придёт дата."
         await reg.say("editor", chat_id,
                       f"Готово, <code>{tid}</code> в статусе ready. {tail}",
                       topic=topic)
@@ -423,6 +427,10 @@ async def on_callback(reg, chat_id: int, action: str,
             await reg.say("editor", chat_id, "Этот текст уже неактуален.",
                           topic=topic)
             return
+        # Черновик, поднятый из базы, кладём обратно в память: иначе
+        # кнопка под пережившей рестарт карточкой спросит правку, а
+        # следующее сообщение человека упрётся в «уже неактуален».
+        _pending[chat_id] = draft
         _awaiting_fix.add(chat_id)
         await reg.say("editor", chat_id,
                       "Напиши одним сообщением, что поправить. Запишу правку "

@@ -90,6 +90,29 @@ class Brand:
         m = re.search(r"^owner:\s*(\S+)", self.read("core"), re.M)
         return m.group(1) if m else "bot"
 
+    def stopwords(self) -> list[str]:
+        """Стоп-слова бренда из раздела «Голос» профиля.
+
+        Их проверяет скрипт, а не модель: слово из стоп-листа это отказ,
+        и отказ должен быть детерминированным. Читают их все роли,
+        которые пишут текст, поэтому список живёт здесь, а не в одной
+        из них.
+        """
+        voice = self.section("core", "Голос")
+        if not voice:
+            return []
+        tail = voice.split("Стоп-слова", 1)
+        if len(tail) < 2:
+            return []
+        out = []
+        for line in tail[1].splitlines():
+            line = line.strip()
+            if line.startswith("##"):
+                break
+            if line.startswith("- "):
+                out.append(line[2:].strip())
+        return [w for w in out if w]
+
     def version(self) -> str:
         """Версия профиля = коммит репозитория брендов, иначе дата."""
         sha = _git(self.root, "rev-parse", "--short", "HEAD")

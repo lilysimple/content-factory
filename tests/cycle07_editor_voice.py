@@ -197,6 +197,16 @@ async def main() -> None:
           theme("2026-08-15-telegram-01")["status"] == "ready",
           theme("2026-08-15-telegram-01")["status"])
 
+    # Состояние соседа берётся из данных: Публикатор подключён, но канал
+    # может быть не задан. Вшитая фраза тут уже врала полторы недели.
+    check("про Публикатора сказано по состоянию, а не заглушкой",
+          "Публикатор" in reg.texts() and
+          "Публикатор ещё не подключён" not in reg.texts(),
+          reg.texts()[-200:])
+    check("названа настоящая причина молчания",
+          ("PUBLISH_CHANNEL" in reg.texts()) == (not cfg.publish_channel),
+          reg.texts()[-200:])
+
     reg.clear()
     await editor.on_callback(reg, CHAT, "ok")
     check("повторное Ок отбито", "неактуален" in reg.texts(), reg.texts()[:80])
@@ -227,6 +237,14 @@ async def main() -> None:
     reg.clear()
     await editor.revise(reg, CHAT, "меньше вопросов к читателю")
     check("флаг снят", editor.wants_fix(CHAT) is False)
+    # Правка приходит к уже написанному тексту, а он в статусе draft.
+    # Пока _pick смотрел только на idea, каждая правка отвечала
+    # «темы нет среди неначатых» — и переписать текст было нельзя.
+    check("правка нашла свою тему, а не соседнюю",
+          "2026-08-15-telegram-01" in ROUNDS["prompts"][-1] and
+          "нет среди" not in reg.texts(), reg.texts()[:160])
+    check("текст переписан", theme("2026-08-15-telegram-01")["status"] == "draft",
+          theme("2026-08-15-telegram-01")["status"])
 
     corr = harness.TMP / "brands" / "lily-space" / "voice-corrections.md"
     check("правка записана в профиль", corr.exists(), "файла нет")

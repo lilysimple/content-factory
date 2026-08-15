@@ -75,9 +75,6 @@ ROLES: dict[str, Role] = {
     "publisher": Role("publisher", "📤", "Публикатор"),
 }
 
-# Роли, которые в v1 отвечают «пока не умею»
-STUBS = {"reels", "design"}
-
 
 class Registry:
     def __init__(self) -> None:

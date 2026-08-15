@@ -28,6 +28,7 @@ OFFLINE = [
     ("cycle07_editor_voice",       "Редактор: проверка голоса"),
     ("cycle09_designer",           "Дизайнер: ТЗ, рендер, проверки"),
     ("cycle11_publisher",          "Публикатор: комплект, дубли, пропуски"),
+    ("cycle12_reels",              "Редактор Reels: суфлёр, речь, бюджет"),
 ]
 
 LIVE = [
@@ -36,6 +37,7 @@ LIVE = [
     ("cycle06_live_platforms",  "Раскладка на три площадки"),
     ("cycle08_live_editor",     "Цепь план → текст"),
     ("cycle10_live_designer",   "Живой макет"),
+    ("cycle13_live_reels",      "Живой сценарий ролика"),
 ]
 
 PASSED = re.compile(r"Все (\d+) проверок прошли")

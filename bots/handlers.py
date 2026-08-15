@@ -15,11 +15,11 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
 
 from bots import topics
-from bots.registry import ROLES, STUBS, registry
+from bots.registry import registry
 from bots.router import resolve
 from config import cfg
-from orchestrator import (design, editor, onboarding, publisher, refresh,
-                          reply, strategy)
+from orchestrator import (design, editor, onboarding, publisher, reels,
+                          refresh, reply, strategy)
 from storage import db
 
 log = logging.getLogger("handlers")
@@ -129,6 +129,10 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
                                 topic=tkey or "review")
             return
 
+        if reels.wants_fix(chat_id):
+            await reels.revise(registry, chat_id, raw, topic=tkey or "reels")
+            return
+
         if design.wants_fix(chat_id):
             await design.revise(registry, chat_id, raw,
                                 topic=tkey or "design")
@@ -165,6 +169,10 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             await editor.run(registry, chat_id, raw, topic=tkey or "review")
             return
 
+        if route.role == "reels":
+            await reels.run(registry, chat_id, raw, topic=tkey or "reels")
+            return
+
         if route.role == "design":
             await design.run(registry, chat_id, raw, topic=tkey or "design")
             return
@@ -184,7 +192,6 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         # будет ждать результат, которого не будет.
         pending = {
             "research": "внешний ресёрч и метрики",
-            "reels": "сценарии",
         }
         what = pending.get(route.role, "эту работу")
         await registry.say(
@@ -220,6 +227,11 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             tkey = topic_key_of(chat_id, cb.message.message_thread_id)
             await editor.on_callback(registry, chat_id, action,
                                      topic=tkey or "review")
+            return
+        if kind == "reel":
+            tkey = topic_key_of(chat_id, cb.message.message_thread_id)
+            await reels.on_callback(registry, chat_id, action,
+                                    topic=tkey or "reels")
             return
         if kind == "pub":
             tkey = topic_key_of(chat_id, cb.message.message_thread_id)

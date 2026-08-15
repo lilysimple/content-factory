@@ -181,11 +181,6 @@ async def main() -> None:
     # ── 7. кнопки ─────────────────────────────────────────────────────
     print("\n7. Кнопки")
     reg.clear()
-    await design.on_callback(reg, CHAT, "queue")
-    check("очередь честно отказывает", "не подключён" in reg.texts(),
-          reg.texts()[-120:])
-
-    reg.clear()
     await design.on_callback(reg, CHAT, "fix")
     check("ждём правку", design.wants_fix(CHAT) is True)
 
@@ -204,6 +199,26 @@ async def main() -> None:
     await design.on_callback(reg, CHAT, "ok")
     check("после Ок сказано, где файлы", "posts/" in reg.texts(),
           reg.texts()[:120])
+
+    # «В очередь» это передача Публикатору, а не рассказ о нём. Кнопка,
+    # которая только сообщает о существовании соседа, уже обманывала
+    # здесь полторы недели.
+    seed()
+    install(answer([{"name": "cover", "html": card("Кода не писала")}]))
+    reg.clear()
+    await design.run(reg, CHAT, "сделай обложку")
+    reg.clear()
+    await design.on_callback(reg, CHAT, "queue")
+    check("очередь передана Публикатору", "Публикатору" in reg.texts(),
+          reg.texts()[:120])
+    check("Публикатор ответил сам",
+          any(s.role == "publisher" for s in reg.sent),
+          str([s.role for s in reg.sent]))
+    check("не врёт, что сосед не подключён",
+          "не подключён" not in reg.texts(), reg.texts()[:160])
+    check("превью показано в «Очередь»",
+          any(s.topic == "queue" for s in reg.sent),
+          str([s.topic for s in reg.sent]))
 
     # ── 8. карусель это пять карточек ─────────────────────────────────
     print("\n8. Карусель")

@@ -59,6 +59,10 @@ PLATFORMS: dict[str, tuple[str, ...]] = {
 }
 AUTO_PUBLISH = ("telegram",)
 
+# Форматы, которые произносят вслух: их берёт Редактор Reels, а не
+# Редактор. Граница нужна обоим, поэтому живёт рядом с набором форматов.
+SPOKEN = ("reels", "shorts")
+
 Slot = tuple[str, str]                      # (дата, площадка)
 
 

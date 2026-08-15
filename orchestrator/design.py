@@ -26,7 +26,7 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import ROOT, cfg
-from orchestrator import agent
+from orchestrator import agent, publisher
 from storage import brand as brand_store
 from storage import db
 
@@ -517,6 +517,17 @@ async def on_callback(reg, chat_id: int, action: str,
         return
 
     if action == "queue":
+        _pending.pop(chat_id, None)
+        _awaiting_fix.discard(chat_id)
+        if lay is None:
+            await reg.say("design", chat_id, "Этот макет уже неактуален.",
+                          topic=topic)
+            return
+
+        # Не фраза о Публикаторе, а передача ему: комплект собирает он,
+        # и он же скажет, чего в комплекте не хватает.
+        tid = lay.theme["id"]
         await reg.say("design", chat_id,
-                      "Публикатор ещё не подключён, это следующий шаг сборки. "
-                      "Комплект готов, выкладываешь пока сама.", topic=topic)
+                      f"Передаю комплект <code>{tid}</code> Публикатору.",
+                      topic=topic)
+        await publisher.run(reg, chat_id, tid, topic="queue")

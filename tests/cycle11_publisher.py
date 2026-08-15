@@ -231,6 +231,35 @@ async def main() -> None:
           reg.texts()[:120])
     check("сказал про метрики честно", "не подключён" in reg.texts())
 
+    # ── 13. комплект по id ────────────────────────────────────────────
+    # Так передаёт Дизайнер после принятого макета: спрашивают про
+    # конкретный пост, а не про очередь целиком.
+    print("\n13. Комплект по id")
+    tid = seed()
+    reg = Reg()
+    await publisher.run(reg, CHAT, f"свёрстан макет по теме {tid}")
+    check("показан именно он", tid in reg.texts(), reg.texts()[:120])
+    check("список просрочки не мешался",
+          "Задним числом" not in reg.texts(), reg.texts()[:200])
+
+    reg = Reg()
+    await publisher.run(reg, CHAT, "2026-08-14-telegram-99")
+    check("несуществующий id назван", "нет" in reg.texts().lower(),
+          reg.texts()[:120])
+
+    # Слот из будущего показываем, но кнопки публикации не даём:
+    # выйти раньше срока так же плохо, как выйти задним числом.
+    future = seed(tid="2026-12-31-telegram-01", date="2026-12-31")
+    reg = Reg()
+    await publisher.run(reg, CHAT, f"комплект {future}")
+    btns = [b for s in reg.sent for b in s.buttons]
+    check("превью будущего слота показано", future in reg.texts(),
+          reg.texts()[:120])
+    check("кнопки публикации у него нет",
+          not any(b.startswith("pub:go:") for b in btns), str(btns))
+    check("сказано, что дата не наступила",
+          "не наступила" in reg.texts(), reg.texts()[-200:])
+
 
 asyncio.run(main())
 raise SystemExit(report())

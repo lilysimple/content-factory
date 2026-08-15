@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -33,6 +34,8 @@ store = brand_store.Store(cfg.brands_path)
 
 TG_LIMIT = 4096              # потолок текста поста
 TG_CAPTION = 1024            # потолок подписи под картинкой
+
+ID_RX = re.compile(r"\b\d{4}-\d{2}-\d{2}-[a-z]+-\d{2}\b")
 
 
 class NotReady(RuntimeError):
@@ -247,8 +250,24 @@ def wants_reason(chat_id: int) -> bool:
 
 
 async def run(reg, chat_id: int, ask: str, topic: str = "queue") -> None:
-    """Показать, что готово к публикации."""
+    """Показать, что готово к публикации.
+
+    В `ask` может прийти id темы — так передаёт комплект Дизайнер. Тогда
+    показываем ровно её, даже если дата ещё не наступила: человек только
+    что принял макет и спрашивает про этот пост, а не про очередь.
+    """
     _pending.pop(chat_id, None)
+
+    if m := ID_RX.search(ask or ""):
+        row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
+                     m.group(), chat_id)
+        if row is None:
+            await reg.say("publisher", chat_id,
+                          f"Темы <code>{m.group()}</code> у меня нет.",
+                          topic=topic)
+            return
+        await _show(reg, chat_id, dict(row), topic)
+        return
 
     if late := overdue(chat_id):
         await reg.say("publisher", chat_id,
@@ -267,16 +286,33 @@ async def run(reg, chat_id: int, ask: str, topic: str = "queue") -> None:
         return
 
     for theme in items[:3]:
-        pkg = collect(chat_id, theme)
-        blocking = [p for p in pkg.problems if "автоматом не публикуется" not in p]
-        await reg.say("publisher", chat_id, preview(pkg),
-                      kb=_kb(theme["id"],
-                             ready=pkg.auto and not blocking
-                             and bool(cfg.publish_channel)),
-                      topic=topic)
-        for img in pkg.images:
-            await reg.send_file("publisher", chat_id, img.read_bytes(),
-                                img.name, topic=topic, as_photo=True)
+        await _show(reg, chat_id, theme, topic)
+
+
+async def _show(reg, chat_id: int, theme: dict[str, Any], topic: str) -> None:
+    """Превью одного комплекта с кнопками по его состоянию.
+
+    Кнопка публикации появляется только у наступившего слота. Выйти
+    раньше срока так же плохо, как выйти задним числом: план на неделю
+    держится на датах, и досрочный пост ломает соседний слот.
+    """
+    pkg = collect(chat_id, theme)
+    blocking = [p for p in pkg.problems if "автоматом не публикуется" not in p]
+    early = (theme.get("date") or "") > _today(chat_id)
+
+    text = preview(pkg)
+    if early:
+        text += (f"\n\nДата слота {theme.get('date')} ещё не наступила: "
+                 "показываю комплект, публиковать буду в свой день.")
+
+    await reg.say("publisher", chat_id, text,
+                  kb=_kb(theme["id"],
+                         ready=pkg.auto and not blocking and not early
+                         and bool(cfg.publish_channel)),
+                  topic=topic)
+    for img in pkg.images:
+        await reg.send_file("publisher", chat_id, img.read_bytes(),
+                            img.name, topic=topic, as_photo=True)
 
 
 async def on_callback(reg, chat_id: int, action: str,
