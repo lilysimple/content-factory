@@ -43,7 +43,10 @@ def setup() -> None:
     con.close()
 
     # Артефакты прошлых прогонов бота тоже мешают: цикл считает файлы.
-    for folder in ("posts", "plans"):
+    # `research` в этом списке не случайно: живая сводка, снятая с канала,
+    # доехала бы до Стратега и сломала цикл, который проверяет поведение
+    # без дайджеста. Тест не должен зависеть от того, что бот наработал.
+    for folder in ("posts", "plans", "research"):
         path = TMP / "brands" / "lily-space" / folder
         if path.is_dir():
             for f in path.iterdir():

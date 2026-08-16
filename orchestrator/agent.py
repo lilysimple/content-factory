@@ -35,8 +35,14 @@ class BudgetExceeded(RuntimeError):
     """Тенант выбрал дневной лимит вызовов."""
 
 
-def _reason(e: APIError) -> str:
-    """Человеческая причина отказа, а не дамп JSON в чат."""
+def reason(e: Exception) -> str:
+    """Человеческая причина отказа, а не дамп JSON в чат.
+
+    Годится для любого исключения: у ошибок API вытаскивает текст из
+    тела ответа, у остальных возвращает сообщение или имя класса. Через
+    неё проходят все роли, поэтому «закончились средства» человек видит
+    одинаково, кто бы ни упал.
+    """
     body = getattr(e, "body", None) or {}
     msg = (body.get("error") or {}).get("message", "") if isinstance(body, dict) else ""
     low = msg.lower()
@@ -47,7 +53,7 @@ def _reason(e: APIError) -> str:
         return "ключ API не принят, проверь ANTHROPIC_API_KEY"
     if "max_tokens" in low or "too long" in low:
         return "запрос длиннее лимита модели"
-    return msg or str(e)
+    return msg or getattr(e, "message", None) or str(e) or type(e).__name__
 
 
 @lru_cache(maxsize=32)
@@ -223,7 +229,7 @@ async def ask(
             status = getattr(e, "status_code", None)
             if status is not None and 400 <= status < 500 and status != 429:
                 log.error("запрос отклонён (%s), повторять нечего: %s",
-                          status, _reason(e))
+                          status, reason(e))
                 raise
             log.error("ошибка API (%s из %s): %s", attempt, MAX_ATTEMPTS, e)
             if attempt == MAX_ATTEMPTS:

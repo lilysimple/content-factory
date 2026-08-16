@@ -22,13 +22,14 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import cfg
-from orchestrator import agent, desk
+from orchestrator import agent, desk, research
 from storage import db
 
 log = logging.getLogger("strategy")
 
 DAYS = 7                     # горизонт плана
 ARCHIVE_LIMIT = 20           # сколько недавних тем показывать как «не повторяй»
+DIGEST_LIMIT = 6000          # сколько сводки Ресёрчера уходит в промпт
 MAX_TOKENS = 16000
 
 # Секции профиля, по которым Стратег строит темы. Голос ему не нужен:
@@ -217,9 +218,17 @@ def _layers(chat_id: int, busy: dict[Slot, str], free: list[Slot],
     lines.append("")
 
     lines.append("### 1. Дайджест недели")
-    lines.append("Недельный ресёрч не подключён: дайджеста нет ни за эту "
-                 "неделю, ни за прошлую. Работай в экспресс-режиме на профиле "
-                 "и архиве и скажи об этом второй строкой «Контекста».")
+    week, digest = research.latest(desk.brand(chat_id)) if desk.brand(chat_id) \
+        else ("", "")
+    if digest:
+        lines.append(f"Сводка Ресёрчера за {week}. Механики и своя "
+                     "статистика ниже — опирайся на них, а не на общие "
+                     "соображения.")
+        lines += ["", digest[:DIGEST_LIMIT]]
+    else:
+        lines.append("Сводки Ресёрчера нет: дайджеста нет ни за эту неделю, "
+                     "ни за прошлую. Работай в экспресс-режиме на профиле и "
+                     "архиве и скажи об этом второй строкой «Контекста».")
     lines.append("")
 
     lines.append("### 2. Профиль и архив")

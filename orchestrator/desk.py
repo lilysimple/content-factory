@@ -145,8 +145,14 @@ def ready(chat_id: int, theme_id: str) -> None:
 
 
 def reason(e: Exception) -> str:
-    """Человеческая причина отказа вместо имени класса."""
-    return getattr(e, "message", None) or str(e) or type(e).__name__
+    """Человеческая причина отказа вместо имени класса.
+
+    Одна точка на все роли: разбор ошибок API живёт в `agent.reason`,
+    иначе «закончились средства» у Редактора и у Ресёрчера выглядели бы
+    по-разному, а у одного из них дампом JSON.
+    """
+    from orchestrator import agent            # локально: agent тяжелее desk
+    return agent.reason(e)
 
 
 class Desk:

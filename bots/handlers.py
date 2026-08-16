@@ -19,7 +19,7 @@ from bots.registry import registry
 from bots.router import resolve
 from config import cfg
 from orchestrator import (design, editor, onboarding, publisher, reels,
-                          refresh, reply, strategy)
+                          refresh, reply, research, strategy)
 from storage import db
 
 log = logging.getLogger("handlers")
@@ -161,6 +161,10 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             await onboarding.ask_which_role(registry, chat_id)
             return
 
+        if route.role == "research":
+            await research.run(registry, chat_id, raw, topic=tkey or "research")
+            return
+
         if route.role == "strategy":
             await strategy.run(registry, chat_id, raw, topic=tkey or "strategy")
             return
@@ -188,17 +192,13 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
                                topic=tkey or "general")
             return
 
-        # Роли ещё не подключены к работе. Врать «принял» нельзя: человек
-        # будет ждать результат, которого не будет.
-        pending = {
-            "research": "внешний ресёрч и метрики",
-        }
-        what = pending.get(route.role, "эту работу")
+        # Сюда попадать больше некому: все семь ролей разобраны выше.
+        # Если роль всё же добавили и забыли ветку, врать «принял» нельзя.
+        log.warning("роль %s без обработчика", route.role)
         await registry.say(
             route.role, chat_id,
-            f"Понял, это ко мне — {what}. Но я ещё не подключён к работе, "
-            "это следующий шаг сборки.\n\nПока работает: «покажи ядро», "
-            "«выгрузи всё».",
+            "Понял, это ко мне, но я ещё не подключён к работе.\n\n"
+            "Пока работает: «покажи ядро», «выгрузи всё».",
             topic=tkey or "general")
 
     # ── нажатие кнопки: слушают все семеро ────────────────────────────

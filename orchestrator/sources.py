@@ -35,6 +35,16 @@ BLANKS = re.compile(r"\n{3,}")
 TG_TEXT = re.compile(
     r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', re.S)
 TG_VIEWS = re.compile(r'<span class="tgme_widget_message_views">([^<]+)</span>')
+
+# Граница одного сообщения в ленте `t.me/s/`. По ней страница режется на
+# сообщения, и текст с просмотрами берётся внутри каждого.
+#
+# Раньше текст и просмотры собирались двумя независимыми списками и
+# склеивались по индексу. На живом канале это врало: у поста с одной
+# картинкой текста нет, а просмотры есть — и дальше весь список
+# сдвигался, приписывая каждому посту чужие цифры.
+TG_MSG = "tgme_widget_message_wrap"
+SERVICE = "service_message"
 TG_TITLE = re.compile(r'<div class="tgme_channel_info_header_title"[^>]*>'
                       r'<span[^>]*>([^<]+)</span>', re.S)
 TG_DESC = re.compile(r'<div class="tgme_channel_info_description"[^>]*>(.*?)</div>', re.S)
@@ -155,12 +165,20 @@ async def fetch(url: str, *, limit: int = 40) -> Source:
             if "subscriber" in ctype or "подписчик" in ctype:
                 src.subscribers = f"{value.strip()} подписчиков"
 
-        views = TG_VIEWS.findall(body)
-        for i, raw in enumerate(TG_TEXT.findall(body)[:limit]):
-            text = _plain(raw)
-            if text:
-                src.posts.append(
-                    Post(text, _views(views[i]) if i < len(views) else None))
+        for chunk in body.split(TG_MSG)[1:]:
+            # «Закрепил сообщение» и прочая служебная запись это не пост:
+            # в статистике она считалась бы постом с нулём просмотров.
+            if SERVICE in chunk:
+                continue
+            # Одно сообщение бывает разбито на несколько блоков текста,
+            # поэтому склеиваем их, а не берём первый.
+            text = _plain("\n".join(TG_TEXT.findall(chunk)))
+            if not text:
+                continue                     # картинка без подписи
+            seen = TG_VIEWS.search(chunk)
+            src.posts.append(Post(text, _views(seen.group(1)) if seen else None))
+            if len(src.posts) >= limit:
+                break
         if not src.posts:
             src.ok = False
             src.error = "канал закрыт или постов не видно"
