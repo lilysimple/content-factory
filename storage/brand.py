@@ -115,7 +115,10 @@ class Brand:
 
     def version(self) -> str:
         """Версия профиля = коммит репозитория брендов, иначе дата."""
-        sha = _git(self.root, "rev-parse", "--short", "HEAD")
+        # Чужой репозиторий выше по дереву дал бы sha коммита кода,
+        # выданный за версию профиля. Дата честнее.
+        sha = _git(self.root, "rev-parse", "--short", "HEAD") \
+            if _own_repo(self.root) else ""
         return sha or date.today().isoformat()
 
     # ── запись ────────────────────────────────────────────────────────
@@ -214,9 +217,33 @@ def _git(cwd: Path, *args: str) -> str:
         return ""
 
 
+def _own_repo(cwd: Path) -> bool:
+    """Свой ли это репозиторий, а не тот, внутри которого мы оказались."""
+    top = _git(cwd, "rev-parse", "--show-toplevel")
+    if not top:
+        return False                            # не репозиторий — молча мимо
+    root = cwd.resolve()
+    if Path(top).resolve() in (root, root.parent):
+        return True
+    log.warning("папка бренда лежит внутри чужого репозитория %s, "
+                "версию не трогаю", top)
+    return False
+
+
 def _commit(cwd: Path, message: str) -> None:
-    if not _git(cwd, "rev-parse", "--git-dir"):
-        return                                  # не репозиторий — молча мимо
+    """Зафиксировать версию профиля в репозитории брендов.
+
+    **`git` ищет репозиторий вверх по дереву.** Папка бренда без своего
+    `.git` находит первый попавшийся выше — и `add -A` уносит туда всё
+    подряд. Стенд на этом поймал сам себя: песочница лежит внутри
+    репозитория кода, и прогон тестов сделал три коммита в него.
+
+    Поэтому коммитим, только если найденный репозиторий это сам бренд
+    или папка брендов, а не что-то, внутри чего они случайно оказались.
+    """
+    if not _own_repo(cwd):
+        return
+
     _git(cwd, "add", "-A")
     _git(cwd, "-c", "user.name=content-factory",
          "-c", "user.email=bot@content-factory.local",

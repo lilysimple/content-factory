@@ -19,6 +19,12 @@ MAX_POSTS = 40
 MAX_POST_CHARS = 1200
 NAME_CHARS = 40
 
+# Ниже этого модель сама считает блок догадкой. Порог назван и в промпте
+# роли: если менять, менять в обоих местах.
+LOW_CONFIDENCE = 0.6
+BLOCK_NAMES = {"identity": "кто это", "audience": "аудитория",
+               "voice": "голос", "format": "формат"}
+
 
 def _head(who: str) -> str:
     """Первое звено описания как имя: «Лили: консультант по AI, мама» → «Лили».
@@ -62,6 +68,18 @@ class Draft:
     def divergence(self) -> str | None:
         return self.data.get("divergence")
 
+    def weak(self) -> list[str]:
+        """Блоки, которые модель собрала на догадках.
+
+        `[уточнить факт]` помечает недостающий факт, а низкий
+        `confidence` — шаткий вывод из тех фактов, что есть. Разница
+        важна ровно в момент подтверждения: человек видит, чему в
+        карточке верить меньше, до того как нажал «Записать».
+        """
+        conf = self.data.get("confidence", {}) or {}
+        return [BLOCK_NAMES.get(k, k) for k, v in conf.items()
+                if isinstance(v, (int, float)) and 0 <= v < LOW_CONFIDENCE]
+
     # ── карточка для чата ─────────────────────────────────────────────
 
     def card(self) -> str:
@@ -88,6 +106,9 @@ class Draft:
         ]
         out = "\n".join(rows)
 
+        if weak := self.weak():
+            out += "\n\n⚠️ собрано на догадках: " + ", ".join(weak) + \
+                   ". Стоит проверить внимательнее."
         if self.divergence:
             out += f"\n\n⚠️ {self.divergence}"
         return out

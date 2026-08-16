@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
@@ -123,6 +124,54 @@ def wants_edit(text: str) -> bool:
             and any(w in low for w in PROFILE_WORDS))
 
 
+HEADING = re.compile(r"^#{1,3}\s+(.+)$", re.M)
+MARK = "[уточнить факт]"
+
+# Ниже этой доли от прежнего объёма правка это уже не правка, а пересказ.
+COLLAPSE = 0.5
+
+
+def review(current: str, text: str) -> tuple[str, list[str]]:
+    """Что случилось с профилем. Возвращает (отказ, предупреждения).
+
+    Модель переписывает файл целиком, поэтому одна неудачная правка
+    способна стереть работу онбординга. Промпт просит сохранить всё, чего
+    просьба не касается, но промпт это просьба: границу держит код.
+
+    Отказ — только там, где ни одна разумная просьба не объясняет потерю.
+    «Убери раздел про X» это законная просьба, поэтому пропавший раздел
+    называется человеку, а решает он.
+    """
+    body = text.lstrip()
+    if not body.startswith("#"):
+        return "ответ не похож на файл профиля", []
+    if not body.strip(" #\n"):
+        return "вернулся пустой файл", []
+
+    if len(text) < len(current) * COLLAPSE:
+        return (f"файл усох с {len(current)} знаков до {len(text)}, "
+                "это пересказ, а не правка"), []
+
+    was = HEADING.findall(current)
+    now = set(HEADING.findall(text))
+    if was and was[0] not in now:
+        return f"пропал заголовок «{was[0]}»", []
+
+    out: list[str] = []
+    lost = [h for h in was[1:] if h not in now]
+    if lost:
+        out.append("пропали разделы: " + ", ".join(lost[:4]))
+
+    if "owner:" in current and "owner:" not in text:
+        out.append("пропала строка owner")
+
+    was_marks, now_marks = current.count(MARK), text.count(MARK)
+    if now_marks < was_marks:
+        out.append(f"пометок «уточнить факт» было {was_marks}, "
+                   f"стало {now_marks}")
+    return "", out
+
+
 async def edit(reg, chat_id: int, instruction: str) -> None:
     """Изменить профиль по указанию человека и показать результат."""
     b = _brand(chat_id)
@@ -157,22 +206,28 @@ async def edit(reg, chat_id: int, instruction: str) -> None:
     if text.startswith("```"):
         text = text.strip("`")
         text = text.split("\n", 1)[1] if "\n" in text else text
-    if not text.lstrip().startswith("#"):
+
+    fatal, warnings = review(current, text)
+    if fatal:
+        log.warning("правка профиля отклонена: %s", fatal)
         await reg.say("assistant", chat_id,
-                      "Ответ не похож на файл профиля, ничего не менял.")
+                      f"Правку не приму: {fatal}. Профиль не тронут.\n\n"
+                      "Скажи иначе или пришли материалы файлом.")
         return
 
     _pending_edit[chat_id] = text
     before, after = len(current), len(text)
-    delta = f"{after - before:+d}"
+    card = [f"Готово. Было {before} знаков, стало {after} "
+            f"({after - before:+d})."]
+    if warnings:
+        card += ["", "⚠️ " + "; ".join(warnings)]
+    card += ["", "Записать? Прошлая версия сохранится, откатить можно."]
+
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Записать", callback_data="edit:ok"),
         InlineKeyboardButton(text="❌ Отменить", callback_data="edit:no"),
     ]])
-    await reg.say("assistant", chat_id,
-                  f"Готово. Было {before} знаков, стало {after} ({delta}).\n\n"
-                  "Записать? Прошлая версия сохранится, откатить можно.",
-                  kb=kb)
+    await reg.say("assistant", chat_id, "\n".join(card), kb=kb)
 
 
 _pending_edit: dict[int, str] = {}
