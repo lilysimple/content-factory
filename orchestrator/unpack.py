@@ -17,7 +17,6 @@ log = logging.getLogger("unpack")
 
 MAX_POSTS = 40
 MAX_POST_CHARS = 1200
-LOW_CONFIDENCE = 0.6
 NAME_CHARS = 40
 
 
@@ -62,11 +61,6 @@ class Draft:
     @property
     def divergence(self) -> str | None:
         return self.data.get("divergence")
-
-    def weak_blocks(self) -> list[str]:
-        conf = self.data.get("confidence", {}) or {}
-        return [k for k, v in conf.items() if isinstance(v, (int, float))
-                and v < LOW_CONFIDENCE]
 
     # ── карточка для чата ─────────────────────────────────────────────
 
