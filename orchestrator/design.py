@@ -26,13 +26,11 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import ROOT, cfg
-from orchestrator import agent, publisher
-from storage import brand as brand_store
+from orchestrator import agent, desk, publisher
+from orchestrator.desk import NoWork
 from storage import db
 
 log = logging.getLogger("design")
-
-store = brand_store.Store(cfg.brands_path)
 
 PACK = ROOT / "design-pack"
 MAX_TOKENS = 16000
@@ -66,10 +64,6 @@ REFERENCE = {
 ABSOLUTE = re.compile(r'(?:href|src)\s*=\s*["\'](?:file://|/|[a-z]+://)', re.I)
 LITERAL_COLOR = re.compile(r":\s*#[0-9A-Fa-f]{3,8}\b")
 TAGS = re.compile(r"<[^>]+>")
-
-
-class NoText(RuntimeError):
-    """Утверждённого текста нет — верстать нечего."""
 
 
 class NoSpec(RuntimeError):
@@ -113,34 +107,21 @@ def chrome() -> str:
 
 # ── вход ──────────────────────────────────────────────────────────────
 
-def _brand(chat_id: int):
-    row = db.one("SELECT brand_slug FROM tenants WHERE chat_id = ?", chat_id)
-    return store.get(row["brand_slug"]) if row and row["brand_slug"] else None
-
-
-ID_RX = re.compile(r"\b\d{4}-\d{2}-\d{2}-[a-z]+-\d{2}\b")
-
-
 def _pick(chat_id: int, ask: str) -> dict[str, Any]:
     """Тема с утверждённым текстом. Верстать черновик смысла нет."""
-    rows = db.q("SELECT * FROM themes WHERE chat_id = ? AND status = 'ready' "
-                "AND asset IS NOT NULL ORDER BY date", chat_id)
-    if not rows:
-        raise NoText("нет ни одного утверждённого текста")
-
-    if m := ID_RX.search(ask):
-        for r in rows:
-            if r["id"] == m.group():
-                return dict(r)
-        raise NoText(f"у темы {m.group()} нет утверждённого текста")
-    return dict(rows[0])
+    return desk.pick(
+        chat_id, ask, statuses=("ready",), fresh="ready",
+        suits=lambda r: bool(r["asset"]),
+        wrong="у темы {id} нет утверждённого текста",
+        none="темы {id} нет среди утверждённых",
+        empty="нет ни одного утверждённого текста")
 
 
 def _copy(b, theme: dict[str, Any]) -> str:
     """Утверждённый текст без служебной шапки Редактора."""
     raw = b.read(theme["asset"])
     if not raw.strip():
-        raise NoText(f"файл {theme['asset']} пуст")
+        raise NoWork(f"файл {theme['asset']} пуст")
     return raw.split("-->", 1)[-1].strip() if raw.startswith("<!--") else raw.strip()
 
 
@@ -305,9 +286,9 @@ def _brief(theme: dict[str, Any], copy: str, spec: str, photos: list[str],
 
 
 async def build(chat_id: int, ask: str, *, say=None) -> Layout:
-    b = _brand(chat_id)
+    b = desk.brand(chat_id)
     if b is None:
-        raise NoText("профиль бренда ещё не собран")
+        raise NoWork("профиль бренда ещё не собран")
 
     theme = _pick(chat_id, ask)
     plat = theme.get("plat") or "telegram"
@@ -340,7 +321,7 @@ async def build(chat_id: int, ask: str, *, say=None) -> Layout:
     cards = [c for c in (data.get("cards") or [])
              if isinstance(c, dict) and str(c.get("html") or "").strip()]
     if not cards:
-        raise NoText("Дизайнер не вернул ни одного макета")
+        raise NoWork("Дизайнер не вернул ни одного макета")
 
     lay = Layout(theme=theme, cards=cards,
                  accent=str(data.get("accent") or ""),
@@ -371,8 +352,23 @@ async def build(chat_id: int, ask: str, *, say=None) -> Layout:
 
 # ── карточка и кнопки ─────────────────────────────────────────────────
 
-_pending: dict[int, Layout] = {}
-_awaiting_fix: set[int] = set()
+def _recover(chat_id: int, theme_id: str) -> Layout | None:
+    """Поднять макет из базы и с диска: память процесса его не помнит."""
+    row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
+                 theme_id, chat_id)
+    if row is None:
+        return None
+    b = desk.brand(chat_id)
+    files = sorted(b.path("posts").glob(f"{theme_id}-*")) if b else []
+    return Layout(theme=dict(row), files=list(files))
+
+
+table = desk.Desk("design", corrections="design/corrections.md",
+                  recover=_recover)
+
+
+def wants_fix(chat_id: int) -> bool:
+    return table.wants_fix(chat_id)
 
 
 def _kb(theme_id: str) -> InlineKeyboardMarkup:
@@ -402,12 +398,8 @@ def caption(lay: Layout, size: tuple[int, int]) -> str:
     return "\n".join(out)
 
 
-def wants_fix(chat_id: int) -> bool:
-    return chat_id in _awaiting_fix
-
-
 async def run(reg, chat_id: int, ask: str, topic: str = "design") -> None:
-    _awaiting_fix.discard(chat_id)
+    table.clear(chat_id)
 
     async def say(text: str) -> None:
         await reg.say("design", chat_id, text, topic=topic)
@@ -415,39 +407,32 @@ async def run(reg, chat_id: int, ask: str, topic: str = "design") -> None:
     try:
         lay = await build(chat_id, ask, say=say)
     except NoSpec as e:
-        await reg.say("design", chat_id,
-                      f"ТЗ площадки нет: {e}. Собирать на глаз не буду, "
-                      "иначе макет разъедется с брендом.\n\nЗаведи ТЗ в "
-                      "<code>design/platforms/</code> папки бренда — по нему "
-                      "и соберу.", topic=topic)
+        await say(f"ТЗ площадки нет: {e}. Собирать на глаз не буду, "
+                  "иначе макет разъедется с брендом.\n\nЗаведи ТЗ в "
+                  "<code>design/platforms/</code> папки бренда — по нему "
+                  "и соберу.")
         return
-    except NoText as e:
-        await reg.say("design", chat_id,
-                      f"Верстать нечего: {e}. Сначала текст от Редактора.",
-                      topic=topic)
+    except NoWork as e:
+        await say(f"Верстать нечего: {e}. Сначала текст от Редактора.")
         return
     except NoRenderer as e:
-        await reg.say("design", chat_id,
-                      f"Макет собрал, но PNG не получился: {e}. "
-                      "Отдавать один HTML без картинки смысла нет.",
-                      topic=topic)
+        await say(f"Макет собрал, но PNG не получился: {e}. "
+                  "Отдавать один HTML без картинки смысла нет.")
         return
     except agent.BudgetExceeded as e:
-        await reg.say("design", chat_id, f"Остановился: {e}", topic=topic)
+        await say(f"Остановился: {e}")
         return
     except Exception as e:                                   # noqa: BLE001
         log.exception("макет не собрался")
-        reason = getattr(e, "message", None) or str(e) or type(e).__name__
-        await reg.say("design", chat_id, f"Макет не собрался: {reason}",
-                      topic=topic)
+        await say(f"Макет не собрался: {desk.reason(e)}")
         return
 
     plat = lay.theme.get("plat") or "telegram"
     size = CANVAS.get(_key(plat, lay.theme.get("format") or "")) \
         or CANVAS[(plat, None)]
-    _pending[chat_id] = lay
+    table.hold(chat_id, lay)
 
-    await reg.say("design", chat_id, caption(lay, size), topic=topic)
+    await say(caption(lay, size))
     for png in lay.pngs:
         await reg.send_file("design", chat_id, png.read_bytes(), png.name,
                             topic=topic, as_photo=True)
@@ -461,18 +446,13 @@ async def run(reg, chat_id: int, ask: str, topic: str = "design") -> None:
 
 async def revise(reg, chat_id: int, instruction: str,
                  topic: str = "design") -> None:
-    _awaiting_fix.discard(chat_id)
-    lay = _pending.get(chat_id)
+    lay = table.take(chat_id)
     if lay is None:
         await reg.say("design", chat_id, "Этот макет уже неактуален.",
                       topic=topic)
         return
 
-    b = _brand(chat_id)
-    if b is not None:
-        b.append("design/corrections.md",
-                 f"- {lay.theme['id']}: {instruction.strip()}")
-
+    table.note(chat_id, lay.theme["id"], instruction)
     await run(reg, chat_id,
               f"Правка к макету темы {lay.theme['id']}: {instruction}",
               topic=topic)
@@ -481,53 +461,35 @@ async def revise(reg, chat_id: int, instruction: str,
 async def on_callback(reg, chat_id: int, action: str,
                       topic: str = "design") -> None:
     action, _, theme_id = action.partition(":")
-    lay = _pending.get(chat_id)
-    if lay is not None and theme_id and lay.theme["id"] != theme_id:
-        lay = None
-    if lay is None and theme_id:
-        row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
-                     theme_id, chat_id)
-        if row is not None:
-            b = _brand(chat_id)
-            files = sorted(b.path("posts").glob(f"{theme_id}-*")) if b else []
-            lay = Layout(theme=dict(row), files=list(files))
 
-    if action == "ok":
-        _pending.pop(chat_id, None)
-        _awaiting_fix.discard(chat_id)
-        if lay is None:
-            await reg.say("design", chat_id, "Этот макет уже неактуален.",
-                          topic=topic)
-            return
-        await reg.say("design", chat_id,
-                      f"Принято. Файлы лежат в <code>posts/</code> папки "
-                      f"бренда: {len(lay.pngs)} PNG и столько же HTML.",
-                      topic=topic)
-        return
+    async def say(text: str) -> None:
+        await reg.say("design", chat_id, text, topic=topic)
 
     if action == "fix":
+        lay = table.get(chat_id, theme_id)
         if lay is None:
-            await reg.say("design", chat_id, "Этот макет уже неактуален.",
-                          topic=topic)
+            await say("Этот макет уже неактуален.")
             return
-        _awaiting_fix.add(chat_id)
-        await reg.say("design", chat_id,
-                      "Напиши одним сообщением, что поправить. Запишу правку "
-                      "в дизайн-профиль и пересоберу.", topic=topic)
+        table.await_fix(chat_id, lay)
+        await say("Напиши одним сообщением, что поправить. Запишу правку "
+                  "в дизайн-профиль и пересоберу.")
         return
 
-    if action == "queue":
-        _pending.pop(chat_id, None)
-        _awaiting_fix.discard(chat_id)
-        if lay is None:
-            await reg.say("design", chat_id, "Этот макет уже неактуален.",
-                          topic=topic)
-            return
+    if action not in {"ok", "queue"}:
+        return
 
-        # Не фраза о Публикаторе, а передача ему: комплект собирает он,
-        # и он же скажет, чего в комплекте не хватает.
-        tid = lay.theme["id"]
-        await reg.say("design", chat_id,
-                      f"Передаю комплект <code>{tid}</code> Публикатору.",
-                      topic=topic)
-        await publisher.run(reg, chat_id, tid, topic="queue")
+    lay = table.take(chat_id, theme_id)
+    if lay is None:
+        await say("Этот макет уже неактуален.")
+        return
+
+    if action == "ok":
+        await say(f"Принято. Файлы лежат в <code>posts/</code> папки "
+                  f"бренда: {len(lay.pngs)} PNG и столько же HTML.")
+        return
+
+    # «В очередь» это передача Публикатору, а не рассказ о нём: комплект
+    # собирает он, и он же скажет, чего в комплекте не хватает.
+    tid = lay.theme["id"]
+    await say(f"Передаю комплект <code>{tid}</code> Публикатору.")
+    await publisher.run(reg, chat_id, tid, topic="queue")

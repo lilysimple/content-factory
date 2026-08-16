@@ -15,7 +15,7 @@ from harness import CHAT, FakeRegistry, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
-from orchestrator import design, editor                           # noqa: E402
+from orchestrator import design, desk, editor                         # noqa: E402
 from storage import db                                            # noqa: E402
 
 db.init(cfg.db_path)
@@ -38,7 +38,7 @@ COPY = ("Я пришла в AI из аудита и проектов. Кода �
 
 
 def seed():
-    b = design._brand(CHAT)
+    b = desk.brand(CHAT)
     tid = "2026-08-15-telegram-01"
     b.artifact(f"posts/{tid}.md", f"<!-- {tid} -->\n\n{COPY}")
     with db.tx() as c:
@@ -54,7 +54,7 @@ def seed():
 async def main() -> None:
     reg = Reg()
     tid = seed()
-    b = design._brand(CHAT)
+    b = desk.brand(CHAT)
 
     lay = await design.build(CHAT, "сделай обложку")
 

@@ -14,7 +14,7 @@ from harness import CHAT, FakeRegistry, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
-from orchestrator import publisher                                # noqa: E402
+from orchestrator import desk, publisher                              # noqa: E402
 from storage import db                                            # noqa: E402
 
 db.init(cfg.db_path)
@@ -57,7 +57,7 @@ class Reg(FakeRegistry):
 
 def seed(tid="2026-08-14-telegram-01", date="2026-08-14", status="ready",
          text="Готовый текст поста.", png=False):
-    b = publisher._brand(CHAT)
+    b = desk.brand(CHAT)
     # Артефакты прошлого прогона живут на диске и подмешиваются в комплект:
     # тема без картинки внезапно получает обложку и потолок подписи 1024.
     for old in b.path("posts").glob(f"{tid}-*"):

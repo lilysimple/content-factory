@@ -16,24 +16,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import cfg
-from orchestrator import agent
-from storage import brand as brand_store
+from orchestrator import agent, desk
 from storage import db
 
 log = logging.getLogger("strategy")
 
-store = brand_store.Store(cfg.brands_path)
-
 DAYS = 7                     # горизонт плана
 ARCHIVE_LIMIT = 20           # сколько недавних тем показывать как «не повторяй»
-PROFILE_LIMIT = 8000
 MAX_TOKENS = 16000
 
 # Секции профиля, по которым Стратег строит темы. Голос ему не нужен:
@@ -94,13 +89,8 @@ class Plan:
 # ── слои контекста ────────────────────────────────────────────────────
 
 def _today(chat_id: int) -> date:
-    row = db.one("SELECT tz FROM tenants WHERE chat_id = ?", chat_id)
-    tz = (row["tz"] if row else None) or cfg.default_tz
-    try:
-        return datetime.now(ZoneInfo(tz)).date()
-    except Exception:                                        # noqa: BLE001
-        log.warning("часовой пояс %s не распознан, беру системный", tz)
-        return date.today()
+    """Сегодня датой. Часовой пояс тенанта считает `desk.today`."""
+    return date.fromisoformat(desk.today(chat_id))
 
 
 def _window(chat_id: int) -> list[date]:
@@ -280,12 +270,11 @@ def _profile(chat_id: int) -> tuple[str, str, Any]:
                  chat_id)
     if not row or not row["brand_slug"]:
         raise NoBrand("профиль бренда ещё не собран")
-    b = store.get(row["brand_slug"])
+    b = desk.brand(chat_id)
     if b is None:
         raise NoBrand(f"папка профиля {row['brand_slug']} не найдена")
 
-    parts = [s for s in (b.section("core", n) for n in SECTIONS) if s]
-    return b.name(), ("\n\n".join(parts) or b.read("core"))[:PROFILE_LIMIT], b
+    return b.name(), desk.profile(b, SECTIONS), b
 
 
 # ── запись плана ──────────────────────────────────────────────────────

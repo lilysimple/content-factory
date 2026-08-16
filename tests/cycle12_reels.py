@@ -135,7 +135,7 @@ async def main() -> None:
 
     # ── 2. суфлёр собирает код ────────────────────────────────────────
     print("\n2. Суфлёр собирает код")
-    reel = reels._pending[CHAT]
+    reel = reels.table.get(CHAT)
     check("текст собран из блоков по порядку",
           reel.script.startswith("Ты открываешь") and
           reel.script.rstrip().endswith("финальную версию."),
@@ -358,7 +358,7 @@ async def main() -> None:
     install(answer())
     reg.clear()
     await reels.run(reg, CHAT, "сделай сценарий")
-    reels._pending.clear()                       # как будто бот перезапустили
+    reels.table.clear()                       # как будто бот перезапустили
     await reels.on_callback(reg, CHAT, f"ok:{REEL}")
     check("сценарий поднят из базы", theme(REEL)["status"] == "ready",
           theme(REEL)["status"])

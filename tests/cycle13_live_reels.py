@@ -61,7 +61,7 @@ async def main() -> None:
     body = path.read_text(encoding="utf-8") if path.exists() else ""
     script = body.split("-->", 1)[-1].strip()
 
-    reel = reels._pending.get(CHAT)
+    reel = reels.table.get(CHAT)
     check("сценарий остался в памяти", reel is not None)
     if reel is None:
         return

@@ -14,7 +14,7 @@ from harness import CHAT, FakeRegistry, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
-from orchestrator import agent, editor                            # noqa: E402
+from orchestrator import agent, desk, editor                          # noqa: E402
 from storage import db                                            # noqa: E402
 
 db.init(cfg.db_path)
@@ -129,8 +129,8 @@ async def main() -> None:
     # ── 4. отказ скрипта: стоп-слово бренда ───────────────────────────
     print("\n4. Стоп-слово бренда")
     seed_themes()
-    b = editor._brand(CHAT)
-    stop = editor._stopwords(b)
+    b = desk.brand(CHAT)
+    stop = b.stopwords()
     check("стоп-слова вычитаны из профиля", len(stop) >= 3, str(stop))
     if stop:
         install(answer(f"Это настоящий {stop[0]} в работе."), answer(CLEAN))

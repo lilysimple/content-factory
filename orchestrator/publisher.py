@@ -15,27 +15,21 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import cfg
+from orchestrator import desk
+from orchestrator.desk import ID_RX
 from orchestrator.strategy import AUTO_PUBLISH
-from storage import brand as brand_store
 from storage import db
 
 log = logging.getLogger("publisher")
 
-store = brand_store.Store(cfg.brands_path)
-
 TG_LIMIT = 4096              # потолок текста поста
 TG_CAPTION = 1024            # потолок подписи под картинкой
-
-ID_RX = re.compile(r"\b\d{4}-\d{2}-\d{2}-[a-z]+-\d{2}\b")
 
 
 class NotReady(RuntimeError):
@@ -66,25 +60,11 @@ class Package:
 
 # ── сборка комплекта ──────────────────────────────────────────────────
 
-def _brand(chat_id: int):
-    row = db.one("SELECT brand_slug FROM tenants WHERE chat_id = ?", chat_id)
-    return store.get(row["brand_slug"]) if row and row["brand_slug"] else None
-
-
-def _today(chat_id: int) -> str:
-    row = db.one("SELECT tz FROM tenants WHERE chat_id = ?", chat_id)
-    tz = (row["tz"] if row else None) or cfg.default_tz
-    try:
-        return datetime.now(ZoneInfo(tz)).date().isoformat()
-    except Exception:                                        # noqa: BLE001
-        return datetime.now().date().isoformat()
-
-
 def due(chat_id: int) -> list[dict[str, Any]]:
     """Темы, готовые к публикации: текст утверждён, дата наступила."""
     rows = db.q("SELECT * FROM themes WHERE chat_id = ? AND status = 'ready' "
                 "AND asset IS NOT NULL AND date <= ? ORDER BY date",
-                chat_id, _today(chat_id))
+                chat_id, desk.today(chat_id))
     return [dict(r) for r in rows]
 
 
@@ -96,13 +76,13 @@ def overdue(chat_id: int) -> list[dict[str, Any]]:
     """
     rows = db.q("SELECT * FROM themes WHERE chat_id = ? AND date < ? "
                 "AND status IN ('idea', 'draft', 'ready') ORDER BY date",
-                chat_id, _today(chat_id))
+                chat_id, desk.today(chat_id))
     return [dict(r) for r in rows]
 
 
 def collect(chat_id: int, theme: dict[str, Any]) -> Package:
     """Собрать комплект и честно перечислить, чего не хватает."""
-    b = _brand(chat_id)
+    b = desk.brand(chat_id)
     pkg = Package(theme=theme)
     if b is None:
         pkg.problems.append("профиля бренда нет")
@@ -298,7 +278,7 @@ async def _show(reg, chat_id: int, theme: dict[str, Any], topic: str) -> None:
     """
     pkg = collect(chat_id, theme)
     blocking = [p for p in pkg.problems if "автоматом не публикуется" not in p]
-    early = (theme.get("date") or "") > _today(chat_id)
+    early = (theme.get("date") or "") > desk.today(chat_id)
 
     text = preview(pkg)
     if early:

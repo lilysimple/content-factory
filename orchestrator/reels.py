@@ -25,20 +25,16 @@ from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import cfg
-from orchestrator import agent, design
+from orchestrator import agent, desk, design
+from orchestrator.desk import NoWork
 from orchestrator.strategy import SPOKEN
-from storage import brand as brand_store
 from storage import db
 from validators import check_script, check_voice
 
 log = logging.getLogger("reels")
 
-store = brand_store.Store(cfg.brands_path)
-
 MAX_ROUNDS = 2
 MAX_TOKENS = 8000
-PROFILE_LIMIT = 8000
 VOICE_FLOOR = 3              # балл voice ниже — автоматический отказ
 
 # Форматы, которые снимают, а не пишут. Набор один на завод, см. strategy.
@@ -62,10 +58,6 @@ MERGED_AT = 30
 SECTIONS = ("Кто это", "Аудитория", "Голос", "Формат")
 
 WORDS_PER_SEC = 2
-
-
-class NoTheme(RuntimeError):
-    """Снимать нечего: подходящей темы в плане нет."""
 
 
 class ScriptRefused(RuntimeError):
@@ -105,7 +97,6 @@ class Reel:
 
 # ── выбор темы ────────────────────────────────────────────────────────
 
-ID_RX = re.compile(r"\b\d{4}-\d{2}-\d{2}-[a-z]+-\d{2}\b")
 SEC_RX = re.compile(r"\b(\d{2})\s*(?:сек\w*|c|с)\b", re.I)
 
 
@@ -120,68 +111,20 @@ def seconds_from(ask: str) -> int:
 
 
 def _pick(chat_id: int, ask: str) -> dict[str, Any]:
-    """Тема под ролик: формат `reels` или `shorts`.
-
-    Названная по id тема берётся и в статусе `draft`: правка приходит
-    к уже написанному сценарию, и требовать от него статус `idea`
-    значит не находить ровно то, что человек сейчас правит. Молча,
-    без id, берём только неначатое.
-    """
-    rows = db.q("SELECT * FROM themes WHERE chat_id = ? AND "
-                "status IN ('idea', 'draft') ORDER BY date", chat_id)
-
-    if m := ID_RX.search(ask):
-        for r in rows:
-            if r["id"] == m.group():
-                if (r["format"] or "").lower() not in FORMATS:
-                    raise NoTheme(f"тема {m.group()} это "
-                                  f"{r['format'] or 'не ролик'}, "
-                                  "сценарий ей не нужен")
-                return dict(r)
-        raise NoTheme(f"темы {m.group()} нет среди начатых и неначатых")
-
-    fresh = [r for r in rows if r["status"] == "idea"]
-    mine = [r for r in fresh if (r["format"] or "").lower() in FORMATS]
-    if not mine:
-        raise NoTheme("в плане нет ни одной неначатой темы под ролик"
-                      if fresh else "в плане нет ни одной неначатой темы")
-
-    # Совпадение по словам заголовка: «сценарий про файл ЯДРО».
-    words = {w for w in re.findall(r"\w{4,}", (ask or "").lower())}
-    if words:
-        best, hits = None, 0
-        for r in mine:
-            title = set(re.findall(r"\w{4,}", (r["title"] or "").lower()))
-            n = len(words & title)
-            if n > hits:
-                best, hits = r, n
-        if best is not None and hits >= 2:
-            return dict(best)
-
-    return dict(mine[0])
+    return desk.pick(
+        chat_id, ask, statuses=("idea", "draft"),
+        suits=lambda r: (r["format"] or "").lower() in FORMATS,
+        wrong="тема {id} это {format}, сценарий ей не нужен",
+        none="темы {id} нет среди начатых и неначатых",
+        empty="в плане нет ни одной неначатой темы под ролик")
 
 
 # ── профиль ───────────────────────────────────────────────────────────
 
-def _brand(chat_id: int):
-    row = db.one("SELECT brand_slug FROM tenants WHERE chat_id = ?", chat_id)
-    return store.get(row["brand_slug"]) if row and row["brand_slug"] else None
-
-
 def _brief(theme: dict[str, Any], seconds: int) -> str:
     """Задание: тема, хронометраж, честная строка про недостающий слой."""
     lo, hi = check_script.budget(seconds)
-    lines = ["## Тема из плана", ""]
-    for label, key in (("id", "id"), ("дата", "date"), ("площадка", "plat"),
-                       ("формат", "format"), ("рубрика", "rubric"),
-                       ("цель", "goal"), ("архетип", "arch"),
-                       ("рабочий заголовок", "title"), ("хук", "hook"),
-                       ("кому и зачем", "why"), ("угол", "angle"),
-                       ("ведущий заряд", "charge")):
-        if theme.get(key):
-            lines.append(f"- {label}: {theme[key]}")
-
-    lines += [
+    lines = ["## Тема из плана", ""] + desk.brief(theme) + [
         "", "## Хронометраж", "",
         f"{seconds} секунд, бюджет {lo}–{hi} слов на весь сценарий.",
         "",
@@ -246,16 +189,15 @@ def _problems(reel: Reel, stopwords: list[str]) -> list[str]:
 
 async def build(chat_id: int, ask: str, *, say=None) -> Reel:
     """Написать сценарий, переписывая пока код даёт отказ."""
-    b = _brand(chat_id)
+    b = desk.brand(chat_id)
     if b is None:
-        raise NoTheme("профиль бренда ещё не собран")
+        raise NoWork("профиль бренда ещё не собран")
 
     theme = _pick(chat_id, ask)
     seconds = seconds_from(ask)
     stop = b.stopwords()
 
-    parts = [s for s in (b.section("core", n) for n in SECTIONS) if s]
-    profile = ("\n\n".join(parts) or b.read("core"))[:PROFILE_LIMIT]
+    profile = desk.profile(b, SECTIONS)
 
     reel = Reel(theme=theme, seconds=seconds)
     extra = ""
@@ -375,18 +317,31 @@ def _save(chat_id: int, b, reel: Reel) -> str:
         notes += ["", "## Что не сошлось", ""] + [f"- {n}" for n in reel.notes]
     b.artifact(f"posts/{tid}-script-notes.md", "\n".join(notes) + "\n")
 
-    with db.tx() as c:
-        c.execute("UPDATE themes SET status = 'draft', asset = ?, "
-                  "updated_at = datetime('now') WHERE id = ? AND chat_id = ?",
-                  (rel, tid, chat_id))
+    desk.drafted(chat_id, tid, rel)
     log.info("сценарий сохранён: %s", rel)
     return rel
 
 
 # ── карточка и кнопки ─────────────────────────────────────────────────
 
-_pending: dict[int, Reel] = {}
-_awaiting_fix: set[int] = set()
+def _recover(chat_id: int, theme_id: str) -> Reel | None:
+    """Поднять сценарий из базы, если память процесса его не помнит.
+
+    Блоки обратно из файла не разбираются: на диске лежит суфлёр, и
+    границы блоков в нём стёрты намеренно. Кнопкам хватает темы, а
+    правка всё равно пересобирает сценарий заново.
+    """
+    row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
+                 theme_id, chat_id)
+    return Reel(theme=dict(row)) if row is not None else None
+
+
+table = desk.Desk("reels", corrections="voice-corrections.md",
+                  recover=_recover)
+
+
+def wants_fix(chat_id: int) -> bool:
+    return table.wants_fix(chat_id)
 
 
 def _kb(theme_id: str) -> InlineKeyboardMarkup:
@@ -420,44 +375,35 @@ def card(reel: Reel) -> str:
     return "\n".join(out)
 
 
-def wants_fix(chat_id: int) -> bool:
-    return chat_id in _awaiting_fix
-
-
 async def run(reg, chat_id: int, ask: str, topic: str = "reels") -> None:
-    _awaiting_fix.discard(chat_id)
+    table.clear(chat_id)
 
     async def say(text: str) -> None:
         await reg.say("reels", chat_id, text, topic=topic)
 
     try:
         reel = await build(chat_id, ask, say=say)
-    except NoTheme as e:
-        await reg.say("reels", chat_id,
-                      f"Снимать нечего: {e}. Нужна тема в формате reels "
-                      "или shorts — это к Стратегу.", topic=topic)
+    except NoWork as e:
+        await say(f"Снимать нечего: {e}. Нужна тема в формате reels "
+                  "или shorts — это к Стратегу.")
         return
     except ScriptRefused as e:
-        await reg.say("reels", chat_id,
-                      f"Сценарий не прошёл проверку за два круга: {e}.\n\n"
-                      "Выдавать с оговоркой не буду. Скажи, что поправить, "
-                      "или возьмём другую тему.", topic=topic)
+        await say(f"Сценарий не прошёл проверку за два круга: {e}.\n\n"
+                  "Выдавать с оговоркой не буду. Скажи, что поправить, "
+                  "или возьмём другую тему.")
         return
     except agent.BudgetExceeded as e:
-        await reg.say("reels", chat_id, f"Остановился: {e}", topic=topic)
+        await say(f"Остановился: {e}")
         return
     except Exception as e:                                   # noqa: BLE001
         log.exception("сценарий не собрался")
-        reason = getattr(e, "message", None) or str(e) or type(e).__name__
-        await reg.say("reels", chat_id, f"Сценарий не собрался: {reason}",
-                      topic=topic)
+        await say(f"Сценарий не собрался: {desk.reason(e)}")
         return
 
-    b = _brand(chat_id)
-    _save(chat_id, b, reel)
-    _pending[chat_id] = reel
+    _save(chat_id, desk.brand(chat_id), reel)
+    table.hold(chat_id, reel)
 
-    await reg.say("reels", chat_id, card(reel), topic=topic)
+    await say(card(reel))
     # Суфлёр отдельным сообщением и без подписи роли: его копируют
     # целиком в телефон, и служебная строка сверху уедет вместе с ним.
     await reg.say("reels", chat_id, reel.script, topic=topic,
@@ -466,87 +412,54 @@ async def run(reg, chat_id: int, ask: str, topic: str = "reels") -> None:
 
 async def revise(reg, chat_id: int, instruction: str,
                  topic: str = "reels") -> None:
-    """Пересобрать сценарий по правке человека.
-
-    Правка это обучающий сигнал, а не разовая просьба: она дописывается
-    в `voice-corrections.md` бренда, как у Редактора.
-    """
-    _awaiting_fix.discard(chat_id)
-    reel = _pending.get(chat_id)
+    """Пересобрать сценарий по правке человека."""
+    reel = table.take(chat_id)
     if reel is None:
         await reg.say("reels", chat_id, "Этот сценарий уже неактуален.",
                       topic=topic)
         return
 
-    b = _brand(chat_id)
-    if b is not None:
-        b.append("voice-corrections.md",
-                 f"- {reel.theme['id']} (сценарий): {instruction.strip()}")
-
+    table.note(chat_id, f"{reel.theme['id']} (сценарий)", instruction)
     await run(reg, chat_id,
               f"Правка к сценарию темы {reel.theme['id']} "
               f"({reel.seconds} сек): {instruction}", topic=topic)
 
 
-def _recover(chat_id: int, theme_id: str) -> Reel | None:
-    """Поднять сценарий из базы, если память процесса его не помнит.
-
-    Блоки обратно из файла не разбираются: на диске лежит суфлёр, и
-    границы блоков в нём стёрты намеренно. Кнопкам хватает темы, а
-    правка всё равно пересобирает сценарий заново.
-    """
-    row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
-                 theme_id, chat_id)
-    return Reel(theme=dict(row)) if row is not None else None
-
-
 async def on_callback(reg, chat_id: int, action: str,
                       topic: str = "reels") -> None:
     action, _, theme_id = action.partition(":")
-    reel = _pending.get(chat_id)
-    if reel is not None and theme_id and reel.theme["id"] != theme_id:
-        reel = None
-    if reel is None and theme_id:
-        reel = _recover(chat_id, theme_id)
 
-    if action in {"ok", "design"}:
-        _pending.pop(chat_id, None)
-        _awaiting_fix.discard(chat_id)
-        if reel is None:
-            await reg.say("reels", chat_id, "Этот сценарий уже неактуален.",
-                          topic=topic)
-            return
-
-        tid = reel.theme["id"]
-        with db.tx() as c:
-            c.execute("UPDATE themes SET status = 'ready', "
-                      "updated_at = datetime('now') "
-                      "WHERE id = ? AND chat_id = ?", (tid, chat_id))
-
-        if action == "ok":
-            await reg.say("reels", chat_id,
-                          f"Готово, <code>{tid}</code> в статусе ready. "
-                          "Обложку соберёт Дизайнер, подпись под видео "
-                          "напишет Редактор.", topic=topic)
-            return
-
-        await reg.say("reels", chat_id,
-                      f"Принял сценарий <code>{tid}</code> и передаю "
-                      "Дизайнеру на обложку.", topic=topic)
-        await design.run(reg, chat_id, f"свёрстай обложку по теме {tid}",
-                         topic="design")
-        return
+    async def say(text: str) -> None:
+        await reg.say("reels", chat_id, text, topic=topic)
 
     if action == "fix":
+        reel = table.get(chat_id, theme_id)
         if reel is None:
-            await reg.say("reels", chat_id, "Этот сценарий уже неактуален.",
-                          topic=topic)
+            await say("Этот сценарий уже неактуален.")
             return
-        # Поднятый из базы сценарий кладём обратно в память: иначе
-        # кнопка спросит правку, а следующее сообщение упрётся в
-        # «уже неактуален».
-        _pending[chat_id] = reel
-        _awaiting_fix.add(chat_id)
-        await reg.say("reels", chat_id,
-                      "Напиши одним сообщением, что поправить. Запишу правку "
-                      "в профиль голоса и перепишу сценарий.", topic=topic)
+        table.await_fix(chat_id, reel)
+        await say("Напиши одним сообщением, что поправить. Запишу правку "
+                  "в профиль голоса и перепишу сценарий.")
+        return
+
+    if action not in {"ok", "design"}:
+        return
+
+    reel = table.take(chat_id, theme_id)
+    if reel is None:
+        await say("Этот сценарий уже неактуален.")
+        return
+
+    tid = reel.theme["id"]
+    desk.ready(chat_id, tid)
+
+    if action == "ok":
+        await say(f"Готово, <code>{tid}</code> в статусе ready. "
+                  "Обложку соберёт Дизайнер, подпись под видео "
+                  "напишет Редактор.")
+        return
+
+    await say(f"Принял сценарий <code>{tid}</code> и передаю "
+              "Дизайнеру на обложку.")
+    await design.run(reg, chat_id, f"свёрстай обложку по теме {tid}",
+                     topic="design")

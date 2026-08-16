@@ -15,7 +15,7 @@ from harness import CHAT, FakeRegistry, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
-from orchestrator import editor, strategy                         # noqa: E402
+from orchestrator import desk, editor, strategy                       # noqa: E402
 from storage import db                                            # noqa: E402
 from validators import check_voice                                # noqa: E402
 
@@ -51,8 +51,8 @@ async def main() -> None:
 
     check("текст непустой", len(text) > 200, f"{len(text)} знаков")
 
-    b = editor._brand(CHAT)
-    findings = check_voice.check(text, stopwords=editor._stopwords(b))
+    b = desk.brand(CHAT)
+    findings = check_voice.check(text, stopwords=b.stopwords())
     check("скрипт голоса не даёт отказ", not findings,
           "; ".join(str(f) for f in findings[:4]))
 
