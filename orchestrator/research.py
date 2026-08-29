@@ -16,7 +16,9 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from statistics import median
@@ -24,6 +26,7 @@ from typing import Any
 
 from config import cfg
 from orchestrator import agent, desk, sources
+from storage import brand as brand_store
 
 log = logging.getLogger("research")
 
@@ -32,6 +35,11 @@ POSTS_LIMIT = 40            # сколько постов читаем с кан
 RULE_OF_THREE = 3           # с скольких примеров приём становится выводом
 TOP = 3                     # сколько постов показываем сверху и снизу
 WATCHLIST = "research/sources.md"
+
+# Недельная сводка называется по неделе. Проверка нужна, потому что в той
+# же папке лежит выжимка профиля, а `latest` берёт последний файл по имени:
+# без фильтра Стратег получил бы вместо дайджеста выжимку.
+WEEK_FILE = re.compile(r"^\d{4}-W\d{2}$")
 
 
 class NoData(RuntimeError):
@@ -334,7 +342,208 @@ async def run(reg, chat_id: int, ask: str, topic: str = "research") -> None:
 def latest(b) -> tuple[str, str]:
     """Последняя сводка: (неделя, текст). Пусто — сводок ещё нет."""
     folder = b.path("research")
-    files = sorted(folder.glob("*.md")) if folder.is_dir() else []
+    files = sorted(f for f in (folder.glob("*.md") if folder.is_dir() else [])
+                   if WEEK_FILE.match(f.stem))
     if not files:
         return "", ""
     return files[-1].stem, files[-1].read_text(encoding="utf-8")
+
+
+# ── выжимка профиля ───────────────────────────────────────────────────
+#
+# Стратег строит план по целям и площадкам, но перечитывать холодную часть
+# профиля на каждый план незачем: `goals.md` и `platforms.md` меняются раз
+# в недели, а план собирается каждую неделю. Выжимку держит Ресёрчер: он
+# один ходит в холодную часть профиля и один отвечает за её свежесть.
+#
+# Свежесть проверяется хешем исходников, а не памятью процесса. Файл правят
+# и кнопкой в чате, и руками в редакторе, и `git pull` на другой машине, и
+# после перезапуска бот обязан это увидеть. Хеш сошёлся — отдаём готовое,
+# разошёлся — пересобираем и говорим об этом вслух.
+#
+# Собирается кодом, без модели: это нарезка и склейка, а не суждение.
+# Значит, выжимка есть и при пустом балансе API.
+
+DIGEST_PATH = "research/profile-digest.md"
+DIGEST_FILES = ("goals", "platforms")        # что попадает в тело выжимки
+STAMP_FILES = ("core", "goals", "platforms")  # что сторожим хешем
+DIGEST_CUT = 1500                            # знаков с одного файла
+
+# Пропорция воронки из goals.md: «прогрев 50 / продукт 30 / личное 20».
+FUNNEL_WORDS = {"warm": "прогрев", "prod": "продукт", "pers": "личн"}
+BACKUP_FUNNEL = {"warm": 60, "prod": 20, "pers": 20}
+
+_STAMP = re.compile(r"^<!--\s*stamp:\s*(\S+)", re.M)
+_FUNNEL_LINE = re.compile(r"^<!--\s*funnel:\s*(.+?)\s*-->", re.M)
+_MISSING_LINE = re.compile(r"^<!--\s*missing:\s*(.*?)\s*-->", re.M)
+
+
+@dataclass(frozen=True)
+class ProfileDigest:
+    """Выжимка целей и площадок для Стратега."""
+    text: str
+    stamp: str
+    rebuilt: bool                    # пересобрана сейчас, файлы менялись
+    missing: tuple[str, ...] = ()    # каких файлов профиля ещё нет
+    funnel: dict[str, int] = field(default_factory=lambda: dict(BACKUP_FUNNEL))
+    backup: bool = True              # пропорция запасная, а не из профиля
+
+    @property
+    def ratio(self) -> str:
+        return "/".join(str(self.funnel[k]) for k in ("warm", "prod", "pers"))
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _stamp(b) -> str:
+    """Отпечаток файлов, на которых стоит план."""
+    return _sha("\n".join(f"{k}:{_sha(b.read(k))}" for k in STAMP_FILES))
+
+
+def _funnel(text: str) -> dict[str, int] | None:
+    """Пропорция воронки из текста целей. Не сошлась — вернём None.
+
+    Границу держит код: доли, которые не дают сотню, это не пропорция, а
+    опечатка, и работать по ней хуже, чем по честной запасной.
+    """
+    found: dict[str, int] = {}
+    for code, word in FUNNEL_WORDS.items():
+        m = re.search(rf"{word}\w*\W{{0,12}}?(\d{{1,3}})\s*%?", text, re.I)
+        if m:
+            found[code] = int(m.group(1))
+    if len(found) < len(FUNNEL_WORDS) or sum(found.values()) != 100:
+        return None
+    return found
+
+
+def _cut(text: str, limit: int = DIGEST_CUT) -> str:
+    """Обрезать по границе строки: обрубок на середине слова читается как факт."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    cut = head.rfind("\n")
+    return (head[:cut] if cut > limit // 2 else head).rstrip() + "\n\n…"
+
+
+def _build(b) -> ProfileDigest:
+    """Собрать выжимку заново."""
+    body: list[str] = []
+    missing: list[str] = []
+
+    for key in DIGEST_FILES:
+        text = b.read(key).strip()
+        name = brand_store.PROFILE.get(key, key)
+        if not text:
+            missing.append(key)
+            continue
+        body.append(f"### {name}\n\n{_cut(text)}")
+
+    goals = b.read("goals")
+    parsed = _funnel(goals) if goals.strip() else None
+    funnel = parsed or dict(BACKUP_FUNNEL)
+
+    if "goals" in missing:
+        body.append("### goals.md\n\nЦелей этапа и рубрикатора в профиле нет: "
+                    "файл собирается на шагах онбординга O4–O12. Пропорция "
+                    f"воронки запасная, {BACKUP_FUNNEL['warm']}/"
+                    f"{BACKUP_FUNNEL['prod']}/{BACKUP_FUNNEL['pers']}, и "
+                    "назвать её запасной в «Контексте» обязательно.")
+    elif parsed is None:
+        body.append("### Пропорция воронки\n\nВ `goals.md` пропорция не "
+                    "читается или доли не дают сотню. Работаешь по запасной, "
+                    f"{BACKUP_FUNNEL['warm']}/{BACKUP_FUNNEL['prod']}/"
+                    f"{BACKUP_FUNNEL['pers']}, и говоришь об этом.")
+    else:
+        body.append("### Пропорция воронки\n\nИз `goals.md`: прогрев "
+                    f"{funnel['warm']}, продукт {funnel['prod']}, личное "
+                    f"{funnel['pers']}. Это правило бренда, а не догадка.")
+
+    if "platforms" in missing:
+        body.append("### platforms.md\n\nНорм площадок в профиле нет: файл "
+                    "собирается на шагах онбординга O13–O15. Раскладка по "
+                    "площадкам — твоё предложение, человек его утверждает, "
+                    "и ты говоришь об этом строкой в «Контексте».")
+
+    dg = ProfileDigest(text="\n\n".join(body), stamp=_stamp(b), rebuilt=True,
+                       missing=tuple(missing), funnel=funnel,
+                       backup=parsed is None)
+
+    header = (f"<!-- stamp: {dg.stamp} -->\n"
+              f"<!-- funnel: warm={funnel['warm']} prod={funnel['prod']} "
+              f"pers={funnel['pers']} backup={int(dg.backup)} -->\n"
+              f"<!-- missing: {' '.join(dg.missing)} -->\n\n"
+              "# Выжимка профиля для Стратега\n\n"
+              "Собрана кодом из файлов профиля. Пересобирается, когда они "
+              "меняются, а не на каждый план.\n")
+    b.artifact(DIGEST_PATH, header + "\n" + dg.text)
+    log.info("выжимка профиля пересобрана: %s, нет файлов: %s",
+             dg.stamp, ", ".join(dg.missing) or "все на месте")
+    return dg
+
+
+def _parse(text: str, stamp: str) -> ProfileDigest:
+    """Поднять сохранённую выжимку. Ничего не пересчитывая из исходников."""
+    funnel = dict(BACKUP_FUNNEL)
+    backup = True
+    if m := _FUNNEL_LINE.search(text):
+        pairs = dict(p.split("=", 1) for p in m.group(1).split() if "=" in p)
+        try:
+            funnel = {k: int(pairs[k]) for k in ("warm", "prod", "pers")}
+            backup = bool(int(pairs.get("backup", 1)))
+        except (KeyError, ValueError):
+            funnel, backup = dict(BACKUP_FUNNEL), True
+
+    missing: tuple[str, ...] = ()
+    if m := _MISSING_LINE.search(text):
+        missing = tuple(m.group(1).split())
+
+    body = text.split("\n\n", 1)[-1]
+    if "# Выжимка профиля" in body:
+        body = body.split("\n", 1)[-1]
+    return ProfileDigest(text=body.strip(), stamp=stamp, rebuilt=False,
+                         missing=missing, funnel=funnel, backup=backup)
+
+
+def profile_digest(b) -> ProfileDigest:
+    """Выжимка целей и площадок. Пересобирается только при смене файлов."""
+    stamp = _stamp(b)
+    path = b.path(DIGEST_PATH)
+    if path.exists():
+        saved = path.read_text(encoding="utf-8")
+        m = _STAMP.search(saved)
+        if m and m.group(1) == stamp:
+            return _parse(saved, stamp)
+    return _build(b)
+
+
+async def notify_profile(reg, chat_id: int, *, topic: str = "strategy") -> bool:
+    """Профиль изменился — пересобрать выжимку и сказать об этом Стратегу.
+
+    Возвращает True, если выжимка действительно пересобрана. Если файлы не
+    менялись, роль молчит: сообщение «ничего не изменилось» после каждой
+    правки быстро перестают читать.
+    """
+    b = desk.brand(chat_id)
+    if b is None:
+        return False
+
+    dg = profile_digest(b)
+    if not dg.rebuilt:
+        return False
+
+    lines = [f"Профиль изменился, пересобрал выжимку для Стратега "
+             f"(<code>{dg.stamp}</code>)."]
+    lines.append(f"Пропорция воронки: {dg.ratio}"
+                 + (" — запасная, в профиле её нет." if dg.backup
+                    else " — из <code>goals.md</code>."))
+    if dg.missing:
+        lines.append("Ещё нет: "
+                     + ", ".join(f"<code>{brand_store.PROFILE[k]}</code>"
+                                 for k in dg.missing) + ".")
+    lines.append("Планы, собранные раньше, строились на прошлой версии.")
+
+    await reg.say("research", chat_id, "\n".join(lines), topic=topic)
+    return True

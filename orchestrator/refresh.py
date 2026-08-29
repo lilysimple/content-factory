@@ -15,7 +15,7 @@ import re
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import cfg
-from orchestrator import agent, materials, sources, unpack
+from orchestrator import agent, materials, research, sources, unpack
 from storage import brand as brand_store
 from storage import db
 
@@ -280,3 +280,11 @@ async def on_callback(reg, chat_id: int, action: str) -> None:
         f"{materials.summary(moved, samples)}\n\n"
         "Прошлая версия никуда не делась — история хранится, откатить можно.\n"
         "Посмотреть целиком: «покажи ядро».")
+
+    # Стратег профиль не перечитывает, он работает выжимкой. Файл изменился —
+    # выжимку надо пересобрать здесь, а не ждать следующего плана, иначе
+    # человек утверждает неделю, не зная, что она собрана по старой версии.
+    try:
+        await research.notify_profile(reg, chat_id)
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("выжимка профиля не пересобралась: %s", e)

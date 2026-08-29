@@ -37,7 +37,11 @@ MAX_TOKENS = 16000
 SECTIONS = ("Кто это", "Аудитория", "Цель", "Формат")
 
 GOALS = {"warm": "прогрев", "prod": "продукт", "pers": "личное"}
-BACKUP_FUNNEL = {"warm": 60, "prod": 20, "pers": 20}
+
+# Пропорция воронки приходит выжимкой Ресёрчера: она читает её из `goals.md`,
+# а при отсутствии файла подставляет запасную. Держать здесь второе значение
+# нельзя — к первой же правке `goals.md` копии разойдутся.
+BACKUP_FUNNEL = research.BACKUP_FUNNEL
 
 WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 
@@ -218,8 +222,8 @@ def _layers(chat_id: int, busy: dict[Slot, str], free: list[Slot],
     lines.append("")
 
     lines.append("### 1. Дайджест недели")
-    week, digest = research.latest(desk.brand(chat_id)) if desk.brand(chat_id) \
-        else ("", "")
+    b = desk.brand(chat_id)
+    week, digest = research.latest(b) if b else ("", "")
     if digest:
         lines.append(f"Сводка Ресёрчера за {week}. Механики и своя "
                      "статистика ниже — опирайся на них, а не на общие "
@@ -233,10 +237,20 @@ def _layers(chat_id: int, busy: dict[Slot, str], free: list[Slot],
 
     lines.append("### 2. Профиль и архив")
     archive = _archive(chat_id)
-    lines.append("Рубрикатора и целей в профиле нет: `goals.md` и "
-                 "`platforms.md` ещё не собраны. Пропорция воронки запасная, "
-                 f"{BACKUP_FUNNEL['warm']}/{BACKUP_FUNNEL['prod']}/"
-                 f"{BACKUP_FUNNEL['pers']}.")
+    prof = research.profile_digest(b) if b else None
+    if prof:
+        lines.append("Цели и площадки приходят выжимкой Ресёрчера: он держит "
+                     "её свежей, пересобирая при смене файлов профиля. "
+                     "Перечитывать профиль сам ты не должен.")
+        if prof.rebuilt:
+            lines.append("Файлы профиля менялись: выжимка пересобрана только "
+                         "что, прошлые планы строились на другой версии.")
+        lines.append(f"Пропорция воронки {prof.ratio}"
+                     + (", запасная — в профиле её нет, и назвать её запасной "
+                        "в «Контексте» обязательно."
+                        if prof.backup else ", из `goals.md` — это правило "
+                                            "бренда."))
+        lines += ["", prof.text, ""]
     if archive:
         lines.append("Недавние темы, повторять их нельзя:")
         lines += [f"- {a}" for a in archive]
@@ -258,9 +272,14 @@ def _layers(chat_id: int, busy: dict[Slot, str], free: list[Slot],
     lines.append("")
 
     lines.append("### Площадки и форматы")
-    lines.append("Норм площадок в профиле нет: `platforms.md` ещё не собран. "
-                 "Раскладка по площадкам это твоё предложение, человек его "
-                 "утверждает. Скажи об этом строкой в «Контексте».")
+    if prof is None or "platforms" in prof.missing:
+        lines.append("Норм площадок в профиле нет: `platforms.md` ещё не "
+                     "собран. Раскладка по площадкам это твоё предложение, "
+                     "человек его утверждает. Скажи об этом строкой в "
+                     "«Контексте».")
+    else:
+        lines.append("Нормы площадок есть в выжимке выше: держись их, а не "
+                     "общих соображений. Технический набор форматов ниже.")
     for plat, formats in PLATFORMS.items():
         lines.append(f"- `{plat}`: {', '.join(formats)}")
     lines.append("Публикуется автоматом только Telegram. Слоты Instagram и "
