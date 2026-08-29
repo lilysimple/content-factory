@@ -26,12 +26,12 @@ class Config:
     # платить за них одинаково смысла нет.
     role_models: dict[str, str] = field(default_factory=lambda: {
         role: os.getenv(f"MODEL_{role.upper()}", "")
-        for role in ("assistant", "research", "strategy", "editor",
+        for role in ("assistant", "research", "strategy", "ideator", "editor",
                      "reels", "design", "publisher")
     })
     role_effort: dict[str, str] = field(default_factory=lambda: {
         role: os.getenv(f"EFFORT_{role.upper()}", "")
-        for role in ("assistant", "research", "strategy", "editor",
+        for role in ("assistant", "research", "strategy", "ideator", "editor",
                      "reels", "design", "publisher")
     })
     default_effort: str = os.getenv("ANTHROPIC_EFFORT", "high")
@@ -46,6 +46,7 @@ class Config:
         "assistant": os.getenv("BOT_ASSISTANT", ""),
         "research":  os.getenv("BOT_RESEARCH", ""),
         "strategy":  os.getenv("BOT_STRATEGY", ""),
+        "ideator":   os.getenv("BOT_IDEATOR", ""),
         "editor":    os.getenv("BOT_EDITOR", ""),
         "reels":     os.getenv("BOT_REELS", ""),
         "design":    os.getenv("BOT_DESIGN", ""),

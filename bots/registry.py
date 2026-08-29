@@ -69,6 +69,7 @@ ROLES: dict[str, Role] = {
     "assistant": Role("assistant", "🤝", "Ассистент"),
     "research":  Role("research",  "🔍", "Ресёрчер"),
     "strategy":  Role("strategy",  "🎯", "Стратег"),
+    "ideator":   Role("ideator",   "💡", "Идеатор"),
     "editor":    Role("editor",    "✍️", "Редактор"),
     "reels":     Role("reels",     "🎬", "Редактор Reels"),
     "design":    Role("design",    "🎨", "Дизайнер"),
