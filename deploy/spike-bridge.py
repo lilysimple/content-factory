@@ -157,41 +157,96 @@ def main() -> int:
     print("\nЖивые вызовы")
     ask = "Ответь ровно одним словом: ок"
 
-    r = run_claude(ask, env=clean_env(), timeout=120)
-    worked_bare = r["rc"] == 0 and "ок" in r["out"].lower()
-    check("чистое окружение, без ключа", worked_bare,
-          f"{r['secs']}с · {(r['out'] or r['err'])[:60]}")
+    def ok(r: dict) -> bool:
+        return r["rc"] == 0 and "ок" in r["out"].lower()
 
+    bare = run_claude(ask, env=clean_env(), timeout=120)
+    bare_ok = ok(bare)
+    check("чистое окружение, БЕЗ ключа", bare_ok,
+          f"{bare['secs']}с · {(bare['out'] or bare['err'])[:60]}")
+
+    keyed_ok = False
     if key:
         r = run_claude(ask, env=clean_env(ANTHROPIC_API_KEY=key), timeout=120)
-        check("чистое окружение + ANTHROPIC_API_KEY",
-              r["rc"] == 0 and "ок" in r["out"].lower(),
+        keyed_ok = ok(r)
+        check("чистое окружение + ANTHROPIC_API_KEY", keyed_ok,
               f"{r['secs']}с · {(r['out'] or r['err'])[:60]}")
+
+    # Дальше меряем тем способом, который сработал без ключа, если он есть:
+    # именно он и пойдёт в bridge, если решим жить на подписке.
+    env_best = clean_env() if bare_ok else (
+        clean_env(ANTHROPIC_API_KEY=key) if key else clean_env())
 
     # ── 4. машинный вывод ─────────────────────────────────────────────
     print("\nМашинный вывод (нужен bridge, чтобы читать результат кодом)")
-    r = run_claude(ask, env=clean_env(ANTHROPIC_API_KEY=key) if key else clean_env(),
-                   out_format="json", timeout=120)
+    r = run_claude(ask, env=env_best, out_format="json", timeout=120)
     data = {}
     if r["rc"] == 0:
         try:
             data = json.loads(r["out"])
         except json.JSONDecodeError:
             pass
-    check("--output-format json разбирается", bool(data),
+    json_ok = bool(data)
+    check("--output-format json разбирается", json_ok,
           ", ".join(sorted(data)[:8]) if data else "не разобрался")
-    if data:
-        for f in ("session_id", "total_cost_usd", "num_turns", "is_error"):
-            if f in data:
-                print(f"     {f}: {data[f]}")
+    cost = data.get("total_cost_usd")
+    for f in ("session_id", "total_cost_usd", "num_turns", "is_error"):
+        if f in data:
+            print(f"     {f}: {data[f]}")
 
     # ── 5. видимость субагентов ───────────────────────────────────────
     print("\nСубагенты проекта")
     r = run_claude("Сколько файлов в .claude/agents/? Ответь одним числом.",
-                   env=clean_env(ANTHROPIC_API_KEY=key) if key else clean_env(),
-                   tools="Read,Glob", timeout=180)
-    check("субагенты видны из подпроцесса", r["rc"] == 0 and "6" in r["out"],
+                   env=env_best, tools="Read,Glob", timeout=180)
+    agents_ok = r["rc"] == 0 and "6" in r["out"]
+    check("субагенты видны из подпроцесса", agents_ok,
           f"{r['secs']}с · {(r['out'] or r['err'])[:60]}")
+
+    # ── итог: пять вопросов этапа 6 ───────────────────────────────────
+    print("\n" + "─" * 68)
+    print("ИТОГ")
+    print("─" * 68)
+
+    print(f"1. Авторизация subprocess: "
+          f"{'РАБОТАЕТ' if (bare_ok or keyed_ok) else 'НЕ РАБОТАЕТ'}")
+
+    if bare_ok:
+        need_key = "НЕТ — подпроцесс авторизован без него"
+    elif keyed_ok:
+        need_key = "ДА — без ключа подпроцесс не авторизован"
+    else:
+        need_key = "неизвестно: не сработал ни один способ"
+    print(f"2. Нужен ANTHROPIC_API_KEY: {need_key}")
+
+    if bare_ok and cli_login:
+        sub = "ДА — вход CLI сохранён, ключ не понадобился"
+        if cost is not None:
+            sub += (f". total_cost_usd = {cost}"
+                    + (" (ноль: похоже на подписку, а не на API-тариф)"
+                       if not cost else
+                       " — ненулевая цена, проверь, по какому тарифу"))
+    elif bare_ok:
+        sub = ("работает без ключа, но следов входа CLI не найдено — "
+               "разберись, чем именно авторизован процесс")
+    else:
+        sub = "НЕТ — используется API-ключ"
+    print(f"3. Подписка используется: {sub}")
+
+    print(f"4. Запуск из чистого окружения: "
+          f"{'РАБОТАЕТ' if (bare_ok or keyed_ok) else 'НЕ РАБОТАЕТ'}"
+          f" (переменные: {', '.join(KEEP[:2])} + способ авторизации)")
+
+    ready = (bare_ok or keyed_ok) and json_ok and agents_ok
+    print(f"5. Переходить к MVP bridge: {'МОЖНО' if ready else 'РАНО'}")
+    if not ready:
+        blockers = []
+        if not (bare_ok or keyed_ok):
+            blockers.append("нет рабочей авторизации")
+        if not json_ok:
+            blockers.append("не читается JSON-вывод")
+        if not agents_ok:
+            blockers.append("субагенты не видны")
+        print("   мешает: " + "; ".join(blockers))
 
     print()
     return 0
