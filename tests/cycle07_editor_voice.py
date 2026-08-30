@@ -15,6 +15,7 @@ harness.setup()
 
 from config import cfg                                            # noqa: E402
 from orchestrator import agent, desk, editor                          # noqa: E402
+from validators import check_voice                                # noqa: E402
 from storage import db                                            # noqa: E402
 
 db.init(cfg.db_path)
@@ -262,6 +263,26 @@ async def main() -> None:
     check("сказал, что писать не о чем", "не о чем" in reg.texts(),
           reg.texts()[:120])
     check("модель не звалась", ROUNDS["n"] == 0, f"вызовов {ROUNDS['n']}")
+
+    # ── капслок против собственных понятий завода ─────────────────────
+    # Про файл ЯДРО написать пост было нельзя вовсе: скрипт считал слово
+    # капслоком и давал отказ, Редактор переписывал два круга, тема
+    # оставалась `idea`. Тема на 18.08 в плане была ровно такая.
+    print("\n8. ЯДРО это понятие бренда, а не капслок")
+
+    caps = lambda t: [f.fragment for f in check_voice.check(t)
+                      if f.rule == "капслок"]
+
+    check("ЯДРО не отказ", caps("Файл ЯДРО помогает не объяснять заново.") == [],
+          str(caps("Файл ЯДРО помогает не объяснять заново.")))
+    check("падежи ЯДРА тоже",
+          caps("В ЯДРЕ записан голос, из ЯДРА берётся тон.") == [],
+          str(caps("В ЯДРЕ записан голос, из ЯДРА берётся тон.")))
+    check("настоящий капслок по-прежнему отказ",
+          caps("Это ОЧЕНЬ важно.") == ["ОЧЕНЬ"],
+          str(caps("Это ОЧЕНЬ важно.")))
+    check("имена продуктов не отказ", caps("Открыл CLAUDE и TELEGRAM.") == [])
+    check("короткие аббревиатуры не трогаем", caps("Наш AI и HR.") == [])
 
 
 asyncio.run(main())

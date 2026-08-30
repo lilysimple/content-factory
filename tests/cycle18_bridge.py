@@ -212,23 +212,60 @@ async def main() -> None:
     reset()
     stale = bridge.create_task(CHAT, "прогон до перезапуска",
                                workflow="plan", today=TODAY)
-    check("свежая строка держит чат", bridge.running(CHAT) == stale,
-          bridge.running(CHAT))
+    check("свежая строка держит мост", bridge.running() == stale,
+          bridge.running())
     check("sweep не трогает свежий прогон", bridge.sweep() == 0)
 
     with db.tx() as c:
         c.execute("UPDATE bridge_runs SET started_at = "
                   "datetime('now', '-2 days') WHERE task_id = ?", (stale,))
 
-    check("брошенная строка не считается идущей", bridge.running(CHAT) == "",
-          bridge.running(CHAT))
+    check("брошенная строка не считается идущей", bridge.running() == "",
+          bridge.running())
     freed = bridge.create_task(CHAT, "после перезапуска",
                                workflow="plan", today=TODAY)
     check("новая задача заводится после брошенной", freed != stale, freed)
-    check("свежая строка занимает чат обратно",
-          bridge.running(CHAT) == freed, bridge.running(CHAT))
+    check("свежая строка занимает мост обратно",
+          bridge.running() == freed, bridge.running())
+
+    # «Одна задача за раз» должно значить одну на мост, а не одну на чат:
+    # два чата подняли бы два получасовых процесса на один tasks/ и одну
+    # базу. Тенант сегодня один, поэтому поймать это можно только здесь.
+    other = False
+    try:
+        bridge.create_task(CHAT + 1, "из другого чата",
+                           workflow="plan", today=TODAY)
+    except bridge.Busy:
+        other = True
+    check("чужой чат тоже упирается в занятость", other,
+          "фильтр по chat_id превращал «одну за раз» в «одну на чат»")
 
     check("sweep пометил брошенный прогон", bridge.sweep() == 1)
+    # ── отказ говорит по-человечески, а не блоком JSON ────────────────
+    # Замерено живьём 30.08: на подписке самый вероятный отказ — лимит
+    # сессии, и он единственный не имел своей ветки. Человек получал в
+    # Telegram весь JSON от CLI вместо причины.
+    limit_json = ('{"type":"result","is_error":true,"result":'
+                  '"You\'ve hit your session limit \u00b7 resets 5:10am",'
+                  '"session_id":"x","total_cost_usd":0}')
+    said = "You've hit your session limit \u00b7 resets 5:10am"
+
+    why = bridge._reason(limit_json, "", 1, said)
+    check("лимит подписки назван словами", "лимит подписки" in why, why)
+    check("в отказ не уехал JSON", "{" not in why and '"type"' not in why, why)
+    check("время сброса сохранено", "5:10am" in why, why)
+    check("лимит подписки не назван балансом", "средства" not in why, why)
+
+    check("незнакомый отказ берёт реплику CLI, а не stdout",
+          bridge._reason('{"result":"что-то пошло не так"}', "", 1,
+                         "что-то пошло не так") == "что-то пошло не так")
+    check("без реплики берётся stderr",
+          bridge._reason("", "boom", 1) == "boom")
+    check("вход в CLI по-прежнему узнаётся",
+          "login" in bridge._reason("Not logged in", "", 1).lower())
+    check("баланс по-прежнему узнаётся",
+          "средства" in bridge._reason("credit balance too low", "", 1))
+
     r = row(stale)
     check("брошенный стал failed", r and r["status"] == "failed",
           r and r["status"])

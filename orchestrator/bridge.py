@@ -168,8 +168,14 @@ def new_id(workflow: str, today: str) -> str:
         n += 1
 
 
-def running(chat_id: int) -> str:
-    """id идущей задачи этого чата, пустая строка — свободно.
+def running() -> str:
+    """id идущей задачи, пустая строка — свободно.
+
+    Считается по всем чатам, а не по одному. `Busy` обещает «одна задача
+    за раз», и фильтр по `chat_id` тихо превращал это в «одна на чат»:
+    два чата подняли бы два процесса Claude Code по полчаса каждый, оба
+    пишущие в один `tasks/` и одну базу. Сегодня тенант один, поэтому
+    поймать это было негде — а MVP тем временем обещал не то, что делал.
 
     Строка старше `TIMEOUT` живой быть не может: `run` убивает процесс по
     этому потолку и сам проставляет исход. Значит, такая строка осталась
@@ -182,10 +188,9 @@ def running(chat_id: int) -> str:
     зависшую строку у человека в Telegram нет.
     """
     row = db.one(
-        "SELECT task_id FROM bridge_runs WHERE chat_id = ? "
-        "AND status = 'running' "
+        "SELECT task_id FROM bridge_runs WHERE status = 'running' "
         "AND started_at > datetime('now', ?) "
-        "ORDER BY started_at DESC", chat_id, f"-{TIMEOUT} seconds")
+        "ORDER BY started_at DESC", f"-{TIMEOUT} seconds")
     return row["task_id"] if row else ""
 
 
@@ -253,7 +258,7 @@ def create_task(chat_id: int, ask: str, *, workflow: str, today: str,
     `input.md` это всё, что Director получает от Python. Никаких указаний,
     каких субагентов звать, здесь нет и быть не должно.
     """
-    if busy := running(chat_id):
+    if busy := running():
         raise Busy(busy)
 
     task_id = new_id(workflow, today)
@@ -345,7 +350,7 @@ async def run(task_id: str) -> Result:
             log.warning("%s: stdout не разобрался как JSON", task_id)
 
     if proc.returncode != 0:
-        return _fail(res, _reason(stdout, stderr, proc.returncode))
+        return _fail(res, _reason(stdout, stderr, proc.returncode, res.said))
 
     final = res.dir / "final.md"
     if not final.exists():
@@ -373,11 +378,22 @@ async def run(task_id: str) -> Result:
     return res
 
 
-def _reason(stdout: str, stderr: str, rc: int) -> str:
+def _reason(stdout: str, stderr: str, rc: int, said: str = "") -> str:
     """Человеческая причина отказа вместо кода возврата.
 
     Через неё проходит всё, что вернул CLI, поэтому «войди в CLI» человек
     видит одинаково, чем бы вызов ни упал.
+
+    `said` — разобранное поле `result` из JSON CLI, то есть уже готовая
+    человеческая строка. Раньше она игнорировалась, и в запасной ветке
+    человеку уезжал **весь блок JSON**: при лимите сессии он получал в
+    Telegram `{"type":"result","subtype":"error_during_execution",…}`
+    вместо «упёрлись в лимит». Замерено живьём 30.08 — это самый вероятный
+    отказ на подписке, и он единственный не имел своей ветки.
+
+    Лимит подписки отделён от баланса намеренно. Денег новый путь не
+    тратит вовсе (раздел 11 миграции), и строка «закончились средства»
+    отправила бы человека пополнять баланс, которому ничего не грозит.
     """
     blob = f"{stdout}\n{stderr}".lower()
     if "not logged in" in blob or "/login" in blob:
@@ -385,9 +401,13 @@ def _reason(stdout: str, stderr: str, rc: int) -> str:
                 "`/login` в терминале")
     if "credit balance" in blob or "insufficient" in blob:
         return "закончились средства или исчерпан лимит"
+    if "session limit" in blob or "usage limit" in blob:
+        # Время сброса CLI кладёт в ту же строку — отдаём как есть.
+        why = "упёрлись в лимит подписки Claude Code (не в баланс API)"
+        return f"{why}. {said}" if said else why
     if "rate limit" in blob or "429" in blob:
         return "упёрлись в лимит запросов, попробуй позже"
-    return (stderr or stdout or f"процесс вернул код {rc}")[:300]
+    return (said or stderr or stdout or f"процесс вернул код {rc}")[:300]
 
 
 def _fail(res: Result, why: str, *, status: str = "failed") -> Result:
