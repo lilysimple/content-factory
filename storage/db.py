@@ -102,6 +102,27 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at    TEXT DEFAULT (datetime('now'))
 );
 
+-- Прогоны моста в Claude Code. Отдельно от tasks: у той другие колонки,
+-- в живых базах она уже создана, а CREATE TABLE IF NOT EXISTS их не
+-- добавит. Механизма миграций в проекте нет, новая таблица дешевле.
+--
+-- estimated_api_cost — то, что вернул CLI в total_cost_usd. Это оценка
+-- «во что обошлось бы по API-тарифу», а НЕ подтверждённое списание: на
+-- подписке считаются лимиты, а не деньги. Имя длинное намеренно, чтобы
+-- через месяц никто не прочитал его как счёт.
+CREATE TABLE IF NOT EXISTS bridge_runs (
+    task_id            TEXT PRIMARY KEY,        -- ГГГГ-ММ-ДД-workflow-NN
+    chat_id            INTEGER NOT NULL,
+    workflow           TEXT,
+    status             TEXT DEFAULT 'running',  -- running|done|failed|timeout
+    started_at         TEXT DEFAULT (datetime('now')),
+    finished_at        TEXT,
+    duration_s         REAL,
+    estimated_api_cost REAL,
+    session_id         TEXT,
+    error              TEXT
+);
+
 CREATE TABLE IF NOT EXISTS llm_usage (
     chat_id INTEGER NOT NULL,
     day     TEXT NOT NULL,

@@ -18,8 +18,8 @@ from bots import topics
 from bots.registry import registry
 from bots.router import resolve
 from config import cfg
-from orchestrator import (design, editor, onboarding, publisher, reels,
-                          refresh, reply, research, strategy)
+from orchestrator import (bridge, design, desk, editor, onboarding, publisher,
+                          reels, refresh, reply, research, strategy)
 from storage import db
 
 log = logging.getLogger("handlers")
@@ -78,6 +78,60 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             return
         created, _ = await topics.provision(registry, chat_id)
         await onboarding.start(registry, chat_id, created)
+
+    # ── /plan: задача уезжает в Claude Code ───────────────────────────
+    # Регистрируется ДО общего обработчика: aiogram отдаёт сообщение
+    # первому подошедшему, и ниже стоит фильтр, который ловит любой текст.
+    #
+    # Отдельная команда, а не фраза в общем разборе, — чтобы новый путь не
+    # перехватывал существующую логику. Старый Стратег остаётся доступен
+    # ровно как был, и результаты двух путей можно сравнивать.
+    @dp_assistant.message(F.text.regexp(r"^/plan(\s|$)"))
+    async def on_plan(msg: Message) -> None:
+        chat_id = msg.chat.id
+        if not cfg.chat_allowed(chat_id) or not db.topics_ready(chat_id):
+            return
+        tenant = db.ensure_tenant(chat_id, cfg.default_tz)
+        tkey = topic_key_of(chat_id, msg.message_thread_id) or "strategy"
+
+        ask = (msg.text or "").partition(" ")[2].strip()
+        b = desk.brand(chat_id)
+
+        try:
+            task_id = bridge.create_task(
+                chat_id, ask, workflow="plan", today=desk.today(chat_id),
+                brand_slug=tenant["brand_slug"] or "",
+                brand_path=str(b.root) if b else "")
+        except bridge.Busy as e:
+            await registry.say("assistant", chat_id,
+                               f"Уже работаю над задачей {e}. "
+                               "Пока беру по одной за раз.", topic=tkey)
+            return
+
+        # Ждать молча минуты нельзя: молчание неотличимо от поломки.
+        await registry.say("assistant", chat_id,
+                           "Приняла задачу. Собираю команду и начинаю работу.\n"
+                           f"Задача <code>{task_id}</code>, это займёт "
+                           "несколько минут.", topic=tkey)
+
+        res = await bridge.run(task_id)
+
+        if not res.ok:
+            await registry.say("assistant", chat_id,
+                               f"Не довела задачу {task_id} до конца: "
+                               f"{res.error}", topic=tkey)
+            return
+
+        await registry.say("assistant", chat_id, res.text, topic=tkey)
+
+        tail = [f"Задача <code>{task_id}</code>, {res.secs} с"]
+        if res.cost is not None:
+            # Это диагностика CLI, а не счёт: на подписке считаются лимиты.
+            tail.append(f"оценка по API-тарифу ${res.cost:.3f}")
+        if res.artifacts:
+            tail.append("файлы: " + ", ".join(res.artifacts))
+        await registry.say("assistant", chat_id, " · ".join(tail),
+                           topic="logs", with_label=False)
 
     # ── кто-то зашёл или вышел ────────────────────────────────────────
     @dp_assistant.chat_member()
