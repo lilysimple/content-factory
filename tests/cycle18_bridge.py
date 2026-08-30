@@ -156,6 +156,38 @@ async def main() -> None:
     check("следующий id не затирает первый", second == f"{TODAY}-plan-02",
           second)
 
+    # ── брошенный прогон не запирает чат навсегда ─────────────────────
+    # launchd перезапустил завод посреди задачи, или инстанс сняли kill -9
+    # (SIGTERM он не берёт). Строка осталась running, а процесса нет.
+    # Без поправки «одна за раз» станет «ни одной больше никогда».
+    reset()
+    stale = bridge.create_task(CHAT, "прогон до перезапуска",
+                               workflow="plan", today=TODAY)
+    check("свежая строка держит чат", bridge.running(CHAT) == stale,
+          bridge.running(CHAT))
+    check("sweep не трогает свежий прогон", bridge.sweep() == 0)
+
+    with db.tx() as c:
+        c.execute("UPDATE bridge_runs SET started_at = "
+                  "datetime('now', '-2 days') WHERE task_id = ?", (stale,))
+
+    check("брошенная строка не считается идущей", bridge.running(CHAT) == "",
+          bridge.running(CHAT))
+    freed = bridge.create_task(CHAT, "после перезапуска",
+                               workflow="plan", today=TODAY)
+    check("новая задача заводится после брошенной", freed != stale, freed)
+    check("свежая строка занимает чат обратно",
+          bridge.running(CHAT) == freed, bridge.running(CHAT))
+
+    check("sweep пометил брошенный прогон", bridge.sweep() == 1)
+    r = row(stale)
+    check("брошенный стал failed", r and r["status"] == "failed",
+          r and r["status"])
+    check("причина названа, а не пустая", r and r["error"], r and r["error"])
+    r = row(freed)
+    check("sweep не тронул идущий", r and r["status"] == "running",
+          r and r["status"])
+
     # ── успешный прогон ───────────────────────────────────────────────
     reset()
     tid = bridge.create_task(CHAT, "план", workflow="plan", today=TODAY)

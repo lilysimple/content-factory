@@ -147,10 +147,44 @@ def new_id(workflow: str, today: str) -> str:
 
 
 def running(chat_id: int) -> str:
-    """id идущей задачи этого чата, пустая строка — свободно."""
-    row = db.one("SELECT task_id FROM bridge_runs WHERE chat_id = ? "
-                 "AND status = 'running' ORDER BY started_at DESC", chat_id)
+    """id идущей задачи этого чата, пустая строка — свободно.
+
+    Строка старше `TIMEOUT` живой быть не может: `run` убивает процесс по
+    этому потолку и сам проставляет исход. Значит, такая строка осталась
+    от процесса, которого больше нет, — launchd перезапустил завод, или
+    инстанс сняли через `kill -9` (обычный `SIGTERM` он не берёт, это
+    записано в CLAUDE.md).
+
+    Без этой поправки «одна задача за раз» превращается в «ни одной
+    больше никогда»: `create_task` вечно отвечает Busy, а способа снять
+    зависшую строку у человека в Telegram нет.
+    """
+    row = db.one(
+        "SELECT task_id FROM bridge_runs WHERE chat_id = ? "
+        "AND status = 'running' "
+        "AND started_at > datetime('now', ?) "
+        "ORDER BY started_at DESC", chat_id, f"-{TIMEOUT} seconds")
     return row["task_id"] if row else ""
+
+
+def sweep() -> int:
+    """Пометить брошенные прогоны. Возвращает, сколько нашлось.
+
+    Отдельно от `running`, потому что читатели разные: `running` решает,
+    занято ли сейчас, а это чинит журнал, чтобы брошенный прогон не
+    выглядел вечно идущим в статистике.
+    """
+    with db.tx() as c:
+        cur = c.execute(
+            "UPDATE bridge_runs SET status = 'failed', "
+            "finished_at = datetime('now'), "
+            "error = 'процесс исчез, исход неизвестен' "
+            "WHERE status = 'running' AND started_at <= datetime('now', ?)",
+            (f"-{TIMEOUT} seconds",))
+        n = cur.rowcount
+    if n:
+        log.warning("брошенных прогонов найдено: %s", n)
+    return n
 
 
 def create_task(chat_id: int, ask: str, *, workflow: str, today: str,
