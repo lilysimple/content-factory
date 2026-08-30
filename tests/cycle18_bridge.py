@@ -300,6 +300,22 @@ async def main() -> None:
     res = await bridge.run(tid)
     check("лимит назван словами", "лимит" in res.error, res.error)
 
+    # ── провал не прячет то, что успели сделать ───────────────────────
+    # plan-04 упёрся в потолок на Стратеге, а research.md уже лежал: девять
+    # минут живых запросов. Мост сказал только «не уложился», и работа
+    # осталась невидимой — такую закажут заново.
+    reset()
+    tid = bridge.create_task(CHAT, "план", workflow="plan", today=TODAY)
+    d = bridge.TASKS_DIR / tid
+    fake_claude(f'printf "%s" "фактура" > "{d}/research.md"\necho "{{}}"')
+    res = await bridge.run(tid)
+    check("без final.md всё равно провал", not res.ok)
+    check("сделанное названо в причине", "research.md" in res.error, res.error)
+    check("сделанное перечислено в артефактах",
+          "research.md" in res.artifacts, str(res.artifacts))
+    check("input.md за достижение не выдаётся",
+          "Успело лечь на диск: research.md" in res.error, res.error)
+
     # ── не уложился во время ──────────────────────────────────────────
     reset()
     was, bridge.TIMEOUT = bridge.TIMEOUT, 1
@@ -307,6 +323,8 @@ async def main() -> None:
     fake_claude("sleep 30")
     res = await bridge.run(tid)
     bridge.TIMEOUT = was
+    check("потолок измерен, а не угадан", bridge.TIMEOUT >= 1800,
+          f"три роли подряд в 900 с не уложились: {bridge.TIMEOUT}")
     check("зависший процесс не держит задачу вечно", not res.ok)
     check("сказано про время", "уложил" in res.error, res.error)
     check("в базе timeout", (r := row(tid)) and r["status"] == "timeout",
