@@ -409,6 +409,30 @@ async def main() -> None:
 
     reset()
 
+    # ── модель нового пути закреплена, и закреплена не Python-ом ──────
+    # Умолчание CLI может смениться между прогонами и не оставить следа в
+    # истории — на разных моделях замеры несравнимы. Пин живёт в
+    # конфигурации Claude Code, потому что решение от 30.08 запрещает
+    # Python вмешиваться в рантайм нового пути.
+    import json as _json
+    from config import ROOT as _ROOT
+    conf = _ROOT / ".claude" / "settings.json"
+    check("настройки Claude Code лежат в репозитории", conf.exists(), str(conf))
+    if conf.exists():
+        cfgj = _json.loads(conf.read_text(encoding="utf-8"))
+        check("модель закреплена", cfgj.get("model") == "claude-opus-5",
+              str(cfgj.get("model")))
+        check("усилие закреплено", cfgj.get("effortLevel") == "medium",
+              str(cfgj.get("effortLevel")))
+
+    src = (_ROOT / "orchestrator" / "bridge.py").read_text(encoding="utf-8")
+    check("мост НЕ передаёт --model", "--model" not in src,
+          "модель задаётся конфигурацией Claude Code, не Python-ом")
+    check("мост НЕ передаёт --effort", "--effort" not in src)
+    check("настройки модели не уезжают в окружение",
+          not any("MODEL" in k or "EFFORT" in k for k in bridge.KEEP),
+          str(bridge.KEEP))
+
     # ── шесть точек входа ─────────────────────────────────────────────
     # В конце файла и на своей дате намеренно: задачи здесь занимают номера
     # id, и посреди сценария они сдвинули бы проверку «следующий id не
