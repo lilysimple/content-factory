@@ -79,27 +79,46 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         created, _ = await topics.provision(registry, chat_id)
         await onboarding.start(registry, chat_id, created)
 
-    # ── /plan: задача уезжает в Claude Code ───────────────────────────
+    # ── команды моста: задача уезжает в Claude Code ───────────────────
     # Регистрируется ДО общего обработчика: aiogram отдаёт сообщение
     # первому подошедшему, и ниже стоит фильтр, который ловит любой текст.
     #
-    # Отдельная команда, а не фраза в общем разборе, — чтобы новый путь не
-    # перехватывал существующую логику. Старый Стратег остаётся доступен
-    # ровно как был, и результаты двух путей можно сравнивать.
-    @dp_assistant.message(F.text.regexp(r"^/plan(\s|$)"))
-    async def on_plan(msg: Message) -> None:
+    # Отдельные команды, а не фразы в общем разборе, — чтобы новый путь не
+    # перехватывал существующую логику. Старые роли остаются доступны
+    # ровно как были, и результаты двух путей можно сравнивать.
+    #
+    # Набор строится из `bridge.WORKFLOWS`, а не переписывается здесь:
+    # два списка команд разъехались бы на первой же новой.
+    #
+    # `@имя_бота` в шаблоне не для красоты. В супергруппе с восемью ботами
+    # Telegram дописывает суффикс сам, и прежний `^/plan(\s|$)` такое
+    # сообщение не ловил вовсе — оно проваливалось в общий разбор, и вместо
+    # моста человеку отвечал моделью Ассистент. Найдено при разборе, живьём
+    # не воспроизводилось: лог текст сообщений не пишет.
+    _CMDS = "|".join(bridge.WORKFLOWS)
+
+    # Куда отвечать, если команду дали в General: у каждой задачи свой топик.
+    _TOPIC = {"plan": "strategy", "post": "review", "reels": "reels",
+              "research": "research", "design": "design", "idea": "strategy"}
+
+    @dp_assistant.message(F.text.regexp(rf"^/({_CMDS})(@\S+)?(\s|$)"))
+    async def on_bridge(msg: Message) -> None:
         chat_id = msg.chat.id
         if not cfg.chat_allowed(chat_id) or not db.topics_ready(chat_id):
             return
         tenant = db.ensure_tenant(chat_id, cfg.default_tz)
-        tkey = topic_key_of(chat_id, msg.message_thread_id) or "strategy"
 
-        ask = (msg.text or "").partition(" ")[2].strip()
+        head, _, ask = (msg.text or "").partition(" ")
+        workflow = head[1:].split("@")[0].lower()
+        ask = ask.strip()
+
+        tkey = (topic_key_of(chat_id, msg.message_thread_id)
+                or _TOPIC.get(workflow, "strategy"))
         b = desk.brand(chat_id)
 
         try:
             task_id = bridge.create_task(
-                chat_id, ask, workflow="plan", today=desk.today(chat_id),
+                chat_id, ask, workflow=workflow, today=desk.today(chat_id),
                 brand_slug=tenant["brand_slug"] or "",
                 brand_path=str(b.root) if b else "")
         except bridge.Busy as e:
@@ -110,7 +129,8 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
 
         # Ждать молча минуты нельзя: молчание неотличимо от поломки.
         await registry.say("assistant", chat_id,
-                           "Приняла задачу. Собираю команду и начинаю работу.\n"
+                           f"Приняла задачу: {bridge.WORKFLOWS[workflow]}. "
+                           "Собираю команду и начинаю работу.\n"
                            f"Задача <code>{task_id}</code>, это займёт "
                            "несколько минут.", topic=tkey)
 

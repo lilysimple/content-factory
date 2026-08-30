@@ -409,6 +409,59 @@ async def main() -> None:
 
     reset()
 
+    # ── шесть точек входа ─────────────────────────────────────────────
+    # В конце файла и на своей дате намеренно: задачи здесь занимают номера
+    # id, и посреди сценария они сдвинули бы проверку «следующий id не
+    # затирает первый». Стенд ловит такое сам — и поймал.
+    OTHER_DAY = "2026-08-28"
+    # Мост принимает не только план. Контекст при этом разный: плану нужны
+    # свободные слоты, работе «по теме» — список тем, Ресёрчеру ни то ни
+    # другое. Лишний блок это не мелочь: он едет в некешируемый хвост
+    # каждого прогона.
+    import re as _re
+    rx = _re.compile(rf"^/({'|'.join(bridge.WORKFLOWS)})(@\S+)?(\s|$)")
+
+    check("workflow больше одного", len(bridge.WORKFLOWS) >= 6,
+          str(list(bridge.WORKFLOWS)))
+    check("у каждого workflow есть контекст",
+          set(bridge.CONTEXT) == set(bridge.WORKFLOWS),
+          str(set(bridge.WORKFLOWS) ^ set(bridge.CONTEXT)))
+    check("описания workflow по-русски и без имён ролей",
+          not any(w in " ".join(bridge.WORKFLOWS.values()).lower()
+                  for w in ("researcher", "strategist", "writer", "designer")),
+          "кого звать — решает Director, а не Python")
+
+    check("команда без аргументов ловится", bool(rx.match("/post")))
+    check("команда с аргументом ловится",
+          bool(rx.match("/post 2026-08-17-telegram-01")))
+    check("суффикс @имя_бота ловится", bool(rx.match("/plan@lily_cf_bot")),
+          "в супергруппе Telegram дописывает его сам")
+    check("суффикс с аргументом ловится", bool(rx.match("/plan@lily_cf_bot про X")))
+    check("похожая команда не перехватывается", not rx.match("/planning"))
+    check("чужая команда не перехватывается", not rx.match("/publish"))
+    check("обычный текст не перехватывается", not rx.match("напиши пост"))
+
+    reset()
+    tid_post = bridge.create_task(CHAT, "по теме 2026-08-17-telegram-01",
+                                  workflow="post", today=OTHER_DAY)
+    post_txt = (bridge.TASKS_DIR / tid_post / "input.md").read_text(encoding="utf-8")
+    check("у поста в контракте темы, а не слоты",
+          "Темы" in post_txt and "свободные слоты" not in post_txt.lower(),
+          "лишний блок едет в некешируемый хвост каждого прогона")
+    check("описание задачи взято из WORKFLOWS",
+          bridge.WORKFLOWS["post"] in post_txt)
+
+    reset()
+    tid_res = bridge.create_task(CHAT, "что зашло", workflow="research",
+                                 today=OTHER_DAY)
+    res_txt = (bridge.TASKS_DIR / tid_res / "input.md").read_text(encoding="utf-8")
+    check("Ресёрчеру не кладут ни слоты, ни темы",
+          "свободные слоты" not in res_txt.lower() and "| id |" not in res_txt,
+          "он ходит наружу, а не в базу")
+
+
+    reset()
+
 
 asyncio.run(main())
 raise SystemExit(report())

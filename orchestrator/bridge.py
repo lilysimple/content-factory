@@ -66,7 +66,22 @@ TOOLS = "Read,Write,Edit,Glob,Grep,Bash,Task,TodoWrite"
 # придётся считать заново — и снова замером.
 TIMEOUT = 1800
 
-WORKFLOWS = {"plan": "контент-план на неделю"}
+# Что человек попросил, человеческими словами. Ключ — команда в Telegram.
+#
+# **Это не список ролей и не порядок вызова.** Кого звать, решает Director:
+# на «текст поста» он может позвать одного Редактора, а может сперва
+# Ресёрчера за фактурой. Как только здесь появится имя субагента, выбор
+# workflow окажется размазан по двум слоям — см. шапку модуля.
+MAX_THEMES = 30              # чтобы контракт не распухал на старом бренде
+
+WORKFLOWS = {
+    "plan":     "контент-план на неделю",
+    "post":     "текст поста по теме",
+    "reels":    "сценарий вертикального ролика",
+    "research": "сводка недели и разбор статистики",
+    "design":   "макет по готовому тексту",
+    "idea":     "раскачать тему до заходов",
+}
 
 
 class Busy(RuntimeError):
@@ -251,6 +266,54 @@ def _slots(chat_id: int) -> list[str]:
     return out
 
 
+def _themes(chat_id: int) -> list[str]:
+    """Незакрытые темы фактом: id, слот, формат, статус, заголовок.
+
+    Тому же служит, что и `_slots` у плана: Редактор, Редактор Reels и
+    Дизайнер работают «по теме», и без списка Director пойдёт спрашивать
+    базу сам. Формат отдаётся колонкой, а не выводом — какая тема чья,
+    решает Director по своим правилам, а не Python по формату строки.
+    """
+    rows = db.q("SELECT id, date, plat, format, status, title FROM themes "
+                "WHERE chat_id = ? AND status IN ('idea', 'draft', 'ready') "
+                "ORDER BY date, id", chat_id)
+    if not rows:
+        return ["", "## Темы", "",
+                "Незакрытых тем в базе нет. Если задача требует темы, "
+                "скажи об этом в final.md, а не выдумывай её."]
+
+    out = ["", "## Незакрытые темы", "",
+           "| id | дата | площадка | формат | статус | заголовок |",
+           "|---|---|---|---|---|---|"]
+    for r in rows[:MAX_THEMES]:
+        title = (r["title"] or "").replace("|", "/")[:60]
+        out.append(f"| `{r['id']}` | {r['date'] or ''} | {r['plat'] or ''} "
+                   f"| {r['format'] or ''} | {r['status']} | {title} |")
+    if len(rows) > MAX_THEMES:
+        out.append("")
+        out.append(f"Показаны первые {MAX_THEMES} из {len(rows)}.")
+    out += ["", "Статусы: `idea` не начата, `draft` текст есть и не принят, "
+            "`ready` принят. Тему берут по `id` — придумывать его не надо."]
+    return out
+
+
+def _nothing(chat_id: int) -> list[str]:
+    """Workflow, которому фактов из базы не нужно. Ресёрчер ходит наружу."""
+    return []
+
+
+# Какие факты кладутся в `input.md` под какой workflow. Факты, не роли:
+# свободный слот и незакрытая тема — это данные задачи, как папка бренда.
+CONTEXT = {
+    "plan":     _slots,
+    "post":     _themes,
+    "reels":    _themes,
+    "design":   _themes,
+    "idea":     _themes,
+    "research": _nothing,
+}
+
+
 def create_task(chat_id: int, ask: str, *, workflow: str, today: str,
                 brand_slug: str = "", brand_path: str = "") -> str:
     """Завести папку задачи и `input.md`. Возвращает task_id.
@@ -279,7 +342,7 @@ def create_task(chat_id: int, ask: str, *, workflow: str, today: str,
         # воспользовался и пошёл угадывать относительный — промахнулся и
         # потратил лишний ход. Факт в контракте должен выглядеть как факт.
         lines.append(f"Папка бренда: `{Path(brand_path).resolve()}`")
-    lines += _slots(chat_id)
+    lines += CONTEXT.get(workflow, _nothing)(chat_id)
     lines += ["", "## Запрос человека", "", ask.strip() or
               "Собери контент-план на неделю.", "",
               "## Куда положить результат", "",
