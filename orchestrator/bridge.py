@@ -48,6 +48,25 @@ TASKS_DIR = ROOT / "tasks"
 # учётные данные лежат в Keychain, и подпроцесс берёт их сам.
 KEEP = ("PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "SHELL")
 
+# Где искать `claude`, если его нет в PATH.
+#
+# Это не перестраховка, а починка боевого отказа. Завод стоит на launchd,
+# а launchd даёт агенту голый PATH — `/usr/bin:/bin:/usr/sbin:/sbin`, без
+# `~/.local/bin`, куда ставится CLI. Из терминала мост работал, из-под
+# автозапуска `shutil.which("claude")` возвращал None, и **любая** задача
+# из Telegram падала бы на первой строке `run` с «бинарь не найден».
+# Поймано аудитом 30.08: живой прогон делался руками из терминала, и
+# телеграм-нога цепи ни разу не проверялась.
+#
+# Домашние пути разворачиваются от `HOME`, а не от текущего пользователя:
+# на VPS завод пойдёт под своим аккаунтом.
+FALLBACK_BINS = (
+    "~/.local/bin/claude",
+    "~/.claude/local/claude",
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+)
+
 # Инструменты, которые нужны Director. `Task` обязателен: без него он не
 # сможет позвать ни одного субагента, и весь смысл моста пропадёт.
 TOOLS = "Read,Write,Edit,Glob,Grep,Bash,Task,TodoWrite"
@@ -110,6 +129,23 @@ class Result:
 def clean_env() -> dict[str, str]:
     """Окружение подпроцесса. Белый список, а не наследование."""
     return {k: os.environ[k] for k in KEEP if k in os.environ}
+
+
+def which_claude() -> str:
+    """Путь к CLI. Сначала PATH, потом известные места установки.
+
+    PATH под launchd беднее терминального, и на нём мост ломался целиком:
+    см. `FALLBACK_BINS`. Возвращается абсолютный путь, поэтому подпроцессу
+    хватает и голого PATH — искать себя ему уже не надо.
+    """
+    if found := shutil.which("claude"):
+        return found
+    for raw in FALLBACK_BINS:
+        p = Path(raw).expanduser()
+        if p.exists() and os.access(p, os.X_OK):
+            log.info("claude найден мимо PATH: %s", p)
+            return str(p)
+    return ""
 
 
 # ── результат для Telegram ────────────────────────────────────────────
@@ -374,9 +410,10 @@ def _prompt(task_id: str) -> str:
 async def run(task_id: str) -> Result:
     """Запустить Claude Code на задаче и дождаться результата."""
     res = Result(task_id=task_id)
-    binary = shutil.which("claude")
+    binary = which_claude()
     if not binary:
-        return _fail(res, "бинарь claude не найден в PATH")
+        return _fail(res, "бинарь claude не найден: ни в PATH, ни в "
+                          + ", ".join(FALLBACK_BINS))
 
     argv = [binary, "-p", _prompt(task_id), "--allowedTools", TOOLS,
             "--permission-mode", "acceptEdits", "--output-format", "json"]

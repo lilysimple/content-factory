@@ -12,7 +12,8 @@ TARGET="$HOME/Library/LaunchAgents/$LABEL.plist"
 UID_NUM="$(id -u)"
 
 mkdir -p "$HOME/Library/LaunchAgents"
-sed "s|__ROOT__|$ROOT|g" "$ROOT/deploy/$LABEL.plist" > "$TARGET"
+sed -e "s|__ROOT__|$ROOT|g" -e "s|__HOME__|$HOME|g" \
+  "$ROOT/deploy/$LABEL.plist" > "$TARGET"
 echo "плист записан: $TARGET"
 
 # Ручной инстанс сначала гасим: launchd держит один процесс на Label, но

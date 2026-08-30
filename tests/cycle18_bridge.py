@@ -398,15 +398,33 @@ async def main() -> None:
     check("в базе timeout", (r := row(tid)) and r["status"] == "timeout",
           r and r["status"])
 
-    # ── бинаря нет вообще ─────────────────────────────────────────────
+    # ── бинарь не в PATH, но установлен ───────────────────────────────
+    # Боевой отказ, найденный аудитом 30.08. launchd даёт агенту голый
+    # PATH без `~/.local/bin`, и `shutil.which` возвращал None: из
+    # терминала мост работал, из-под автозапуска падала любая задача.
+    # Живой прогон делался руками, поэтому телеграм-нога цепи этого не
+    # показала — ловим тестом, а не следующим боевым молчанием.
     reset()
+    (BIN / "claude").rename(BIN / "claude-hidden")
+    os.environ["PATH"] = str(BIN)                 # бинаря в PATH больше нет
+    _fallback = bridge.FALLBACK_BINS
+    bridge.FALLBACK_BINS = (str(BIN / "claude-hidden"),)
+    check("бинарь находится мимо PATH", bridge.which_claude() ==
+          str(BIN / "claude-hidden"), bridge.which_claude())
+
+    # ── бинаря нет вообще ─────────────────────────────────────────────
+    # Запасные пути тоже пусты, иначе тест нашёл бы настоящий CLI машины
+    # и запустил его по-живому вместо заглушки.
+    bridge.FALLBACK_BINS = (str(BIN / "нет-такого"),)
+    check("пустой резолвер честно молчит", bridge.which_claude() == "",
+          bridge.which_claude())
     tid = bridge.create_task(CHAT, "план", workflow="plan", today=TODAY)
-    (BIN / "claude").unlink()
-    os.environ["PATH"] = str(BIN)                 # только пустая папка
     res = await bridge.run(tid)
     check("отсутствие claude названо", not res.ok and "claude" in res.error,
           res.error)
 
+    bridge.FALLBACK_BINS = _fallback
+    (BIN / "claude-hidden").rename(BIN / "claude")
     reset()
 
     # ── модель нового пути закреплена, и закреплена не Python-ом ──────
@@ -463,7 +481,54 @@ async def main() -> None:
     check("суффикс с аргументом ловится", bool(rx.match("/plan@lily_cf_bot про X")))
     check("похожая команда не перехватывается", not rx.match("/planning"))
     check("чужая команда не перехватывается", not rx.match("/publish"))
-    check("обычный текст не перехватывается", not rx.match("напиши пост"))
+    check("обычный текст командой не перехватывается",
+          not rx.match("напиши пост"))
+
+    # ── просьба словами доходит до моста ──────────────────────────────
+    # Критерий MVP: человек пишет «Собери контент-план на неделю», а не
+    # команду. Пока входом была только команда, эта фраза уезжала старому
+    # Стратегу по слову «план», и Director о ней не узнавал. Проверяем
+    # обе половины: и что просьба доходит, и что старый путь не отрезан.
+    from bots.handlers import AS_WORKFLOW, TOPIC
+    from bots.router import resolve as _resolve
+
+    _me = {"strategy": "lily_cf_strategy_bot", "editor": "lily_cf_editor_bot"}
+
+    def _goes(text: str, topic: str | None = None):
+        """Что случится с этой фразой: workflow моста или старый путь."""
+        r = _resolve(text, topic, _me)
+        wf = AS_WORKFLOW.get(r.role) if r.reason != "mention" else None
+        return wf, r.role, r.reason
+
+    wf, role, _ = _goes("Собери контент-план на неделю.")
+    check("просьба словами уходит в мост", wf == "plan", f"{role} → {wf}")
+    check("у workflow из просьбы есть топик для ответа", wf in TOPIC, str(wf))
+    check("текст поста словами уходит в мост",
+          _goes("напиши пост про агентов")[0] == "post")
+    check("сценарий словами уходит в мост",
+          _goes("сделай сценарий рилса")[0] == "reels")
+    check("обложка словами уходит в мост",
+          _goes("оформи обложку")[0] == "design")
+    check("сводка словами уходит в мост",
+          _goes("собери сводку, что зашло")[0] == "research")
+
+    # Старый путь не переписан и остаётся доступен явным упоминанием —
+    # иначе два пути нечем сравнивать, а этап 7 миграции ровно про это.
+    check("упоминание бота оставляет задачу старому пути",
+          _goes("@lily_cf_strategy_bot собери план")[0] is None,
+          str(_goes("@lily_cf_strategy_bot собери план")))
+
+    # Разговор о состоянии полчаса Claude Code не стоит.
+    check("разговор в мост не уходит", _goes("покажи ядро")[0] is None,
+          str(_goes("покажи ядро")))
+    check("публикация в мост не уходит", _goes("опубликуй пост")[0] is None,
+          str(_goes("опубликуй пост")))
+    check("Публикатора нет среди workflow моста",
+          "publisher" not in AS_WORKFLOW and "assistant" not in AS_WORKFLOW,
+          str(sorted(AS_WORKFLOW)))
+    check("каждый workflow из маршрутизатора знает мост",
+          set(AS_WORKFLOW.values()) <= set(bridge.WORKFLOWS),
+          str(set(AS_WORKFLOW.values()) - set(bridge.WORKFLOWS)))
 
     reset()
     tid_post = bridge.create_task(CHAT, "по теме 2026-08-17-telegram-01",

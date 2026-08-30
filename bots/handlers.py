@@ -24,6 +24,21 @@ from storage import db
 
 log = logging.getLogger("handlers")
 
+# Куда отвечать, если команду дали в General: у каждой задачи свой топик.
+TOPIC = {"plan": "strategy", "post": "review", "reels": "reels",
+         "research": "research", "design": "design", "idea": "strategy"}
+
+# Роль, которую распознал старый маршрутизатор, → workflow моста.
+#
+# Это не выбор субагентов: Python называет, **что** попросили, ровно как
+# это делает `/plan`, а кого звать, по-прежнему решает Director.
+# Публикатора здесь нет намеренно — он не AI-роль, собрать комплект и не
+# допустить дубля это детерминированная работа `publisher.py`. Ассистента
+# нет по той же причине с другой стороны: разговор о состоянии завода не
+# производственная задача.
+AS_WORKFLOW = {"strategy": "plan", "editor": "post", "reels": "reels",
+               "design": "design", "research": "research"}
+
 
 def topic_key_of(chat_id: int, thread_id: int | None) -> str | None:
     if thread_id is None:
@@ -97,23 +112,15 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
     # не воспроизводилось: лог текст сообщений не пишет.
     _CMDS = "|".join(bridge.WORKFLOWS)
 
-    # Куда отвечать, если команду дали в General: у каждой задачи свой топик.
-    _TOPIC = {"plan": "strategy", "post": "review", "reels": "reels",
-              "research": "research", "design": "design", "idea": "strategy"}
+    async def bridge_task(chat_id: int, ask: str, workflow: str,
+                          tkey: str) -> None:
+        """Довезти задачу до Director и вернуть ответ человеку.
 
-    @dp_assistant.message(F.text.regexp(rf"^/({_CMDS})(@\S+)?(\s|$)"))
-    async def on_bridge(msg: Message) -> None:
-        chat_id = msg.chat.id
-        if not cfg.chat_allowed(chat_id) or not db.topics_ready(chat_id):
-            return
+        Один код на два входа — команду `/plan` и обычную просьбу словами.
+        Пока это лежало в одном обработчике, второй вход означал бы вторую
+        копию ожидания, отказов и журнала, и чинить их пришлось бы парой.
+        """
         tenant = db.ensure_tenant(chat_id, cfg.default_tz)
-
-        head, _, ask = (msg.text or "").partition(" ")
-        workflow = head[1:].split("@")[0].lower()
-        ask = ask.strip()
-
-        tkey = (topic_key_of(chat_id, msg.message_thread_id)
-                or _TOPIC.get(workflow, "strategy"))
         b = desk.brand(chat_id)
 
         try:
@@ -152,6 +159,17 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             tail.append("файлы: " + ", ".join(res.artifacts))
         await registry.say("assistant", chat_id, " · ".join(tail),
                            topic="logs", with_label=False)
+
+    @dp_assistant.message(F.text.regexp(rf"^/({_CMDS})(@\S+)?(\s|$)"))
+    async def on_bridge(msg: Message) -> None:
+        chat_id = msg.chat.id
+        if not cfg.chat_allowed(chat_id) or not db.topics_ready(chat_id):
+            return
+        head, _, ask = (msg.text or "").partition(" ")
+        workflow = head[1:].split("@")[0].lower()
+        tkey = (topic_key_of(chat_id, msg.message_thread_id)
+                or TOPIC.get(workflow, "strategy"))
+        await bridge_task(chat_id, ask.strip(), workflow, tkey)
 
     # ── кто-то зашёл или вышел ────────────────────────────────────────
     @dp_assistant.chat_member()
@@ -233,6 +251,25 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
 
         if route.role is None:
             await onboarding.ask_which_role(registry, chat_id)
+            return
+
+        # ── просьба словами уходит в мост ─────────────────────────────
+        # Критерий MVP — человек пишет «Собери контент-план на неделю», а
+        # не команду. Пока входом был только `/plan`, такая фраза уезжала
+        # старому Стратегу: `resolve` ловит её по слову «план», и Director
+        # о ней не узнавал вовсе.
+        #
+        # Старый путь остаётся доступен и не переписан: он поднимается
+        # по **явному упоминанию** бота роли (`@lily_cf_strategy_bot …`),
+        # то есть `reason == "mention"`. Так два пути можно гонять рядом и
+        # сравнивать — этап 7 миграции ровно про это.
+        #
+        # Ответ Ассистента разговором (`role == "assistant"`) сюда не
+        # попадает: «покажи ядро» и «что в очереди» это состояние завода,
+        # а не производственная задача, и полчаса Claude Code на них
+        # тратить нечем.
+        if (wf := AS_WORKFLOW.get(route.role)) and route.reason != "mention":
+            await bridge_task(chat_id, raw, wf, tkey or TOPIC[wf])
             return
 
         if route.role == "research":

@@ -17,6 +17,18 @@
   <key>WorkingDirectory</key>
   <string>__ROOT__</string>
 
+  <!-- launchd не читает профиль оболочки: агенту достаётся голый PATH
+       `/usr/bin:/bin:/usr/sbin:/sbin`, без `~/.local/bin`. Мост запускает
+       `claude` оттуда, и из-под автозапуска он не находился вовсе —
+       падала любая задача из Telegram. Сам мост теперь ищет бинарь и мимо
+       PATH (`bridge.FALLBACK_BINS`), но PATH подпроцесса наследуется
+       отсюда, поэтому чиним в обоих местах. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
   <key>RunAtLoad</key>
   <true/>
 
