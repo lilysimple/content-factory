@@ -72,6 +72,7 @@ class Result:
     secs: float = 0.0
     cost: float | None = None          # диагностика, НЕ подтверждённое списание
     session_id: str = ""
+    said: str = ""                     # последняя реплика Director из JSON CLI
     artifacts: list[str] = field(default_factory=list)
 
     @property
@@ -139,11 +140,22 @@ def for_telegram(text: str) -> str:
 # ── задача на диске ───────────────────────────────────────────────────
 
 def new_id(workflow: str, today: str) -> str:
-    """Стабильный id задачи: ГГГГ-ММ-ДД-workflow-NN."""
+    """Стабильный id задачи: ГГГГ-ММ-ДД-workflow-NN.
+
+    Занятыми считаются **и папка, и строка журнала**. Смотреть только на
+    диск нельзя: `tasks/` лежит в `.gitignore`, папку переживает не всякая
+    уборка и не переживает свежий клон, а `task_id` — это PRIMARY KEY.
+    Свободный на диске номер, уже занятый в базе, ронял бы `INSERT`
+    через `IntegrityError` — а из `on_plan` это исключение уходит наружу,
+    и человек вместо ответа получает молчание.
+    """
     n = 1
-    while (TASKS_DIR / f"{today}-{workflow}-{n:02d}").exists():
+    while True:
+        task_id = f"{today}-{workflow}-{n:02d}"
+        if not (TASKS_DIR / task_id).exists() and not db.one(
+                "SELECT 1 FROM bridge_runs WHERE task_id = ?", task_id):
+            return task_id
         n += 1
-    return f"{today}-{workflow}-{n:02d}"
 
 
 def running(chat_id: int) -> str:
@@ -275,6 +287,7 @@ async def run(task_id: str) -> Result:
             data = json.loads(stdout)
             res.cost = data.get("total_cost_usd")
             res.session_id = str(data.get("session_id") or "")
+            res.said = str(data.get("result") or "").strip()
         except json.JSONDecodeError:
             log.warning("%s: stdout не разобрался как JSON", task_id)
 
@@ -283,7 +296,17 @@ async def run(task_id: str) -> Result:
 
     final = res.dir / "final.md"
     if not final.exists():
-        return _fail(res, "Claude Code отработал, но final.md не появился")
+        # Проглотить последнюю реплику Director нельзя. Первый живой прогон
+        # (2026-08-30-plan-03) кончился ровно здесь: он запустил субагента
+        # **в фоне** и закончил ход словами «подхвачу, когда закончит». В
+        # headless-режиме конец хода это конец процесса, фоновый субагент
+        # умирает вместе с ним. 274 секунды и почти доллар — а причину
+        # пришлось искать в транскрипте сессии, потому что мост сказал
+        # только «файла нет». Теперь он говорит и почему.
+        why = "Claude Code отработал, но final.md не появился"
+        if res.said:
+            why += f". Director напоследок сказал: {res.said[:400]}"
+        return _fail(res, why)
 
     res.text = for_telegram(final.read_text(encoding="utf-8").strip())
     if not res.text:

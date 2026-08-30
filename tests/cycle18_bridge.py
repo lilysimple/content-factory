@@ -156,6 +156,24 @@ async def main() -> None:
     check("следующий id не затирает первый", second == f"{TODAY}-plan-02",
           second)
 
+    # ── номер занят в журнале, а папки нет ────────────────────────────
+    # tasks/ лежит в .gitignore: папку не переживает ни уборка, ни свежий
+    # клон, а task_id это PRIMARY KEY. Если new_id смотрит только на диск,
+    # INSERT падает IntegrityError — и из on_plan это уходит человеку
+    # молчанием вместо ответа.
+    import shutil as _sh
+    _sh.rmtree(bridge.TASKS_DIR / second)
+    with db.tx() as c:                     # задача завершилась, чат свободен
+        c.execute("UPDATE bridge_runs SET status = 'done' WHERE task_id = ?",
+                  (second,))
+    check("папка убрана, строка осталась",
+          not (bridge.TASKS_DIR / second).exists() and row(second) is not None)
+    third = bridge.create_task(CHAT, "после уборки", workflow="plan",
+                               today=TODAY)
+    check("занятый в журнале номер не переиспользуется", third != second,
+          f"{third} == {second}")
+    check("строка завелась, а не упала", row(third) is not None, third)
+
     # ── брошенный прогон не запирает чат навсегда ─────────────────────
     # launchd перезапустил завод посреди задачи, или инстанс сняли kill -9
     # (SIGTERM он не берёт). Строка осталась running, а процесса нет.
@@ -240,6 +258,21 @@ async def main() -> None:
           r and r["status"])
     check("стоимость записана и у провала", r and r["estimated_api_cost"],
           "провалившийся прогон тоже потрачен, его надо видеть")
+
+    # ── провал объясняется словами Director ───────────────────────────
+    # Первый живой прогон встал ровно тут: субагент ушёл в фон, ход
+    # кончился, процесс умер вместе с фоном. Мост сказал только «файла
+    # нет», и причину пришлось искать в транскрипте сессии.
+    reset()
+    tid = bridge.create_task(CHAT, "план", workflow="plan", today=TODAY)
+    fake_claude(
+        'echo \'{"total_cost_usd": 0.93, "result": '
+        '"Ресёрчер работает в фоне, подхвачу когда закончит."}\'')
+    res = await bridge.run(tid)
+    check("провал без final.md", not res.ok)
+    check("последняя реплика Director снята", "фоне" in res.said, res.said)
+    check("реплика попала в причину", "подхвачу" in res.error, res.error)
+    check("причина всё ещё называет файл", "final.md" in res.error, res.error)
 
     # ── пустой final.md ───────────────────────────────────────────────
     reset()

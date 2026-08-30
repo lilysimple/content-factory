@@ -14,6 +14,7 @@ from aiogram import Dispatcher
 from bots import handlers
 from bots.registry import registry
 from config import cfg
+from orchestrator import bridge
 from storage import db
 
 ASSISTANT_UPDATES = ["message", "edited_message", "my_chat_member",
@@ -40,6 +41,15 @@ async def amain() -> None:
 
     cfg.brands_path.mkdir(parents=True, exist_ok=True)
     db.init(cfg.db_path)
+
+    # Починить журнал моста до того, как примем первую задачу. Брошенные
+    # прогоны появляются ровно здесь: процесс с задачей в работе не
+    # переживает перезапуск, а строка остаётся running. `bridge.running`
+    # такую строку и так не считает идущей, но в журнале она врала бы
+    # вечно идущей задачей.
+    if n := bridge.sweep():
+        log.warning("брошенных прогонов моста закрыто: %s", n)
+
     await registry.start()
 
     dp_assistant = Dispatcher()
