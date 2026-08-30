@@ -24,6 +24,18 @@ class Config:
     # Модель и усилие можно задать отдельно на роль: MODEL_EDITOR, EFFORT_EDITOR.
     # Распаковка и стратегия это суждение, публикация это форматирование —
     # платить за них одинаково смысла нет.
+    #
+    # Это настройки **старого пути** — того, что ходит через `agent.ask`.
+    # На путь через Claude Code (`orchestrator/bridge.py`) они не влияют
+    # никак и влиять не должны: `clean_env` не пропускает в подпроцесс ни
+    # `ANTHROPIC_MODEL`, ни `MODEL_*`, потому что моделью и рантаймом там
+    # распоряжается сам Claude Code. Решение от 30.08, раздел 12 миграции.
+    #
+    # Два ключа здесь мертвы. Оставлены до снятия старого слоя (этап 8):
+    #   `publisher` — модель не зовёт вовсе, и это намеренно;
+    #   `ideator`   — в старом пути такой роли нет, `agent.ask("ideator", …)`
+    #                 не существует; живёт он только субагентом Claude Code.
+    # Не путать с `tokens["ideator"]` ниже: тот ключ живой, бот поднят.
     role_models: dict[str, str] = field(default_factory=lambda: {
         role: os.getenv(f"MODEL_{role.upper()}", "")
         for role in ("assistant", "research", "strategy", "ideator", "editor",
@@ -46,6 +58,8 @@ class Config:
         "assistant": os.getenv("BOT_ASSISTANT", ""),
         "research":  os.getenv("BOT_RESEARCH", ""),
         "strategy":  os.getenv("BOT_STRATEGY", ""),
+        # Бот поднят и поллится, но поведения у него нет: ни хендлера,
+        # ни топика, ни вызова модели. Роль живёт субагентом Claude Code.
         "ideator":   os.getenv("BOT_IDEATOR", ""),
         "editor":    os.getenv("BOT_EDITOR", ""),
         "reels":     os.getenv("BOT_REELS", ""),

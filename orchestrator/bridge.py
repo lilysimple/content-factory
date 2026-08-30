@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from config import ROOT
+from orchestrator import strategy
 from storage import db
 
 log = logging.getLogger("bridge")
@@ -208,6 +209,43 @@ def sweep() -> int:
     return n
 
 
+def _slots(chat_id: int) -> list[str]:
+    """Окно плана и свободные слоты — фактом, а не заданием посчитать.
+
+    Считает `strategy.free_slots`, то есть тот же код, которым пользуется
+    старый Стратег. Без этого Director считал их сам: в progoне plan-05 —
+    двумя запросами в базу мимо `orchestrator/strategy.py`. Ответ совпал,
+    но это совпадение: правка `_window` или `_busy` развела бы два пути
+    молча, а «границу держит код» — самый дорогой урок этого проекта.
+
+    Это не выбор workflow и не указание, кого звать: свободный слот такой
+    же факт задачи, как папка бренда. Решает, что с ним делать, Director.
+
+    Отказ базы задачу не валит: без списка Director посчитает сам, как и
+    раньше. Пустой план хуже неточного контракта.
+    """
+    try:
+        window, free = strategy.free_slots(chat_id)
+    except Exception as e:                       # noqa: BLE001 — см. докстринг
+        log.warning("свободные слоты не посчитались: %s", e)
+        return ["", "## Слоты", "",
+                "Посчитать свободные слоты не удалось — посмотри сам, "
+                "источник правды `orchestrator/strategy.py:free_slots`."]
+
+    by_day: dict[str, list[str]] = {}
+    for day, plat in free:
+        by_day.setdefault(day, []).append(plat)
+
+    out = ["", "## Окно плана и свободные слоты", "",
+           f"Окно — семь дней начиная с завтра: {window[0]} — {window[-1]}.",
+           "", "Свободные пары «дата плюс площадка»:", ""]
+    out += [f"- {d}: {', '.join(p)}" for d, p in sorted(by_day.items())]
+    out += ["", "Посчитано `strategy.free_slots` — тем же кодом, что у "
+            "старого Стратега. Пересчитывать не надо: занятое сюда не "
+            "попало. Слот вне этого списка в план не ставится."]
+    return out
+
+
 def create_task(chat_id: int, ask: str, *, workflow: str, today: str,
                 brand_slug: str = "", brand_path: str = "") -> str:
     """Завести папку задачи и `input.md`. Возвращает task_id.
@@ -230,7 +268,13 @@ def create_task(chat_id: int, ask: str, *, workflow: str, today: str,
     if brand_slug:
         lines.append(f"Бренд: `{brand_slug}`")
     if brand_path:
-        lines.append(f"Папка бренда: `{brand_path}`")
+        # Путь нормализуется здесь, а не у вызывающего. В прогоне plan-05
+        # сюда приехало `…/content-factory/../content-factory-brands/…`:
+        # рабочий путь, но настолько неопрятный, что Director им не
+        # воспользовался и пошёл угадывать относительный — промахнулся и
+        # потратил лишний ход. Факт в контракте должен выглядеть как факт.
+        lines.append(f"Папка бренда: `{Path(brand_path).resolve()}`")
+    lines += _slots(chat_id)
     lines += ["", "## Запрос человека", "", ask.strip() or
               "Собери контент-план на неделю.", "",
               "## Куда положить результат", "",

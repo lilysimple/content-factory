@@ -136,6 +136,37 @@ async def main() -> None:
     check("мост НЕ задаёт порядок вызовов",
           "→" not in text and "сначала" not in low)
 
+    # ── факты в контракте: путь и свободные слоты ─────────────────────
+    # Обе проверки про plan-05. Путь туда приезжал рабочим, но неопрятным
+    # (`…/content-factory/../content-factory-brands/…`), и Director им не
+    # воспользовался — пошёл угадывать относительный и промахнулся. Слоты
+    # он считал сам, двумя запросами в базу мимо `orchestrator/strategy.py`:
+    # ответ сошёлся, но у правила «семь дней с завтра» стало бы два дома.
+    check("путь бренда нормализован", "/../" not in text,
+          "неопрятному пути Director не верит и идёт угадывать")
+
+    check("свободные слоты приехали фактом",
+          "Окно плана и свободные слоты" in text,
+          "иначе Director посчитает их сам, мимо strategy.free_slots")
+    check("слоты названы парой «дата плюс площадка»",
+          "telegram" in low and "-" in text)
+    check("сказано не пересчитывать", "ересчитывать не надо" in text)
+    check("назван источник правды", "free_slots" in text,
+          "у окна и занятости один дом — orchestrator/strategy.py")
+
+    # Отказ базы не должен валить задачу: без списка Director посчитает
+    # сам, как и до правки. Пустой план хуже неточного контракта.
+    import orchestrator.strategy as _strategy
+    _real = _strategy.free_slots
+    _strategy.free_slots = lambda *_a, **_k: (_ for _ in ()).throw(
+        RuntimeError("база недоступна"))
+    try:
+        block = "\n".join(bridge._slots(CHAT))
+    finally:
+        _strategy.free_slots = _real
+    check("отказ подсчёта слотов не роняет задачу", "Слоты" in block)
+    check("отказ назван, а не проглочен", "не удалось" in block, block[:80])
+
     r = row(tid)
     check("запись в базе заведена", r is not None)
     check("статус running", r and r["status"] == "running", r and r["status"])

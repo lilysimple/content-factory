@@ -129,6 +129,23 @@ def _free(chat_id: int, window: list[date]) -> tuple[dict[Slot, str], list[Slot]
     return busy, free
 
 
+def free_slots(chat_id: int) -> tuple[list[date], list[Slot]]:
+    """Окно плана и свободные слоты в нём. Публичная точка входа.
+
+    Нужна тем, кто планирует не через эту роль. Первый такой потребитель —
+    мост в Claude Code: Director иначе считает свободные слоты сам, запросом
+    в базу мимо этого модуля, и к первой правке `_window` или `_busy` два
+    ответа разойдутся. Окно «семь дней с завтра» и правило «слот это пара
+    дата плюс площадка» должны иметь один дом, и дом у них здесь.
+
+    Возвращает окно и свободные слоты; занятые наружу не отдаются — тому,
+    кто спрашивает, нужно куда можно, а не куда нельзя.
+    """
+    window = _window(chat_id)
+    _, free = _free(chat_id, window)
+    return window, free
+
+
 def _fit(themes: list[dict[str, Any]],
          free: list[Slot]) -> tuple[list[dict[str, Any]], list[str]]:
     """Оставить темы, попавшие в свободные слоты.
