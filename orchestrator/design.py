@@ -34,6 +34,11 @@ log = logging.getLogger("design")
 
 PACK = ROOT / "design-pack"
 MAX_TOKENS = 16000
+
+# Усилие точечной правки. Полная сборка держит усилие роли из `config`,
+# а правка по готовому HTML — работа механическая: найти место и заменить.
+# Рассуждать тут не над чем, а каждый лишний токен мышления это секунды.
+PATCH_EFFORT = "low"
 RENDER_TIMEOUT = 45
 
 CHROME_CANDIDATES = (
@@ -254,8 +259,26 @@ async def render(html_path: Path, size: tuple[int, int]) -> Path:
 
 # ── сборка ────────────────────────────────────────────────────────────
 
-def _brief(theme: dict[str, Any], copy: str, spec: str, photos: list[str],
-           size: tuple[int, int], refs: list[tuple[str, str]]) -> str:
+def _stable(spec: str, refs: list[tuple[str, str]]) -> str:
+    """То, что не меняется от круга к кругу: ТЗ площадки и эталон.
+
+    Едет отдельным кешируемым блоком, а не в теле запроса. Раньше лежало
+    в `_brief`, то есть в некешируемом хвосте, и это самые объёмные вызовы
+    завода: за один и тот же эталон платили полную цену на каждой правке,
+    а правок у макета по определению много.
+
+    Внутри одной площадки и формата содержимое совпадает дословно, поэтому
+    второй круг читает его из кеша примерно за десятую часть.
+    """
+    lines = ["## ТЗ площадки", "", spec, "",
+             "## Эталон, который клонируешь", ""]
+    for name, html in refs:
+        lines += [f"### {name}", "", "```html", html.strip(), "```", ""]
+    return "\n".join(lines)
+
+
+def _brief(theme: dict[str, Any], copy: str, photos: list[str],
+           size: tuple[int, int], cards: int) -> str:
     w, h = size
     lines = [
         "## Тема", "",
@@ -266,22 +289,17 @@ def _brief(theme: dict[str, Any], copy: str, spec: str, photos: list[str],
         "",
         f"## Холст", "",
         f"{w}×{h} пикселей. Ровно этот размер, `overflow:hidden`.",
-        f"Карточек нужно: {len(refs)}.",
+        f"Карточек нужно: {cards}.",
         "",
         "## Утверждённый текст Редактора", "",
         "Слова на макет берёшь только отсюда.", "",
         copy,
-        "",
-        "## ТЗ площадки", "", spec,
         "",
         "## Доступные фото", "",
         "Путь вида `../design/assets/images/<файл>`. Чего нет в списке, "
         "того не существует:", "",
     ]
     lines += [f"- {p}" for p in photos] or ["- фото нет"]
-    lines += ["", "## Эталон, который клонируешь", ""]
-    for name, html in refs:
-        lines += [f"### {name}", "", "```html", html.strip(), "```", ""]
     return "\n".join(lines)
 
 
@@ -312,10 +330,11 @@ async def build(chat_id: int, ask: str, *, say=None) -> Layout:
 
     answer = await agent.ask(
         "design", chat_id,
-        _brief(theme, copy, spec, photos, size, refs) +
+        _brief(theme, copy, photos, size, len(refs)) +
         "\n\nСобери макет. Ответь одним JSON-объектом в формате из твоей "
         "секции «Формат выдачи».",
-        brand_name=b.name(), max_tokens=MAX_TOKENS)
+        brand_name=b.name(), stable=_stable(spec, refs),
+        max_tokens=MAX_TOKENS)
 
     data = agent.parse_json(answer, who="дизайнер")
     cards = [c for c in (data.get("cards") or [])
@@ -381,6 +400,30 @@ def _kb(theme_id: str) -> InlineKeyboardMarkup:
     ]])
 
 
+async def _show(reg, chat_id: int, lay: Layout, size: tuple[int, int],
+                topic: str, head: str = "") -> None:
+    """Отдать макет человеку и встать в ожидание кнопки.
+
+    Один код на сборку и на точечную правку. Пока это лежало внутри `run`,
+    правка либо не показывала кнопок вовсе, либо обзавелась бы второй
+    копией показа — а у этого проекта уже есть история с четырьмя копиями
+    одной роли, где каждая починка чинила одну из четырёх.
+    """
+    table.hold(chat_id, lay)
+    if head:
+        await reg.say("design", chat_id, head, topic=topic)
+    await reg.say("design", chat_id, caption(lay, size), topic=topic)
+    for png in lay.pngs:
+        await reg.send_file("design", chat_id, png.read_bytes(), png.name,
+                            topic=topic, as_photo=True)
+    # HTML отдаём документом: по нему правят, а из PNG правку не сделаешь.
+    for html in lay.htmls:
+        await reg.send_file("design", chat_id, html.read_bytes(), html.name,
+                            topic=topic)
+    await reg.say("design", chat_id, "Принимаем?",
+                  kb=_kb(lay.theme["id"]), topic=topic)
+
+
 def caption(lay: Layout, size: tuple[int, int]) -> str:
     t = lay.theme
     out = [f"🎨 <b>{t.get('plat')} · {t.get('format')}</b> · "
@@ -430,18 +473,14 @@ async def run(reg, chat_id: int, ask: str, topic: str = "design") -> None:
     plat = lay.theme.get("plat") or "telegram"
     size = CANVAS.get(_key(plat, lay.theme.get("format") or "")) \
         or CANVAS[(plat, None)]
-    table.hold(chat_id, lay)
+    await _show(reg, chat_id, lay, size, topic)
 
-    await say(caption(lay, size))
-    for png in lay.pngs:
-        await reg.send_file("design", chat_id, png.read_bytes(), png.name,
-                            topic=topic, as_photo=True)
-    # HTML отдаём документом: по нему правят, а из PNG правку не сделаешь.
-    for html in lay.htmls:
-        await reg.send_file("design", chat_id, html.read_bytes(), html.name,
-                            topic=topic)
-    await reg.say("design", chat_id, "Принимаем?",
-                  kb=_kb(lay.theme["id"]), topic=topic)
+
+# Слова, после которых правка это всё-таки пересборка. Точечная правка
+# работает по существующему HTML, и «переделай целиком» ей не по адресу:
+# она бы аккуратно поправила то, что человек просил выбросить.
+REDO = ("пересобери", "с нуля", "заново", "переделай целиком",
+        "другой макет", "другую верстку", "другую вёрстку")
 
 
 async def revise(reg, chat_id: int, instruction: str,
@@ -453,9 +492,130 @@ async def revise(reg, chat_id: int, instruction: str,
         return
 
     table.note(chat_id, lay.theme["id"], instruction)
+
+    low = instruction.lower()
+    htmls = lay.htmls or _htmls_on_disk(chat_id, lay.theme["id"])
+    if htmls and not any(w in low for w in REDO):
+        try:
+            await _patch(reg, chat_id, lay, htmls, instruction, topic)
+            return
+        except NoWork as e:
+            # Не молчим и не делаем вид, что правка прошла: говорим, что
+            # точечно не вышло, и честно идём длинным путём.
+            log.warning("%s: точечная правка не удалась (%s), пересобираю",
+                        lay.theme["id"], e)
+            await reg.say("design", chat_id,
+                          f"Точечно поправить не вышло ({e}). "
+                          "Пересобираю макет целиком, это дольше.",
+                          topic=topic)
+
     await run(reg, chat_id,
               f"Правка к макету темы {lay.theme['id']}: {instruction}",
               topic=topic)
+
+
+def _htmls_on_disk(chat_id: int, theme_id: str) -> list[Path]:
+    """Макеты темы, лежащие в папке бренда. Память процесса их не помнит."""
+    b = desk.brand(chat_id)
+    if b is None:
+        return []
+    return sorted(b.path("posts").glob(f"{theme_id}-*.html"))
+
+
+async def _patch(reg, chat_id: int, lay: Layout, htmls: list[Path],
+                 instruction: str, topic: str) -> None:
+    """Поправить существующие макеты, а не собирать заново.
+
+    Раньше `revise` звал `run`, то есть полную пересборку: модель заново
+    писала весь HTML, Chrome заново рендерил все карточки. «Подвинь
+    заголовок на две строки ниже» стоило ровно столько же, сколько вёрстка
+    с нуля, — при потолке в 16000 токенов и усилии `high`.
+
+    Здесь модели даётся то, что уже есть, и возвращает она **только**
+    изменённые карточки. Нетронутые не перерисовываются вовсе: их PNG уже
+    лежит на диске и остаётся валидным.
+
+    Эталон и ТЗ в теле запроса не нужны — макет уже собран по ним, и они
+    к тому же лежат в кешируемом блоке.
+    """
+    b = desk.brand(chat_id)
+    theme = lay.theme
+    plat = theme.get("plat") or "telegram"
+    fmt = theme.get("format") or ""
+    size = CANVAS.get(_key(plat, fmt)) or CANVAS[(plat, None)]
+    copy = _copy(b, theme)
+    photos = _photos(b)
+
+    current = []
+    for path in htmls:
+        name = path.stem[len(theme["id"]) + 1:] or path.stem
+        current += [f"### {name}", "", "```html",
+                    path.read_text(encoding="utf-8").strip(), "```", ""]
+
+    await reg.say("design", chat_id,
+                  f"Правлю по месту: {instruction}", topic=topic)
+
+    answer = await agent.ask(
+        "design", chat_id,
+        "\n".join([
+            "## Что просит человек", "", instruction, "",
+            f"## Холст", "",
+            f"{size[0]}×{size[1]} пикселей, `overflow:hidden`. Размер не "
+            "меняется.", "",
+            "## Утверждённый текст Редактора", "",
+            "Слова на макет берёшь только отсюда.", "", copy, "",
+            "## Доступные фото", "",
+            "Путь вида `../design/assets/images/<файл>`. Чего нет в "
+            "списке, того не существует:", "",
+            *([f"- {p}" for p in photos] or ["- фото нет"]), "",
+            "## Текущие макеты", "", *current,
+            "Поправь то, о чём просит человек, и **ничего больше**. "
+            "Ответь одним JSON-объектом в формате из твоей секции "
+            "«Формат выдачи», но верни в `cards` **только те карточки, "
+            "которые изменились**. Имя карточки сохрани прежним.",
+        ]),
+        brand_name=b.name(),
+        max_tokens=MAX_TOKENS, effort=PATCH_EFFORT)
+
+    data = agent.parse_json(answer, who="дизайнер")
+    cards = [c for c in (data.get("cards") or [])
+             if isinstance(c, dict) and str(c.get("html") or "").strip()]
+    if not cards:
+        raise NoWork("дизайнер не вернул ни одной изменённой карточки")
+
+    known = {p.stem[len(theme["id"]) + 1:] or p.stem for p in htmls}
+    out = Layout(theme=theme, accent=str(data.get("accent") or ""),
+                 notes=[str(n) for n in (data.get("notes") or [])])
+    # Нетронутое остаётся на диске как есть — и попадает в комплект.
+    touched: set[str] = set()
+
+    for c in cards:
+        name = re.sub(r"[^a-z0-9-]", "", str(c.get("name") or "").lower())
+        if name not in known:
+            # Придуманное имя означает, что модель собрала новую карточку
+            # вместо правки старой. Молча принять это нельзя: в папке
+            # заведётся второй макет, и в комплект уедут оба.
+            raise NoWork(f"вернулась незнакомая карточка «{name or '?'}»")
+        html = str(c["html"]).strip()
+        out.findings += [f"{name}: {p}" for p in
+                         inspect(html, copy, size, photos)]
+        path = b.artifact(f"posts/{theme['id']}-{name}.html", html)
+        out.files.append(path)
+        out.files.append(await render(path, size))
+        touched.add(name)
+
+    for path in htmls:
+        name = path.stem[len(theme["id"]) + 1:] or path.stem
+        if name not in touched:
+            out.files.append(path)
+            png = path.with_suffix(".png")
+            if png.exists():
+                out.files.append(png)
+
+    log.info("%s: точечная правка, изменено %s из %s",
+             theme["id"], len(touched), len(htmls))
+    await _show(reg, chat_id, out, size, topic,
+                head=f"Поправлено карточек: {len(touched)} из {len(htmls)}.")
 
 
 async def on_callback(reg, chat_id: int, action: str,

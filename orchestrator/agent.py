@@ -74,7 +74,8 @@ def _cache() -> dict[str, str]:
 
 
 def build_system(role: str, *, brand_name: str = "", persona_id: str = "",
-                 profile: str = "", extra: str = "") -> list[dict[str, Any]]:
+                 profile: str = "", stable: str = "",
+                 extra: str = "") -> list[dict[str, Any]]:
     """Собрать системный промпт роли блоками, от стабильного к изменчивому.
 
     Кеширование это совпадение префикса: любое изменение обесценивает всё,
@@ -82,9 +83,17 @@ def build_system(role: str, *, brand_name: str = "", persona_id: str = "",
 
       1. frame + роль   одинаково у ВСЕХ тенантов → кешируется, читается всеми
       2. маска + бренд  стабильно внутри тенанта  → кешируется на тенанта
-      3. extra          меняется от вызова к вызову → без точки
+      3. stable         стабильно внутри задачи   → кешируется на задачу
+      4. extra          меняется от вызова к вызову → без точки
 
     Чтение закешированного стоит примерно десятую часть обычного.
+
+    Блок `stable` заведён для Дизайнера, и по делу. ТЗ площадки и эталонный
+    макет у него ехали в теле запроса — то есть в некешируемом хвосте, и
+    это самые объёмные вызовы завода. Пока правка макета означала полную
+    пересборку, за один и тот же эталон платили заново каждый круг.
+    Роль, которая ничего сюда не передаёт, своего префикса не замечает:
+    пустой блок не добавляется вовсе.
     """
     blocks: list[dict[str, Any]] = []
 
@@ -111,6 +120,14 @@ def build_system(role: str, *, brand_name: str = "", persona_id: str = "",
         tenant = "\n\n---\n\n".join(tenant_parts)
         block = {"type": "text", "text": tenant}
         if len(tenant) >= MIN_CACHE_CHARS:
+            block["cache_control"] = _cache()
+        blocks.append(block)
+
+    # Стабильное внутри задачи: ТЗ площадки, эталон макета. Меняется реже,
+    # чем запрос, но чаще, чем бренд, — потому и отдельным блоком.
+    if stable:
+        block = {"type": "text", "text": stable}
+        if len(stable) >= MIN_CACHE_CHARS:
             block["cache_control"] = _cache()
         blocks.append(block)
 
@@ -184,6 +201,7 @@ async def ask(
     brand_name: str = "",
     persona_id: str = "",
     profile: str = "",
+    stable: str = "",
     extra_system: str = "",
     max_tokens: int = 8000,
     effort: str = "",
@@ -203,7 +221,7 @@ async def ask(
             f"дневной лимит {cfg.llm_budget_day} вызовов исчерпан")
 
     system = build_system(role, brand_name=brand_name, persona_id=persona_id,
-                          profile=profile, extra=extra_system)
+                          profile=profile, stable=stable, extra=extra_system)
     model = cfg.model_for(role)
 
     delay = 2.0

@@ -21,7 +21,7 @@ from storage import db                                            # noqa: E402
 db.init(cfg.db_path)
 
 SENT_FILES = []
-CALLS = {"n": 0, "prompts": []}
+CALLS = {"n": 0, "prompts": [], "stable": [], "effort": []}
 
 
 class Reg(FakeRegistry):
@@ -52,10 +52,13 @@ def install(ans):
     async def ask(role, chat_id, prompt, **kw):
         CALLS["n"] += 1
         CALLS["prompts"].append(prompt)
+        CALLS["stable"].append(kw.get("stable", ""))
+        CALLS["effort"].append(kw.get("effort", ""))
         return ans(prompt) if callable(ans) else ans
     agent.ask = ask
     CALLS["n"] = 0
-    CALLS["prompts"].clear()
+    for k in ("prompts", "stable", "effort"):
+        CALLS[k].clear()
 
 
 COPY = "Кода не писала ни строчки. Навык нужен тот же самый."
@@ -109,11 +112,22 @@ async def main() -> None:
     # ── 2. что уехало в промпт ────────────────────────────────────────
     print("\n2. Промпт")
     p = CALLS["prompts"][-1]
-    check("ТЗ площадки передано", "Рецепт" in p or "обложка" in p.lower())
+    st = CALLS["stable"][-1]
     check("текст Редактора передан", "Кода не писала" in p)
-    check("эталон передан", "carousel-01-cover" in p)
     check("список фото передан", "author.jpg" in p)
     check("холст задан", "1080×1350" in p)
+
+    # ТЗ и эталон уехали в кешируемый блок, а не в тело запроса. Это самые
+    # объёмные вызовы завода, и в теле за них платили полную цену каждый
+    # круг правок. Проверяем обе половины: что доехало и что не в хвосте.
+    check("ТЗ площадки передано", "Рецепт" in st or "обложка" in st.lower())
+    check("эталон передан", "carousel-01-cover" in st)
+    check("ТЗ не дублируется в теле запроса",
+          "Рецепт" not in p and "## ТЗ площадки" not in p)
+    check("эталон не дублируется в теле запроса",
+          "carousel-01-cover" not in p)
+    check("кешируемый блок крупный, иначе точка кеша не ставится",
+          len(st) >= 2000, f"{len(st)} знаков")
 
     # ── 3. без ТЗ не собирает ─────────────────────────────────────────
     print("\n3. Без ТЗ не собирает")
@@ -228,6 +242,73 @@ async def main() -> None:
           len(design._reference("telegram", "пост")) == 1)
     check("холст reels вертикальный",
           design.CANVAS[("instagram", "reels")] == (1080, 1920))
+
+    # ── 9. правка это правка, а не пересборка ─────────────────────────
+    # Раньше `revise` звал `run`: модель переписывала весь HTML, Chrome
+    # перерисовывал все карточки. «Подвинь заголовок» стоило столько же,
+    # сколько вёрстка с нуля, при потолке 16000 токенов и усилии high.
+    print("\n9. Точечная правка")
+    tid = seed(plat="instagram", fmt="карусель")
+    install(answer([{"name": f"{i:02d}", "html": card(f"Карточка {i}", 1080, 1350)}
+                    for i in range(1, 6)]))
+    await design.run(reg, CHAT, "собери карусель")
+    made = sorted(x.name for x in b.path("posts").glob(f"{tid}-*.png"))
+    check("собрано пять карточек", len(made) == 5, str(made))
+
+    was = {x.name: x.stat().st_mtime_ns
+           for x in b.path("posts").glob(f"{tid}-*.png")}
+    await design.on_callback(reg, CHAT, "fix")
+    SENT_FILES.clear()
+    reg.clear()
+    # Модель возвращает ОДНУ изменённую карточку — так и просит промпт.
+    install(answer([{"name": "03", "html": card("Карточка 3 крупнее", 1080, 1350)}]))
+    await design.revise(reg, CHAT, "на третьей карточке кегль крупнее")
+
+    check("вызов модели ровно один", CALLS["n"] == 1, f"вызовов {CALLS['n']}")
+    check("правка идёт на низком усилии", CALLS["effort"][-1] == "low",
+          f"усилие {CALLS['effort'][-1]!r}")
+    body = CALLS["prompts"][-1]
+    check("эталон в правку не едет", "carousel-01-cover" not in body)
+    check("текущий макет показан модели", "Карточка 1" in body, body[:200])
+    check("просьба человека передана", "кегль крупнее" in body)
+
+    now = {x.name: x.stat().st_mtime_ns
+           for x in b.path("posts").glob(f"{tid}-*.png")}
+    changed = [n for n in was if was[n] != now.get(n)]
+    check("перерисована ровно одна карточка", len(changed) == 1, str(changed))
+    check("перерисована именно третья", changed and changed[0].endswith("-03.png"),
+          str(changed))
+    check("нетронутые карточки уцелели", len(now) == 5, str(sorted(now)))
+    check("человеку сказано, сколько поправлено",
+          "1 из 5" in reg.texts(), reg.texts()[:200])
+    check("в комплект уехали все пять",
+          len([n for n, _, ph in SENT_FILES if n.endswith(".png") and ph]) == 5,
+          str([n for n, _, _ in SENT_FILES]))
+    check("кнопки после правки на месте",
+          [":".join(x.split(":")[:2]) for x in reg.last().buttons] ==
+          ["art:ok", "art:fix", "art:queue"], str(reg.last().buttons))
+
+    # ── 10. когда правка всё-таки пересборка ──────────────────────────
+    print("\n10. Пересборка по просьбе и по отказу")
+    await design.on_callback(reg, CHAT, "fix")
+    reg.clear()
+    install(answer([{"name": f"{i:02d}", "html": card(f"Новая {i}", 1080, 1350)}
+                    for i in range(1, 6)]))
+    await design.revise(reg, CHAT, "пересобери с нуля, другой макет")
+    check("«пересобери» ведёт к полной сборке",
+          "Верстаю" in reg.texts() or "карточки" in reg.texts(),
+          reg.texts()[:200])
+
+    # Незнакомое имя карточки значит, что модель собрала новую вместо
+    # правки старой. Принять молча нельзя: в папке заведётся второй макет.
+    await design.on_callback(reg, CHAT, "fix")
+    reg.clear()
+    install(answer([{"name": "самовольная", "html": card("чужая", 1080, 1350)}]))
+    await design.revise(reg, CHAT, "чуть сдвинь подпись")
+    check("самовольная карточка не принята молча",
+          "Точечно поправить не вышло" in reg.texts(), reg.texts()[:200])
+    check("после отказа пошла честная пересборка",
+          "Пересобираю" in reg.texts(), reg.texts()[:200])
 
 
 asyncio.run(main())
