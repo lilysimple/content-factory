@@ -289,9 +289,17 @@ async def main() -> None:
           res.text[:60])
     check("стоимость снята из JSON", res.cost == 0.42, str(res.cost))
     check("session_id снят", res.session_id == "abc", res.session_id)
+    # Список читается человеком как «что отдали роли». Свои файлы Python в
+    # него не приписывает: `input.md` это контракт, `stats.md` — снятые до
+    # запуска цифры, и оба выглядели бы там чьей-то работой.
     check("артефакты перечислены",
-          set(res.artifacts) == {"final.md", "input.md", "strategy.md"},
+          set(res.artifacts) == {"final.md", "strategy.md"},
           str(res.artifacts))
+    check("контракт не выдан за результат роли",
+          "input.md" not in res.artifacts)
+    check("цифры не выданы за результат роли",
+          bridge.STATS_FILE not in res.artifacts,
+          "их снял Python до запуска, а не Ресёрчер")
 
     r = row(tid)
     check("статус done", r and r["status"] == "done", r and r["status"])

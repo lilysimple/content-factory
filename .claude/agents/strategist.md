@@ -45,7 +45,7 @@ tools: Read, Write, Grep, Glob
 
 | Что | Где | Из чего собрано |
 |---|---|---|
-| Профиль бренда | `{BRANDS_PATH}/{slug}/research/profile-digest.md` | `core.md` (секции «Кто это», «Аудитория», «Формат») + `goals.md` + `platforms.md` |
+| Профиль бренда | `{BRANDS_PATH}/{slug}/research/profile-digest.md` | `core.md` (секции «Кто это», «Аудитория», «Цель этапа», «Формат») + `goals.md` + `platforms.md` |
 | Дайджест недели, механики | `tasks/{task-id}/research.md` | ленты каналов и скрины статистики, снял Ресёрчер |
 | Занятые и свободные слоты | `tasks/{task-id}/input.md` | `strategy.free_slots` по базе |
 | События недели | `tasks/{task-id}/input.md` | `plans/events.md` папки бренда |

@@ -87,6 +87,7 @@ class Digest:
 # ── своя статистика ───────────────────────────────────────────────────
 
 def _cut(text: str, n: int = 60) -> str:
+    """Заголовок поста одной строкой. Переводы строк съедаются намеренно."""
     line = " ".join(text.split())
     return line[:n] + ("…" if len(line) > n else "")
 
@@ -162,6 +163,136 @@ def measure(src: sources.Source, *, window: Window | None = None) -> Stats:
     st.best = [(v, _cut(t)) for v, t in ranked[:TOP]]
     st.worst = [(v, _cut(t)) for v, t in ranked[-TOP:]][::-1]
     return st
+
+
+SNAP_TOP = 3                # сколько постов сверху и снизу на канал
+SNAP_CUT = 120              # знаков от текста поста
+STATS_DIR = "research/stats"
+
+
+def _line(p: sources.Post) -> str:
+    seen = f"{p.views}" if p.views is not None else "—"
+    when = f"{p.date:%d.%m}" if p.date else "дата?"
+    return f"- {seen} просм. · {when} · {_cut(p.text, SNAP_CUT)}"
+
+
+async def snapshot(b, *, window: Window | None = None) -> tuple[str, list[str]]:
+    """Цифры за окно: свой канал, соседи, скрины. Текст плюс список дыр.
+
+    Заведено потому, что Ресёрчеру цифры не кладли вовсе, и он добывал их
+    сам: искал `sources.fetch` в коде, писал скрипт, гонял, правил. Восемь
+    ходов модели на работу, которая занимает три с половиной секунды сети.
+    Каждый ход перечитывает накопленный контекст, поэтому платили не за
+    сеть, а за разведку.
+
+    Считается тем же кодом, что у старого Ресёрчера: `measure` для чисел,
+    `last_week` для окна. Второго дома у арифметики не появляется.
+
+    Сеть падает — это дыра в списке, а не отказ задачи: сводка на части
+    источников честнее молчания.
+    """
+    window = window or last_week()
+    gaps: list[str] = []
+    out = [f"Окно: {window}. Посты вне него не считаются.", ""]
+
+    own_url = cfg.publish_channel
+    if own_url:
+        try:
+            own = await sources.fetch(own_url, limit=POSTS_LIMIT)
+        except Exception as e:                   # noqa: BLE001
+            own = None
+            gaps.append(f"свой канал {own_url} не открылся: {type(e).__name__}")
+        if own is not None and own.ok:
+            st = measure(own, window=window)
+            out += ["## Свой канал", "",
+                    f"- {st.title or own_url}"
+                    + (f", {st.subscribers}" if st.subscribers else ""),
+                    f"- постов в окне: {st.posts}, с просмотрами: "
+                    f"{st.with_views}, вне окна: {st.outside}",
+                    f"- медиана просмотров: {st.median}", ""]
+            if st.best:
+                out += ["Выше медианы:"] + [f"- {v} просм. · {t}"
+                                            for v, t in st.best] + [""]
+            if st.worst:
+                out += ["Ниже медианы:"] + [f"- {v} просм. · {t}"
+                                            for v, t in st.worst] + [""]
+            if not st.enough:
+                gaps.append(f"постов с просмотрами в окне всего {st.with_views}: "
+                            "медиана это совпадение, а не статистика")
+            if not st.covered:
+                gaps.append("лента своего канала не дотянулась до начала окна: "
+                            "срез неполон")
+        elif own is not None:
+            gaps.append(f"свой канал {own_url}: {own.error}")
+    else:
+        gaps.append("своего канала в настройках нет: PUBLISH_CHANNEL пуст")
+
+    urls = watchlist(b)
+    if not urls:
+        gaps.append(f"списка чужих источников нет: заведи `{WATCHLIST}` "
+                    "в папке бренда")
+    else:
+        try:
+            others = await sources.fetch_all(urls, limit=20)
+        except Exception as e:                   # noqa: BLE001
+            others = []
+            gaps.append(f"чужие источники не открылись: {type(e).__name__}")
+
+        rows, blocks = [], []
+        for src in others:
+            if not src.ok:
+                gaps.append(f"{src.url}: {src.error}")
+                continue
+            st = measure(src, window=window)
+            name = src.title or src.url
+            subs = src.subscribers.split()[0] if src.subscribers else "—"
+            # Труба в названии канала рвёт таблицу целиком: у «Вайб-кодинг
+            # по Чуйкову | Ментор» строка разъезжается на шесть колонок.
+            cell = name.replace("|", "/")
+            rows.append(f"| {cell} | {subs} | {st.posts} | "
+                        f"{st.median or '—'} | {'да' if st.covered else 'нет'} |")
+            if not st.covered:
+                gaps.append(f"{name}: лента не дотянулась до начала окна, "
+                            "срез по каналу неполон")
+            inside, _, _ = window.split(src.posts)
+            if not inside:
+                gaps.append(f"{name}: в окне нет ни одного поста, лента отдала "
+                            "только более старые — сравнивать нечего")
+                continue
+            rank = sorted(inside, key=lambda p: p.views or 0, reverse=True)
+            blocks += [f"### {name}", ""]
+            blocks += [_line(p) for p in rank[:SNAP_TOP]]
+            if len(rank) > SNAP_TOP * 2:
+                blocks.append("- …")
+            if len(rank) > SNAP_TOP:
+                blocks += [_line(p) for p in rank[-SNAP_TOP:]]
+            blocks.append("")
+
+        if rows:
+            out += ["## Внешний срез", "",
+                    "| Канал | Подписчиков | Постов в окне | Медиана | "
+                    "Окно покрыто |",
+                    "|---|---|---|---|---|"] + rows + [""]
+            out += ["Верх и низ каждого канала внутри окна:", ""] + blocks
+
+    folder = b.path(STATS_DIR)
+    shots = sorted(f.name for f in folder.glob("*")
+                   if f.is_file() and f.suffix.lower() in
+                   {".png", ".jpg", ".jpeg", ".webp"}) if folder.is_dir() else []
+    out += ["## Скрины статистики", ""]
+    if shots:
+        out += [f"Лежат в `{STATS_DIR}` папки бренда, читай их сам:", ""]
+        out += [f"- {n}" for n in shots]
+        out += ["", "Они дополняют цифры выше: охват, ER, подписки, досмотры "
+                "лента не отдаёт. Разобранное дописывай строками в "
+                "`stats.csv`, поле без данных оставляй прочерком."]
+    else:
+        out.append(f"Папка `{STATS_DIR}` пуста: охвата, ER и досмотров нет, "
+                   "в срезе только просмотры.")
+        gaps.append("скринов статистики нет: реакций, охвата и досмотров в "
+                    "сводке не будет")
+
+    return "\n".join(out), gaps
 
 
 def watchlist(b) -> list[str]:
@@ -508,8 +639,15 @@ def _funnel(text: str) -> dict[str, int] | None:
     return found
 
 
-def _cut(text: str, limit: int = DIGEST_CUT) -> str:
-    """Обрезать по границе строки: обрубок на середине слова читается как факт."""
+def _clip(text: str, limit: int = DIGEST_CUT) -> str:
+    """Обрезать по границе строки: обрубок на середине слова читается как факт.
+
+    Называется не `_cut` намеренно. Пока обе функции звались одинаково, эта
+    молча перекрывала ту, что режет заголовок поста до шестидесяти знаков:
+    определена ниже — значит выигрывает в момент вызова. В срез из-за этого
+    уезжали посты целиком, многострочными, и «заголовок» в статистике был
+    полным текстом на полторы тысячи знаков.
+    """
     text = text.strip()
     if len(text) <= limit:
         return text
@@ -526,7 +664,7 @@ def _build(b) -> ProfileDigest:
     # Ядро идёт секциями, а не файлом: роли читают свою часть, и целиком
     # его не нужно никому. Полный `core.md` это 7 800 знаков против 3 100
     # в трёх секциях.
-    core = [_cut(block) for needle in CORE_SECTIONS
+    core = [_clip(block) for needle in CORE_SECTIONS
             if (block := b.section("core", needle))]
     if core:
         body.append("### core.md\n\n" + "\n\n".join(core))
@@ -539,7 +677,7 @@ def _build(b) -> ProfileDigest:
         if not text:
             missing.append(key)
             continue
-        body.append(f"### {name}\n\n{_cut(text)}")
+        body.append(f"### {name}\n\n{_clip(text)}")
 
     goals = b.read("goals")
     parsed = _funnel(goals) if goals.strip() else None

@@ -114,6 +114,10 @@ async def main() -> None:
     check("пропорция воронки даёт сотню",
           sum(dg.funnel.values()) == 100, dg.funnel)
 
+    check("заголовок поста режется коротко, а не по потолку выжимки",
+          len(research._cut("слово " * 200)) <= 61,
+          "две функции звались _cut, и та, что режет до 1500, перекрывала эту")
+
     # ── 3. Окно недели ────────────────────────────────────────────────
     print("\n3. Окно прошлой недели")
 
@@ -186,8 +190,71 @@ async def main() -> None:
           not any(n in text for n in ("researcher", "strategist", "ideator")),
           "кого звать, решает Director")
 
+    # ── 5b. Цифры снимает Python, а не роль ───────────────────────────
+    print("\n5b. Цифры фактом в задачу")
+
+    calls: list[str] = []
+    real_snap = research.snapshot
+
+    async def fake_snap(brand, **kw):            # noqa: ANN001
+        calls.append("снят")
+        return ("Окно: тест. Медиана 42.", ["скринов нет"])
+
+    research.snapshot = fake_snap
+    try:
+        note = await bridge.snapshot(task_id)
+        check("снимок сделан для плана", calls == ["снят"], calls)
+        stats = bridge.TASKS_DIR / task_id / bridge.STATS_FILE
+        check("цифры легли отдельным файлом", stats.exists())
+        body = stats.read_text(encoding="utf-8")
+        check("в файле сами цифры", "Медиана 42" in body)
+        check("сказано, что снял код",
+              "research.snapshot" in body,
+              "иначе роль решит, что цифры чьё-то мнение")
+
+        text = (bridge.TASKS_DIR / task_id / "input.md").read_text(encoding="utf-8")
+        check("контракт называет адрес цифр", bridge.STATS_FILE in text)
+        check("цифры в контракт текстом не уехали",
+              "Медиана 42" not in text,
+              "их читает Ресёрчер, Director платил бы за них зря")
+        check("дыра названа в контракте", "скринов нет" in text)
+        check("сказано не считать самому",
+              "сам не считай" in text or "заново не читай" in text, note[:80])
+
+        calls.clear()
+        free_bridge()
+        t_post = bridge.create_task(CHAT, "напиши пост", workflow="post",
+                                    today="2026-08-31", brand_slug=b.slug,
+                                    brand_path=str(b.root))
+        await bridge.snapshot(t_post)
+        check("для поста цифры не снимаются", calls == [],
+              "платить временем за то, что никто не прочтёт, незачем")
+
+        async def boom(brand, **kw):             # noqa: ANN001
+            raise RuntimeError("сеть легла")
+
+        research.snapshot = boom
+        free_bridge()
+        t_bad = bridge.create_task(CHAT, "сводка", workflow="research",
+                                   today="2026-08-31", brand_slug=b.slug,
+                                   brand_path=str(b.root))
+        await bridge.snapshot(t_bad)
+        bad = (bridge.TASKS_DIR / t_bad / "input.md").read_text(encoding="utf-8")
+        check("упавшая сеть не валит задачу", "сеть легла" in bad, bad[-200:])
+        check("файла цифр при отказе нет",
+              not (bridge.TASKS_DIR / t_bad / bridge.STATS_FILE).exists())
+    finally:
+        research.snapshot = real_snap
+
     # ── 6. Посадка плана с моста ──────────────────────────────────────
     print("\n6. Посадка плана")
+
+    # Своя задача: проверки выше закрывали прогоны, и строки в `bridge_runs`
+    # для прежней уже нет — а посадка берёт из неё чат и workflow.
+    free_bridge()
+    task_id = bridge.create_task(CHAT, "план на неделю", workflow="plan",
+                                 today="2026-08-31", brand_slug=b.slug,
+                                 brand_path=str(b.root))
 
     window, free = strategy.free_slots(CHAT)
     good, bad = free[0], ("2020-01-01", "telegram")

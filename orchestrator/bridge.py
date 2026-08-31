@@ -536,6 +536,10 @@ async def run(task_id: str) -> Result:
     argv = [binary, "-p", _prompt(task_id), "--allowedTools", TOOLS,
             "--permission-mode", "acceptEdits", "--output-format", "json"]
 
+    # Цифры снимаются до старта: три с половиной секунды сети здесь дешевле
+    # восьми ходов модели на разведку там.
+    await snapshot(task_id)
+
     started = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -594,11 +598,87 @@ async def run(task_id: str) -> Result:
         res.text += "\n\n" + for_telegram(res.landed)
 
     res.ok = True
-    res.artifacts = sorted(p.name for p in res.dir.glob("*.md"))
+    res.artifacts = _artifacts(res)
     _finish(res, "done")
     log.info("задача %s готова за %s с, артефактов %s",
              task_id, res.secs, len(res.artifacts))
     return res
+
+
+STATS_FILE = "stats.md"
+
+# Что Python кладёт в папку задачи сам. В список артефактов это не идёт:
+# человек читает его как «что отдали роли», а не «что лежит в папке».
+OWN_FILES = ("input.md", STATS_FILE)
+
+# Каким workflow цифры нужны фактом. Сводка и план стоят на них целиком,
+# «раскачай тему» опирается на охват — остальным они не нужны, и снимать
+# их значило бы платить временем за то, что никто не прочтёт.
+NEEDS_STATS = ("research", "plan", "idea")
+
+
+async def snapshot(task_id: str) -> str:
+    """Снять цифры в `tasks/{id}/stats.md` и дописать адрес в `input.md`.
+
+    Раньше Ресёрчеру не кладли ничего, и он добывал цифры сам: искал
+    `sources.fetch` в коде, писал скрипт, гонял, правил. Восемь ходов
+    модели на работу, которая занимает три с половиной секунды сети — и
+    каждый ход перечитывает накопленный контекст.
+
+    Поэтому цифры снимает Python **до** запуска подпроцесса: сеть уходит
+    с часов модели совсем. Считает `research.snapshot`, то есть `measure`
+    и `last_week` — тот же код, что у старого Ресёрчера.
+
+    Файл отдельный, а не раздел `input.md`: цифры нужны Ресёрчеру, а
+    Director их не читает и платить за них своим контекстом не должен.
+    Это второй писатель `input.md` после `create_task`, и оба — Python.
+    Провенанс от этого не мутнеет: Director по-прежнему не пишет туда
+    ничего.
+
+    Сеть упала — задача не валится: дыра называется строкой, и роль
+    работает на том, что есть.
+    """
+    row = db.one("SELECT chat_id, workflow FROM bridge_runs WHERE task_id = ?",
+                 task_id)
+    if not row or row["workflow"] not in NEEDS_STATS:
+        return ""
+
+    b = desk.brand(row["chat_id"])
+    if b is None:
+        return ""
+
+    try:
+        text, gaps = await research.snapshot(b)
+    except Exception as e:                       # noqa: BLE001
+        log.warning("%s: цифры не снялись: %s", task_id, e)
+        gaps = [f"снять цифры не удалось: {e}"]
+        text = ""
+
+    d = TASKS_DIR / task_id
+    d.mkdir(parents=True, exist_ok=True)
+    if text:
+        (d / STATS_FILE).write_text(
+            "# Цифры за окно\n\n"
+            "Сняты кодом завода (`research.snapshot`) до запуска задачи. "
+            "Пересчитывать их не надо и спорить с ними нечем: у арифметики "
+            "один дом.\n\n" + text + "\n", encoding="utf-8")
+
+    out = ["", "## Цифры сняты", ""]
+    if text:
+        out += [f"Своя статистика и внешний срез — в `tasks/{task_id}/"
+                f"{STATS_FILE}`. Окно, медианы и покрытие посчитаны кодом; "
+                "лент заново не читай и медианы сам не считай.", ""]
+    else:
+        out += ["Цифры снять не удалось, файла нет.", ""]
+    if gaps:
+        out += ["Чего в цифрах нет:", ""] + [f"- {g}" for g in gaps]
+
+    inp = d / "input.md"
+    if inp.exists():
+        inp.write_text(inp.read_text(encoding="utf-8").rstrip() + "\n"
+                       + "\n".join(out) + "\n", encoding="utf-8")
+    log.info("%s: цифры сняты, дыр %s", task_id, len(gaps))
+    return "\n".join(out)
 
 
 JSON_FENCE = re.compile(r"```json\s*(\{.*?\})\s*```", re.S)
@@ -702,15 +782,20 @@ def _fail(res: Result, why: str, *, status: str = "failed") -> Result:
     """
     res.ok, res.error = False, why
     if res.dir.exists():
-        res.artifacts = sorted(p.name for p in res.dir.glob("*.md"))
-    done = [a for a in res.artifacts if a != "input.md"]
-    if done:
-        res.error += ". Успело лечь на диск: " + ", ".join(done)
+        res.artifacts = _artifacts(res)
+    if res.artifacts:
+        res.error += ". Успело лечь на диск: " + ", ".join(res.artifacts)
     if res.landed:
         res.error += ". " + res.landed
     _finish(res, status)
     log.error("задача %s: %s", res.task_id, res.error)
     return res
+
+
+def _artifacts(res: Result) -> list[str]:
+    """Что отдали роли. Свои файлы Python сюда не приписывает."""
+    return sorted(p.name for p in res.dir.glob("*.md")
+                  if p.name not in OWN_FILES)
 
 
 def _finish(res: Result, status: str) -> None:
