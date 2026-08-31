@@ -425,6 +425,36 @@ def _digest(chat_id: int) -> list[str]:
     return out
 
 
+def _history(chat_id: int) -> list[str]:
+    """Недавние темы и невышедшее — фактом из базы, а не поиском по папке.
+
+    Без этого субагент шарил `Glob` по `posts/` и `plans/`: два круга к
+    модели ради того, что `strategy.archive` отдаёт запросом. Хуже цены
+    то, что ответы расходятся — файл поста остаётся лежать после того,
+    как тему сняли, а `themes` знает её статус.
+    """
+    try:
+        recent, left = strategy.archive(chat_id)
+    except Exception as e:                       # noqa: BLE001
+        log.warning("архив не собрался: %s", e)
+        return []
+
+    out = ["", "## Архив и невышедшее", ""]
+    if recent:
+        out += ["Недавние темы — повторять их нельзя:", ""]
+        out += [f"- {r}" for r in recent]
+    else:
+        out.append("Архив пуст: это первая неделя бренда.")
+    if left:
+        out += ["", "Осталось невышедшим — это первые кандидаты в новую "
+                    "неделю, а не мусор:", ""]
+        out += [f"- {x}" for x in left]
+    out += ["", "Посчитано `strategy.archive` по базе. Искать архив в "
+                "`posts/` и `plans/` не надо: файл остаётся лежать и после "
+                "того, как тему сняли, а статус знает база."]
+    return out
+
+
 def _events(chat_id: int) -> list[str]:
     """События недели: вебинар, прогрев, запуск. Факт, а не догадка.
 
@@ -458,11 +488,11 @@ def _events(chat_id: int) -> list[str]:
 # Какие факты кладутся в `input.md` под какой workflow. Факты, не роли:
 # свободный слот и незакрытая тема — это данные задачи, как папка бренда.
 CONTEXT = {
-    "plan":     (_slots, _index, _digest, _events),
+    "plan":     (_slots, _index, _digest, _events, _history),
     "post":     (_themes, _index),
     "reels":    (_themes, _index),
     "design":   (_themes, _index),
-    "idea":     (_themes, _index, _digest),
+    "idea":     (_themes, _index, _digest, _history),
     "research": (_index,),
 }
 

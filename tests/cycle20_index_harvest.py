@@ -173,7 +173,8 @@ async def main() -> None:
     text = (bridge.TASKS_DIR / task_id / "input.md").read_text(encoding="utf-8")
 
     for head in ("## Окно плана и свободные слоты", "## Индекс профиля",
-                 "## Сводка Ресёрчера", "## События недели"):
+                 "## Сводка Ресёрчера", "## События недели",
+                 "## Архив и невышедшее"):
         check(f"раздел «{head[3:]}» на месте", head in text)
 
     check("индекс назван путём, а не текстом",
@@ -186,6 +187,13 @@ async def main() -> None:
     check("свежесть сводки названа",
           research.last_week().name in text,
           "иначе план встанет на сводке позапрошлого месяца молча")
+    recent, left = strategy.archive(CHAT)
+    if recent:
+        check("недавние темы приехали фактом", recent[0] in text, recent[0])
+    check("сказано не искать архив в папке",
+          "posts/" in text and "не надо" in text,
+          "Glob по папке даёт другой ответ: файл переживает снятую тему")
+
     check("имён субагентов в контракте нет",
           not any(n in text for n in ("researcher", "strategist", "ideator")),
           "кого звать, решает Director")
