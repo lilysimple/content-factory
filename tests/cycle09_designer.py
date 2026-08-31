@@ -43,6 +43,15 @@ def card(body: str, w=1080, h=1350, photo="author.jpg") -> str:
             f'line-height:1;color:var(--milk)">{body}</div></div></body></html>')
 
 
+def slots(headline="Кода не писала", accent_tail=" ни строчки",
+          rubric="ПУТЬ В AI", subtitle="Навык нужен тот же самый",
+          photo="author.jpg") -> dict:
+    """Слоты вместо HTML: на переехавших площадках разметку собирает код."""
+    return {"rubric": rubric, "headline": headline,
+            "headline_accent": accent_tail, "subtitle": subtitle,
+            "photo": photo}
+
+
 def answer(cards, accent="терракота на слове", notes=None) -> str:
     return json.dumps({"cards": cards, "accent": accent,
                        "notes": notes or []}, ensure_ascii=False)
@@ -86,7 +95,7 @@ async def main() -> None:
     print("\n1. Макет собирается")
     tid = seed()
     SENT_FILES.clear()
-    install(answer([{"name": "cover", "html": card("Кода не писала<br>ни строчки")}]))
+    install(answer([{"name": "cover", "slots": slots()}]))
     await design.run(reg, CHAT, "сделай обложку")
 
     html = b.path(f"posts/{tid}-cover.html")
@@ -109,25 +118,42 @@ async def main() -> None:
           all(x.endswith(tid) for x in reg.last().buttons),
           str(reg.last().buttons))
 
-    # ── 2. что уехало в промпт ────────────────────────────────────────
-    print("\n2. Промпт")
+    # ── 2. шаблон: разметку собирает код ──────────────────────────────
+    print("\n2. Шаблон и слоты")
     p = CALLS["prompts"][-1]
     st = CALLS["stable"][-1]
     check("текст Редактора передан", "Кода не писала" in p)
     check("список фото передан", "author.jpg" in p)
     check("холст задан", "1080×1350" in p)
-
-    # ТЗ и эталон уехали в кешируемый блок, а не в тело запроса. Это самые
-    # объёмные вызовы завода, и в теле за них платили полную цену каждый
-    # круг правок. Проверяем обе половины: что доехало и что не в хвосте.
-    check("ТЗ площадки передано", "Рецепт" in st or "обложка" in st.lower())
-    check("эталон передан", "carousel-01-cover" in st)
+    check("ТЗ площадки передано в кешируемом блоке",
+          "Рецепт" in st or "обложка" in st.lower())
     check("ТЗ не дублируется в теле запроса",
           "Рецепт" not in p and "## ТЗ площадки" not in p)
-    check("эталон не дублируется в теле запроса",
-          "carousel-01-cover" not in p)
-    check("кешируемый блок крупный, иначе точка кеша не ставится",
-          len(st) >= 2000, f"{len(st)} знаков")
+    check("слоты описаны модели", "`headline`" in st and "`photo`" in st, st[:200])
+    check("разметку у модели не просят",
+          "html" not in p.lower().split("## текущие")[0], p[:200])
+    check("шаблон модели не показывают", "{{" not in st and "{{" not in p)
+
+    made = html.read_text(encoding="utf-8")
+    check("холст пришёл из шаблона, а не от модели", "1080px" in made
+          and "1350px" in made)
+    check("цвета токенами", "var(--milk)" in made, made[:200])
+    check("путь к фото собрал код",
+          "../design/assets/images/author.jpg" in made)
+    check("значение слота попало в макет", "Кода не писала" in made)
+    check("кегль посчитан кодом",
+          f"font-size:{design._fit('Кода не писала ни строчки')}px" in made,
+          made[made.find(".head"):made.find(".head") + 200])
+    check("слоты сохранены рядом с макетом",
+          b.path(f"posts/{tid}-cover.slots.json").exists())
+
+    # Разметка от кода означает, что четыре проверки inspect стали
+    # невозможны по устройству. Пятая — чужие слова — осталась: её решает
+    # модель, и код её по-прежнему стережёт.
+    check("собранный кодом макет чист для inspect",
+          design.inspect(made, COPY + " ПУТЬ В AI Навык нужен тот же самый",
+                         (1080, 1350), design._photos(b)) == [],
+          str(design.inspect(made, COPY, (1080, 1350), design._photos(b))))
 
     # ── 3. без ТЗ не собирает ─────────────────────────────────────────
     print("\n3. Без ТЗ не собирает")
@@ -181,16 +207,42 @@ async def main() -> None:
     check("нормальный макет чист", design.inspect(ok, COPY, size, photos) == [],
           str(design.inspect(ok, COPY, size, photos)))
 
-    # ── 6. замечания доезжают до человека ─────────────────────────────
+    # ── 6. замечания и отказы доезжают до человека ────────────────────
     print("\n6. Замечания доезжают")
+
+    # На шаблоне несуществующее фото это уже не предупреждение, а отказ:
+    # путь собирает код, и подставить в него небылицу нечему. Раньше такой
+    # макет уходил человеку с ⚠️ и открывался у него пустым прямоугольником.
     tid = seed()
     reg.clear()
-    install(answer([{"name": "cover",
-                     "html": card("Кода не писала", photo="призрак.jpg")}]))
+    install(answer([{"name": "cover", "slots": slots(photo="призрак.jpg")}]))
     await design.run(reg, CHAT, "сделай обложку")
-    check("замечание показано человеку", "⚠️" in reg.texts(),
+    check("несуществующее фото отклонено, а не помечено",
+          "Верстать нечего" in reg.texts(), reg.texts()[:160])
+    check("названо, чего не хватает", "призрак.jpg" in reg.texts(),
+          reg.texts()[:160])
+
+    # Слишком длинный слот тоже отказ: заголовок вылез бы за холст, а
+    # заметил бы это человек глазами на PNG.
+    reg.clear()
+    install(answer([{"name": "cover", "slots": slots(headline="о" * 80)}]))
+    await design.run(reg, CHAT, "сделай обложку")
+    check("переполненный слот отклонён", "Верстать нечего" in reg.texts(),
+          reg.texts()[:160])
+
+    # На непереехавшей площадке путь прежний: замечание, но макет отдан.
+    seed(plat="instagram", fmt="карусель")
+    SENT_FILES.clear()
+    reg.clear()
+    install(answer([{"name": f"{i:02d}",
+                     "html": card("Кода не писала", 1080, 1350,
+                                  photo="призрак.jpg" if i == 1 else "author.jpg")}
+                    for i in range(1, 6)]))
+    await design.run(reg, CHAT, "собери карусель")
+    check("на HTML-пути замечание показано", "⚠️" in reg.texts(),
           "замечание проглочено")
-    check("макет всё равно отдан", any(n.endswith(".png") for n, _, _ in SENT_FILES))
+    check("макет всё равно отдан",
+          any(n.endswith(".png") for n, _, _ in SENT_FILES))
 
     # ── 7. кнопки ─────────────────────────────────────────────────────
     print("\n7. Кнопки")
@@ -199,7 +251,12 @@ async def main() -> None:
     check("ждём правку", design.wants_fix(CHAT) is True)
 
     tid = seed()
-    install(answer([{"name": "cover", "html": card("Кода не писала")}]))
+    install(answer([{"name": "cover", "slots": slots()}]))
+    reg.clear()
+    await design.run(reg, CHAT, "сделай обложку")
+    await design.on_callback(reg, CHAT, "fix")
+    install(answer([{"name": "cover",
+                     "slots": slots(subtitle="Навык нужен тот же")}]))
     reg.clear()
     await design.revise(reg, CHAT, "сделай кегль крупнее")
     check("флаг снят", design.wants_fix(CHAT) is False)
@@ -218,7 +275,7 @@ async def main() -> None:
     # которая только сообщает о существовании соседа, уже обманывала
     # здесь полторы недели.
     seed()
-    install(answer([{"name": "cover", "html": card("Кода не писала")}]))
+    install(answer([{"name": "cover", "slots": slots()}]))
     reg.clear()
     await design.run(reg, CHAT, "сделай обложку")
     reg.clear()
@@ -309,6 +366,57 @@ async def main() -> None:
           "Точечно поправить не вышло" in reg.texts(), reg.texts()[:200])
     check("после отказа пошла честная пересборка",
           "Пересобираю" in reg.texts(), reg.texts()[:200])
+
+    # ── 11. правка по слотам ──────────────────────────────────────────
+    # Самый дешёвый круг: модель получает пять коротких значений и
+    # возвращает такие же. Двести байт вместо двух килобайт разметки.
+    print("\n11. Правка по слотам")
+    tid = seed()
+    install(answer([{"name": "cover", "slots": slots()}]))
+    reg.clear()
+    await design.run(reg, CHAT, "сделай обложку")
+    png = b.path(f"posts/{tid}-cover.png")
+    was = png.stat().st_mtime_ns
+
+    await design.on_callback(reg, CHAT, "fix")
+    reg.clear()
+    install(answer([{"name": "cover",
+                     "slots": slots(subtitle="Тот же навык, другая скорость")}]))
+    await design.revise(reg, CHAT, "подзаголовок другой")
+
+    body = CALLS["prompts"][-1]
+    check("правка идёт по слотам", "Текущие слоты" in body, body[:200])
+    check("разметка в правку не едет", "<!DOCTYPE" not in body)
+    check("запрос правки короткий", len(body) < 2000, f"{len(body)} знаков")
+    check("правка на низком усилии", CALLS["effort"][-1] == "low",
+          str(CALLS["effort"][-1]))
+
+    made = b.path(f"posts/{tid}-cover.html").read_text(encoding="utf-8")
+    check("новое значение попало в макет", "другая скорость" in made)
+    check("нетронутый слот уцелел", "Кода не писала" in made)
+    check("PNG перерисован", png.stat().st_mtime_ns != was)
+    check("слоты на диске обновились",
+          "другая скорость" in
+          b.path(f"posts/{tid}-cover.slots.json").read_text(encoding="utf-8"))
+
+    # Границы те же, что и у HTML-правки: чужая карточка не принимается.
+    await design.on_callback(reg, CHAT, "fix")
+    reg.clear()
+    install(answer([{"name": "самовольная", "slots": slots()}]))
+    await design.revise(reg, CHAT, "чуть сдвинь подпись")
+    check("чужая карточка не принята и на слотах",
+          "Точечно поправить не вышло" in reg.texts(), reg.texts()[:200])
+
+    # Экранирование: кавычка в заголовке рвала бы стиль, если бы значение
+    # подставлялось как есть. Это то, чего свободный HTML не гарантировал.
+    tid = seed()
+    install(answer([{"name": "cover",
+                     "slots": slots(headline='Кода "не" писала')}]))
+    reg.clear()
+    await design.run(reg, CHAT, "сделай обложку")
+    made = b.path(f"posts/{tid}-cover.html").read_text(encoding="utf-8")
+    check("кавычка в слоте экранирована", "&quot;" in made, made[:400])
+    check("макет всё равно собрался", b.path(f"posts/{tid}-cover.png").exists())
 
 
 asyncio.run(main())

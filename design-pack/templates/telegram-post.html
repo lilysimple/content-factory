@@ -1,0 +1,33 @@
+<!-- @dsTemplate viewport="1080x1350" name="Telegram · пост"
+     Слоты заполняет код, а не модель. Каждый {{слот}} описан в SLOTS
+     (orchestrator/design.py): что это, сколько знаков, обязателен ли.
+     Разметку править здесь; модель её не видит и переизобрести не может. -->
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../design/tokens.css"><style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:var(--font-body);}
+  .slide{width:1080px;height:1350px;position:relative;overflow:hidden;
+         background:var(--graphite);}
+  img{display:block;}
+  .rubric{position:absolute;left:72px;top:72px;font-family:var(--font-display);
+          font-size:30px;font-weight:700;letter-spacing:0.1em;
+          text-transform:uppercase;color:rgba(255,255,255,0.9);}
+  .well{position:absolute;left:72px;right:72px;bottom:68px;}
+  .head{font-family:var(--font-display);font-weight:800;line-height:1.0;
+        letter-spacing:-0.03em;color:var(--milk);font-size:{{headline_size}}px;}
+  .sub{font-family:var(--font-body);font-size:38px;line-height:1.45;
+       color:rgba(248,245,241,0.85);margin-top:38px;max-width:760px;}
+</style></head><body>
+<div class="slide">
+  <img src="../design/assets/images/{{photo}}"
+       style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;">
+  <div style="position:absolute;inset:0;background:linear-gradient(180deg,
+       rgba(150,40,20,0.42) 0%,rgba(120,35,18,0.15) 38%,
+       rgba(90,25,12,0.78) 100%);"></div>
+  <div class="rubric">{{rubric}}</div>
+  <div class="well">
+    <div class="head">{{headline}}<span
+         style="color:var(--terracotta-soft);">{{headline_accent}}</span></div>
+    <div class="sub">{{subtitle}}</div>
+  </div>
+</div></body></html>

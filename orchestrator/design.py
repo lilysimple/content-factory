@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import html as _html
+import json as _json
 import re
 import shutil
+import tempfile as _tmp
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -65,6 +68,31 @@ REFERENCE = {
                                 "carousel-05-final.html"],
     ("instagram", "reels"):    ["reel-01-photo.html"],
 }
+
+# Шаблоны со слотами. Здесь разметку собирает код, а модель заполняет
+# дырки — см. `_fill`. Площадка без шаблона идёт старым путём, где модель
+# пишет HTML целиком: переезд делается по одной площадке за раз.
+TEMPLATES = {
+    ("telegram", None): ["telegram-post.html"],
+}
+
+# Что модель кладёт в слот. Потолок знаков — не каприз: заголовок длиннее
+# вылезет за холст, и поймает это уже человек глазами на PNG.
+#
+# `photo` особый: значение проверяется по списку файлов бренда, а не по
+# длине. `headline_size` в этот словарь не входит вовсе — его считает код
+# (`_fit`), и модель о нём не знает. Подбор кегля это арифметика по числу
+# знаков, а не суждение: модель может только промахнуться мимо пикселей.
+SLOTS: dict[str, tuple[str, int]] = {
+    "rubric":          ("рубрика над заголовком, капсом", 28),
+    "headline":        ("заголовок; слова только из текста Редактора", 52),
+    "headline_accent": ("хвост заголовка акцентным цветом, можно пустым", 24),
+    "subtitle":        ("подзаголовок одной фразой", 120),
+    "photo":           ("имя файла из списка доступных фото", 0),
+}
+
+TEMPLATE_DIR = ROOT / "design-pack" / "templates"
+SLOT_RX = re.compile(r"\{\{([a-z_]+)\}\}")
 
 ABSOLUTE = re.compile(r'(?:href|src)\s*=\s*["\'](?:file://|/|[a-z]+://)', re.I)
 LITERAL_COLOR = re.compile(r":\s*#[0-9A-Fa-f]{3,8}\b")
@@ -161,6 +189,125 @@ def _words(text: str) -> set[str]:
     return {w.lower() for w in re.findall(r"\w{4,}", text)}
 
 
+# ── шаблоны со слотами ────────────────────────────────────────────────
+
+def _templates(plat: str, fmt: str) -> list[tuple[str, str]]:
+    """Шаблоны под площадку и формат. Пусто — площадка ещё не переехала."""
+    names = TEMPLATES.get(_key(plat, fmt)) or []
+    out = []
+    for n in names:
+        f = TEMPLATE_DIR / n
+        if f.exists():
+            out.append((f.stem, f.read_text(encoding="utf-8")))
+    return out
+
+
+def _fit(text: str) -> int:
+    """Кегль заголовка по числу знаков. Считает код, а не модель.
+
+    Модель не видит холста и не умеет мерить текст — она может только
+    назвать число и промахнуться, а вылезший за край заголовок замечает
+    уже человек на PNG. Здесь же это простая арифметика: чем длиннее
+    строка, тем мельче кегль, ступенями от эталонных 104px.
+
+    Ступени, а не формула: между 104 и 96 разницы на глаз нет, а
+    предсказуемость макета дороже точности подгонки.
+    """
+    n = len(text.strip())
+    for limit, size in ((22, 104), (34, 88), (46, 72), (60, 60)):
+        if n <= limit:
+            return size
+    return 52
+
+
+def _fill(tpl: str, slots: dict[str, str], photos: list[str]) -> str:
+    """Собрать HTML из шаблона. Значения экранируются, а не доверяются.
+
+    Это то место, ради которого затевался переезд со свободного HTML.
+    Четыре проверки из `inspect` здесь становятся невозможными по
+    устройству: холст записан в шаблоне, цвета — токенами, путь к фото
+    собирает код, а имя файла сверяется со списком бренда.
+
+    Незнакомый слот и пропущенный слот — отказ, а не тихая дырка в
+    макете: `{{headline}}`, доехавший до PNG как есть, выглядит рабочим.
+    """
+    need = set(SLOT_RX.findall(tpl)) - {"headline_size"}
+    unknown = set(slots) - need
+    if unknown:
+        raise NoWork("лишние слоты: " + ", ".join(sorted(unknown)))
+
+    photo = (slots.get("photo") or "").strip()
+    if "photo" in need and photo not in photos:
+        raise NoWork(f"фото «{photo or '—'}» нет в папке бренда")
+
+    for name in need:
+        val = (slots.get(name) or "").strip()
+        limit = SLOTS.get(name, ("", 0))[1]
+        if limit and len(val) > limit:
+            raise NoWork(f"слот «{name}» длиннее {limit} знаков: {len(val)}")
+        if not val and name not in ("headline_accent",):
+            raise NoWork(f"слот «{name}» пустой")
+
+    head = (slots.get("headline") or "") + (slots.get("headline_accent") or "")
+    ready = dict(slots, headline_size=str(_fit(head)))
+
+    def sub(m: re.Match[str]) -> str:
+        name = m.group(1)
+        val = ready.get(name, "")
+        # Кегль это число от кода, экранировать нечего; текст от модели —
+        # всегда экранируется: одна кавычка в заголовке иначе рвёт стиль.
+        return val if name == "headline_size" else _html.escape(val, quote=True)
+
+    return SLOT_RX.sub(sub, tpl)
+
+
+def _cards_from_slots(data: dict[str, Any], tpls: list[tuple[str, str]],
+                      photos: list[str]) -> list[dict[str, str]]:
+    """Ответ модели со слотами → карточки с готовым HTML.
+
+    Шаблон берётся по порядку, а не по имени из ответа: имён шаблонов
+    модель не знает и знать не должна, иначе она сможет выбрать не тот.
+    """
+    out: list[dict[str, str]] = []
+    got = [c for c in (data.get("cards") or []) if isinstance(c, dict)]
+    for i, (stem, tpl) in enumerate(tpls):
+        if i >= len(got):
+            raise NoWork(f"не заполнены слоты карточки {i + 1} из {len(tpls)}")
+        slots = got[i].get("slots")
+        if not isinstance(slots, dict):
+            raise NoWork(f"карточка {i + 1}: слотов нет, а разметку "
+                         "здесь пишет код")
+        name = re.sub(r"[^a-z0-9-]", "",
+                      str(got[i].get("name") or "").lower()) or stem
+        clean = {k: str(v) for k, v in slots.items()}
+        out.append({"name": name, "slots": clean,
+                    "html": _fill(tpl, clean, photos)})
+    return out
+
+
+def _slots_stable(spec: str, tpls: list[tuple[str, str]]) -> str:
+    """Кешируемый блок для шаблонного пути: ТЗ плюс описание слотов.
+
+    Сам шаблон модели не показывается. Она его не пишет и не правит, а
+    лишние двадцать строк разметки в контексте только приглашают вернуть
+    HTML вместо значений.
+    """
+    return "\n".join(["## ТЗ площадки", "", spec, "", _slot_brief()])
+
+
+def _slot_brief() -> str:
+    """Описание слотов для модели. Едет в кешируемый блок вместе с ТЗ."""
+    lines = ["## Слоты, которые ты заполняешь", "",
+             "Разметку собирает код. Ты возвращаешь только значения.", ""]
+    for name, (what, limit) in SLOTS.items():
+        cap = f", не длиннее {limit} знаков" if limit else ""
+        lines.append(f"- `{name}` — {what}{cap}")
+    lines += ["", "Кегль заголовка не твоя забота: его считает код по длине "
+              "строки. Размер холста, цвета и путь к фото тоже — их в "
+              "ответе быть не должно."]
+    return "\n".join(lines)
+
+
 def inspect(html: str, copy: str, size: tuple[int, int],
             photos: list[str]) -> list[str]:
     """Что проверяется кодом, а не доверием к промпту.
@@ -214,7 +361,15 @@ async def render(html_path: Path, size: tuple[int, int]) -> Path:
     png = html_path.with_suffix(".png")
     png.unlink(missing_ok=True)
     w, h = size
-    profile = html_path.parent / f".chrome-{html_path.stem}"
+    # Профиль Chrome — во временную папку, а не рядом с макетом.
+    #
+    # Раньше он заводился прямо в `posts/` бренда, и это стоило дважды:
+    # папка клиента обрастала каталогами `.chrome-*`, а уборка после
+    # убитого процесса идёт с `ignore_errors`, поэтому недописанное
+    # оставалось лежать. Стенд ловил это как «Directory not empty» при
+    # чистке песочницы — дважды за один день, каждый раз на другом цикле,
+    # то есть выглядело как случайность, а было следствием.
+    profile = Path(_tmp.mkdtemp(prefix="chrome-render-"))
 
     proc = await asyncio.create_subprocess_exec(
         chrome(), "--headless", "--disable-gpu", "--no-sandbox",
@@ -314,31 +469,45 @@ async def build(chat_id: int, ask: str, *, say=None) -> Layout:
 
     spec = _spec(b, plat)
     size = CANVAS.get(_key(plat, fmt)) or CANVAS[(plat, None)]
-    refs = _reference(plat, fmt)
-    if not refs:
+    tpls = _templates(plat, fmt)
+    refs = [] if tpls else _reference(plat, fmt)
+    if not tpls and not refs:
         raise NoSpec(f"{plat}/{fmt}: эталона в шаблон-паке нет")
 
     copy = _copy(b, theme)
     photos = _photos(b)
 
     if say:
-        n = len(refs)
+        n = len(tpls or refs)
         await say(f"Верстаю {'макет' if n == 1 else f'{n} карточки'} по теме "
                   f"<b>{theme.get('title') or theme['id']}</b> "
                   f"({plat} · {size[0]}×{size[1]}).\n"
                   "Сборка и рендер займут до минуты.")
 
-    answer = await agent.ask(
-        "design", chat_id,
-        _brief(theme, copy, photos, size, len(refs)) +
-        "\n\nСобери макет. Ответь одним JSON-объектом в формате из твоей "
-        "секции «Формат выдачи».",
-        brand_name=b.name(), stable=_stable(spec, refs),
-        max_tokens=MAX_TOKENS)
+    if tpls:
+        answer = await agent.ask(
+            "design", chat_id,
+            _brief(theme, copy, photos, size, len(tpls)) +
+            "\n\nЗаполни слоты. Ответь одним JSON-объектом: "
+            '`{"cards": [{"name": "…", "slots": {…}}], "accent": "…", '
+            '"notes": []}`. Разметку не пиши — её соберёт код.',
+            brand_name=b.name(), stable=_slots_stable(spec, tpls),
+            max_tokens=MAX_TOKENS)
+    else:
+        answer = await agent.ask(
+            "design", chat_id,
+            _brief(theme, copy, photos, size, len(refs)) +
+            "\n\nСобери макет. Ответь одним JSON-объектом в формате из твоей "
+            "секции «Формат выдачи».",
+            brand_name=b.name(), stable=_stable(spec, refs),
+            max_tokens=MAX_TOKENS)
 
     data = agent.parse_json(answer, who="дизайнер")
-    cards = [c for c in (data.get("cards") or [])
-             if isinstance(c, dict) and str(c.get("html") or "").strip()]
+    if tpls:
+        cards = _cards_from_slots(data, tpls, photos)
+    else:
+        cards = [c for c in (data.get("cards") or [])
+                 if isinstance(c, dict) and str(c.get("html") or "").strip()]
     if not cards:
         raise NoWork("Дизайнер не вернул ни одного макета")
 
@@ -363,6 +532,15 @@ async def build(chat_id: int, ask: str, *, say=None) -> Layout:
         path = b.artifact(rel, html)
         lay.files.append(path)
         lay.files.append(await render(path, size))
+
+        # Слоты кладутся рядом с макетом. Без них правка снова стала бы
+        # разговором про HTML: модели пришлось бы показывать разметку,
+        # чтобы она вернула разметку. Со слотами круг правки — это две
+        # сотни байт туда и обратно.
+        if tpls:
+            b.artifact(f"posts/{theme['id']}-{name}.slots.json",
+                       _json.dumps(c.get("slots") or {}, ensure_ascii=False,
+                                   indent=2))
 
     log.info("%s: карточек %s, находок %s, заметок %s", theme["id"],
              len(cards), len(lay.findings), len(lay.notes))
@@ -497,7 +675,11 @@ async def revise(reg, chat_id: int, instruction: str,
     htmls = lay.htmls or _htmls_on_disk(chat_id, lay.theme["id"])
     if htmls and not any(w in low for w in REDO):
         try:
-            await _patch(reg, chat_id, lay, htmls, instruction, topic)
+            plat = lay.theme.get("plat") or "telegram"
+            if _templates(plat, lay.theme.get("format") or ""):
+                await _patch_slots(reg, chat_id, lay, htmls, instruction, topic)
+            else:
+                await _patch(reg, chat_id, lay, htmls, instruction, topic)
             return
         except NoWork as e:
             # Не молчим и не делаем вид, что правка прошла: говорим, что
@@ -520,6 +702,102 @@ def _htmls_on_disk(chat_id: int, theme_id: str) -> list[Path]:
     if b is None:
         return []
     return sorted(b.path("posts").glob(f"{theme_id}-*.html"))
+
+
+async def _patch_slots(reg, chat_id: int, lay: Layout, htmls: list[Path],
+                       instruction: str, topic: str) -> None:
+    """Правка шаблонной карточки: меняются слоты, а не разметка.
+
+    Самый дешёвый круг из всех. Модель получает пять коротких значений и
+    просьбу человека, возвращает такие же пять — двести байт вместо двух
+    килобайт HTML. Разметку заново собирает `_fill`, поэтому промахнуться
+    мимо холста, токенов или пути к фото она по-прежнему не может.
+
+    Слоты лежат рядом с макетом (`*.slots.json`). Их нет — значит макет
+    собран до переезда на шаблоны, и правим его старым способом.
+    """
+    b = desk.brand(chat_id)
+    theme = lay.theme
+    plat = theme.get("plat") or "telegram"
+    fmt = theme.get("format") or ""
+    size = CANVAS.get(_key(plat, fmt)) or CANVAS[(plat, None)]
+    tpls = _templates(plat, fmt)
+    photos = _photos(b)
+    copy = _copy(b, theme)
+
+    current: dict[str, dict[str, str]] = {}
+    for path in htmls:
+        name = path.stem[len(theme["id"]) + 1:] or path.stem
+        f = path.with_name(f"{path.stem}.slots.json")
+        if not f.exists():
+            raise NoWork("слотов на диске нет, макет собран старым способом")
+        current[name] = _json.loads(f.read_text(encoding="utf-8"))
+
+    await reg.say("design", chat_id, f"Правлю по слотам: {instruction}",
+                  topic=topic)
+
+    answer = await agent.ask(
+        "design", chat_id,
+        "\n".join([
+            "## Что просит человек", "", instruction, "",
+            "## Утверждённый текст Редактора", "",
+            "Слова на макет берёшь только отсюда.", "", copy, "",
+            "## Доступные фото", "",
+            *([f"- {p}" for p in photos] or ["- фото нет"]), "",
+            "## Текущие слоты", "",
+            "```json", _json.dumps(current, ensure_ascii=False, indent=2),
+            "```", "",
+            "Верни те же карточки с поправленными слотами и **ничего "
+            'больше**: `{"cards": [{"name": "…", "slots": {…}}], '
+            '"accent": "…", "notes": []}`. Слоты, которых правка не '
+            "касается, оставь как есть.",
+        ]),
+        brand_name=b.name(), stable=_slot_brief(),
+        max_tokens=MAX_TOKENS, effort=PATCH_EFFORT)
+
+    data = agent.parse_json(answer, who="дизайнер")
+    got = {re.sub(r"[^a-z0-9-]", "", str(c.get("name") or "").lower()): c
+           for c in (data.get("cards") or []) if isinstance(c, dict)}
+    unknown = set(got) - set(current)
+    if unknown:
+        raise NoWork("вернулась незнакомая карточка «"
+                     + ", ".join(sorted(unknown)) + "»")
+
+    out = Layout(theme=theme, accent=str(data.get("accent") or ""),
+                 notes=[str(n) for n in (data.get("notes") or [])])
+    touched: set[str] = set()
+    by_name = {stem: tpl for stem, tpl in tpls}
+
+    for path in htmls:
+        name = path.stem[len(theme["id"]) + 1:] or path.stem
+        slots = {k: str(v) for k, v in
+                 ((got.get(name) or {}).get("slots") or {}).items()}
+        if not slots or slots == current[name]:
+            # Не изменилась — не перерисовываем. PNG на диске валиден.
+            out.files.append(path)
+            png = path.with_suffix(".png")
+            if png.exists():
+                out.files.append(png)
+            continue
+
+        tpl = by_name.get(name) or tpls[0][1]
+        html = _fill(tpl, slots, photos)
+        out.findings += [f"{name}: {p}" for p in
+                         inspect(html, copy, size, photos)]
+        new_path = b.artifact(f"posts/{theme['id']}-{name}.html", html)
+        b.artifact(f"posts/{theme['id']}-{name}.slots.json",
+                   _json.dumps(slots, ensure_ascii=False, indent=2))
+        out.files.append(new_path)
+        out.files.append(await render(new_path, size))
+        touched.add(name)
+
+    if not touched:
+        raise NoWork("дизайнер не изменил ни одного слота")
+
+    log.info("%s: правка по слотам, изменено %s из %s",
+             theme["id"], len(touched), len(htmls))
+    await _show(reg, chat_id, out, size, topic,
+                head=f"Поправлено карточек: {len(touched)} из {len(htmls)}.")
 
 
 async def _patch(reg, chat_id: int, lay: Layout, htmls: list[Path],
