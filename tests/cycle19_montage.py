@@ -194,6 +194,32 @@ def main() -> None:
     check("обложку Дизайнера не трогаем вовсе", not montage._blur(wide))
 
 
+    print("\n14б. Кадр стоит на месте, пока действие не уехало")
+    # Один выброс на пол-кадра посреди спокойной работы: среднее утащило
+    # бы цель к нему, медиана — нет. Замер на настоящем материале дал
+    # треть кадра блуждания именно на среднем.
+    calm = [(0.30, 0.40, 500)] * 9 + [(0.95, 0.95, 4000)]
+    goal = footage._target(calm)
+    check("выброс не утаскивает цель", goal is not None and goal[0] < 0.4,
+          str(goal))
+
+    quiet = [(0.5, 0.5, 10)] * 20
+    check("на шуме цели нет вовсе", footage._target(quiet) is None)
+    check("нескольких живых отсчётов мало",
+          footage._target([(0.3, 0.3, 500)] * 3) is None)
+
+    jumpy = [footage.Focus(i / 5, 0.2 if i % 2 else 0.8, 0.5)
+             for i in range(20)]
+    smoothed = footage._smooth(jumpy)
+    def swing(track):
+        return sum(abs(track[i].x - track[i - 1].x)
+                   for i in range(1, len(track)))
+    check("сглаживание срезает дрожание",
+          swing(smoothed) < swing(jumpy) / 5,
+          f"{swing(smoothed):.2f} против {swing(jumpy):.2f}")
+    check("сглаживание не двигает трек целиком",
+          abs(sum(f.x for f in smoothed) / len(smoothed) - 0.5) < 0.05)
+
     print("\n15. Нарезка: кусок берёт свою часть найденных пауз")
     whole = footage.timeline(120.0, [(20.0, 24.0), (60.0, 66.0), (90.0, 95.0)])
     part = footage.window(whole, 50.0, 100.0)

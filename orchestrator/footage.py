@@ -231,9 +231,30 @@ def timeline(duration: float, quiet: list[tuple[float, float]]) -> Timeline:
 GRID_W, GRID_H = 48, 32
 SAMPLE_FPS = 5
 NOISE = 14               # ниже — шум кодека, а не движение
-QUIET_FRAME = 40         # суммарный вес тише — считаем, что ничего не было
-SMOOTH = 0.22            # инерция кадра: рывок за курсором тошнотворен
-DEADZONE = 0.02          # мельче — дрожание, а не движение
+
+# Центр изменившегося скачет сам по себе. Замер на настоящем материале
+# (запись экрана и съёмка с камеры, по сорок секунд): между соседними
+# отсчётами он прыгает в среднем на 0,09 кадра, а в каждом десятом — на
+# треть кадра и больше. Ехать за таким центром напрямую значит трясти
+# картинку там, где на экране ничего не происходит.
+#
+# Поэтому цель считается не по одному отсчёту, а по окну в две секунды, и
+# кадр идёт к ней с ограниченной скоростью. Три правила подряд:
+#
+# 1. окно усредняет случайные всплески (WINDOW);
+# 2. мёртвая зона не даёт трогаться с места ради мелочи (DEADZONE);
+# 3. потолок скорости не даёт догонять цель рывком (MAX_STEP).
+#
+# Плюс финальное сглаживание уже готового трека: между отсчётами
+# композиция интерполирует линейно, и без него на каждом отсчёте виден
+# излом.
+WINDOW = 20              # четыре секунды
+QUIET_SAMPLE = 200       # отсчёт легче — это шум, в окно его не берём
+LIVE_SAMPLES = 6         # столько живых отсчётов нужно, чтобы цель считалась
+START_ZONE = 0.15        # трогаемся, только если действие ушло далеко
+STOP_ZONE = 0.05         # и едем, пока не подойдём вплотную
+MAX_STEP = 0.004         # доля кадра за отсчёт: две сотых в секунду
+SMOOTH_SPAN = 5          # ±секунда на сглаживание готового трека
 
 
 @dataclass
@@ -273,9 +294,46 @@ def _scan(prev: bytes, cur: bytes) -> tuple[float, float, int]:
         sx += d * (i % GRID_W)
         sy += d * (i // GRID_W)
 
-    if total < QUIET_FRAME:
-        return (-1.0, -1.0, total)
+    if total <= 0:
+        return (-1.0, -1.0, 0)
     return (sx / total / (GRID_W - 1), sy / total / (GRID_H - 1), total)
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _target(window: list[tuple[float, float, int]]) -> tuple[float, float] | None:
+    """Куда смотрит активность за последние четыре секунды.
+
+    Медиана, а не среднее со взвешиванием: одна вспышка на пол-кадра
+    (переключили окно, махнули рукой перед камерой) утаскивает среднее к
+    себе, а медиану — нет. На настоящем материале среднее давало треть
+    кадра блуждания там, где на экране ничего не менялось.
+    """
+    live = [(x, y) for x, y, w in window if w >= QUIET_SAMPLE]
+    if len(live) < LIVE_SAMPLES:
+        return None
+    return (_median([x for x, _ in live]), _median([y for _, y in live]))
+
+
+def _smooth(track: list[Focus], span: int = SMOOTH_SPAN) -> list[Focus]:
+    """Скользящее среднее по готовому треку: убирает изломы на отсчётах."""
+    if span < 1 or len(track) < 3:
+        return track
+    out: list[Focus] = []
+    for i, f in enumerate(track):
+        lo, hi = max(0, i - span), min(len(track), i + span + 1)
+        part = track[lo:hi]
+        out.append(Focus(f.t,
+                         round(sum(p.x for p in part) / len(part), 4),
+                         round(sum(p.y for p in part) / len(part), 4),
+                         f.w))
+    return out
 
 
 async def pan(video: Path) -> list[Focus]:
@@ -287,15 +345,56 @@ async def pan(video: Path) -> list[Focus]:
         return []
 
     track: list[Focus] = []
-    fx, fy = 0.5, 0.5
+    window: list[tuple[float, float, int]] = []
+    # Первую цель занимаем сразу, а не едем к ней от середины холста:
+    # эта поездка ничего не показывает, а на видео читается как отъезд
+    # кадра в первые секунды.
+    fx = fy = None
+    first: tuple[float, float] | None = None
+    moving = False
+
     for n in range(1, len(frames)):
         cx, cy, weight = _scan(frames[n - 1], frames[n])
-        if cx >= 0 and (abs(cx - fx) > DEADZONE or abs(cy - fy) > DEADZONE):
-            fx += (cx - fx) * SMOOTH
-            fy += (cy - fy) * SMOOTH
-        track.append(Focus(n / SAMPLE_FPS, round(fx, 4), round(fy, 4),
+        if cx >= 0:
+            window.append((cx, cy, weight))
+        else:
+            window.append((0.5, 0.5, 0))
+        if len(window) > WINDOW:
+            window.pop(0)
+
+        # Гистерезис: тронуться дорого, поэтому порог на старт большой, а
+        # на остановку маленький. Без него кадр «дышит» вокруг цели —
+        # шагнул, попал в зону, замер, цель чуть уползла, шагнул снова.
+        goal = _target(window)
+        if goal is not None and fx is None:
+            fx, fy = goal
+            first = goal
+        elif goal is not None:
+            dx, dy = goal[0] - fx, goal[1] - fy
+            far = max(abs(dx), abs(dy))
+            if not moving and far > START_ZONE:
+                moving = True
+            elif moving and far < STOP_ZONE:
+                moving = False
+            if moving:
+                fx += max(-MAX_STEP, min(MAX_STEP, dx))
+                fy += max(-MAX_STEP, min(MAX_STEP, dy))
+
+        track.append(Focus(n / SAMPLE_FPS,
+                           round(0.5 if fx is None else fx, 4),
+                           round(0.5 if fy is None else fy, 4),
                            float(weight)))
-    return track
+
+    # Пока цель не нашлась, трек стоял в середине холста — это не выбор,
+    # а отсутствие данных. Задним числом ставим туда же, где кадр
+    # оказался в первый раз: иначе ролик открывается рывком из центра.
+    if first is not None:
+        for f in track:
+            if f.x == 0.5 and f.y == 0.5:
+                f.x, f.y = round(first[0], 4), round(first[1], 4)
+            else:
+                break
+    return _smooth(track)
 
 
 # ── кадр на обложку ───────────────────────────────────────────────────
