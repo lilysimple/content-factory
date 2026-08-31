@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import sys
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import harness
 from harness import CHAT, check, report
@@ -340,6 +343,32 @@ async def main() -> None:
     check("нет артефакта — нет посадки",
           bridge.harvest(bridge.Result(task_id=t5)) == "",
           "файла нет значит субагент не отработал")
+
+    # ── 8. Адаптеры собраны кодом и не разошлись с источником ─────────
+    print("\n8. Адаптеры субагентов")
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import build_agents                                       # noqa: PLC0415
+
+    check("собранное совпадает с источником", build_agents.main(check=True) == 0,
+          "пересобрать: ./.venv/bin/python tools/build_agents.py")
+
+    for name, role_file in build_agents.BUILT.items():
+        text = (build_agents.OUT / f"{name}.md").read_text(encoding="utf-8")
+        check(f"{name}: каркас вклеен", "# Общий каркас" in text)
+        check(f"{name}: роль вклеена целиком",
+              f"roles/{role_file}" in text and "Формат выдачи" in text)
+        check(f"{name}: сказано не открывать их заново",
+              "не надо" in text and "вклеены ниже" in text,
+              "иначе роль прочитает то, что уже перед глазами")
+        check(f"{name}: подстановок не осталось",
+              not re.search(r"\{(role_name|upstream|downstream|output|"
+                            r"anti_scope|brand_name|layers|sections)\}", text),
+              "frame.md уезжал в модель с литеральными фигурными скобками")
+        check(f"{name}: имя роли подставлено",
+              "Ты Стратег" in text or "Ты Ресёрчер" in text)
+        check(f"{name}: правка руками запрещена вслух",
+              "НЕ ПРАВИТЬ РУКАМИ" in text)
 
     report()
 
