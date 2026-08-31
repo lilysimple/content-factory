@@ -1,0 +1,23 @@
+{
+  "name": "content-factory-remotion-montage",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Рендер финального видео рилса: интро/аутро бренда + отснятое видео + титры хука/CTA. Дергается из orchestrator/montage.py, отдельно не запускается человеком.",
+  "scripts": {
+    "render": "remotion render src/index.ts Reel"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.0",
+    "@remotion/google-fonts": "^4.0.518",
+    "@remotion/media": "^4.0.0",
+    "@remotion/renderer": "^4.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.1",
+    "typescript": "^5.5.0"
+  }
+}

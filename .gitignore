@@ -17,3 +17,13 @@ bot.log
 
 # рабочие директории задач bridge, состояние а не исходник
 tasks/
+
+# Remotion: node_modules плюс скачанный chrome-headless-shell внутри
+# них — под 700 МБ, ставится командой, а не хранится в репозитории.
+tools/remotion-montage/node_modules/
+# Промежуточное монтажа: props и сырой выход рендера. Удаляются сами,
+# но упавший рендер оставляет их за собой. Копии видео в public/
+# закрыты своим tools/remotion-montage/.gitignore, второй раз не пишем.
+tools/remotion-montage/.props-*.json
+tools/remotion-montage/.out-*.mp4
+tools/remotion-montage/.still-*.png

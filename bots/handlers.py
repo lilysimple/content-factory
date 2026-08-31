@@ -10,6 +10,7 @@ callback_query приходит тому боту, который ОТПРАВИ
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
@@ -18,8 +19,8 @@ from bots import topics
 from bots.registry import registry
 from bots.router import resolve
 from config import cfg
-from orchestrator import (bridge, design, desk, editor, onboarding, publisher,
-                          reels, refresh, reply, research, strategy)
+from orchestrator import (bridge, design, desk, editor, montage, onboarding,
+                          publisher, reels, refresh, reply, research, strategy)
 from storage import db
 
 log = logging.getLogger("handlers")
@@ -183,8 +184,39 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         await onboarding.crew_joined(registry, ev.chat.id,
                                      ev.new_chat_member.user.username or "")
 
+    # ── видео к сценарию reels ────────────────────────────────────────
+    MAX_VIDEO_MB = 20        # потолок скачивания у обычного Bot API
+
+    async def handle_footage(chat_id: int, msg: Message, tkey: str) -> None:
+        """Принять отснятое видео и отложить на монтаж.
+
+        Не разбор ролика и не правка: материал ждёт ближайшей фразы вроде
+        «смонтируй» — `montage.py` сам подберёт под него утверждённую
+        тему, здесь только сохранить байты рядом с профилем бренда.
+        """
+        b = desk.brand(chat_id)
+        if b is None:
+            return
+
+        media = msg.video or msg.document
+        if media.file_size and media.file_size > MAX_VIDEO_MB * 1024 * 1024:
+            await registry.say(
+                "reels", chat_id,
+                f"Файл больше {MAX_VIDEO_MB} МБ — обычный Bot API такие не "
+                "отдаёт. Сожмите или обрежьте дубль и пришлите снова.",
+                topic=tkey)
+            return
+
+        buf = await registry.bot("reels").download(media.file_id)
+        suffix = Path(getattr(media, "file_name", "") or "").suffix or ".mp4"
+        montage.stage_video(b, buf.read(), suffix=suffix)
+        await registry.say(
+            "reels", chat_id,
+            "Видео принято. Напишите «смонтируй» — соберу ролик по "
+            "ближайшему утверждённому сценарию.", topic=tkey)
+
     # ── обычное сообщение ─────────────────────────────────────────────
-    @dp_assistant.message(F.text | F.voice | F.photo | F.document)
+    @dp_assistant.message(F.text | F.voice | F.photo | F.document | F.video)
     async def on_message(msg: Message) -> None:
         chat_id = msg.chat.id
         if not cfg.chat_allowed(chat_id):
@@ -208,6 +240,11 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         raw = msg.text or msg.caption or ""
         tkey = topic_key_of(chat_id, msg.message_thread_id)
 
+        if msg.video or (msg.document and (msg.document.mime_type or "")
+                        .startswith("video/")):
+            await handle_footage(chat_id, msg, tkey or "reels")
+            return
+
         # Человек нажал «Правки» под планом и сейчас пишет, что поправить.
         # Это ответ Стратегу, а не новая задача: маршрутизировать заново
         # значит потерять правку в общем разборе.
@@ -228,6 +265,10 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         if design.wants_fix(chat_id):
             await design.revise(registry, chat_id, raw,
                                 topic=tkey or "design")
+            return
+
+        if montage.wants_fix(chat_id):
+            await montage.revise(registry, chat_id, raw, topic=tkey or "reels")
             return
 
         if publisher.wants_reason(chat_id):
@@ -292,6 +333,16 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             await design.run(registry, chat_id, raw, topic=tkey or "design")
             return
 
+        if route.role == "montage":
+            # Одна запись на несколько роликов — отдельная работа: там
+            # зовётся Редактор Reels, а монтаж режет по его списку.
+            if montage.wants_split(raw):
+                await montage.run_split(registry, chat_id, raw,
+                                        topic=tkey or "reels")
+            else:
+                await montage.run(registry, chat_id, raw, topic=tkey or "reels")
+            return
+
         if route.role == "publisher":
             await publisher.run(registry, chat_id, raw, topic=tkey or "queue")
             return
@@ -353,6 +404,11 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             tkey = topic_key_of(chat_id, cb.message.message_thread_id)
             await design.on_callback(registry, chat_id, action,
                                      topic=tkey or "design")
+            return
+        if kind == "mont":
+            tkey = topic_key_of(chat_id, cb.message.message_thread_id)
+            await montage.on_callback(registry, chat_id, action,
+                                      topic=tkey or "reels")
             return
         await onboarding.on_callback(registry, cb, role)
 

@@ -253,6 +253,137 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
     raise ScriptRefused("круги переделки исчерпаны")
 
 
+# ── нарезка длинной записи ────────────────────────────────────────────
+#
+# Вторая работа роли: не написать сценарий, а выбрать куски из уже
+# произнесённого. Модель зовётся здесь, а не в монтаже: монтаж
+# детерминирован намеренно, как Публикатор, и решать «где мысль
+# закончилась» ему нечем. Он получает готовый список и режет по нему.
+#
+# Границы всё равно проверяет код. Промпт просит непересекающиеся куски
+# по 20–60 секунд внутри записи — в ответе приходило и то, что длиннее
+# записи, и куски внахлёст. Это ровно тот случай, про который написано в
+# CLAUDE.md: промпт это просьба.
+
+FRAG_MIN, FRAG_MAX = 20.0, 60.0
+FRAG_WANT = 5                # больше пяти на одну запись человек не смотрит
+FRAG_TOKENS = 4000
+TRANSCRIPT_LINE = 12         # слов в строке расшифровки
+
+
+@dataclass
+class Fragment:
+    start: float
+    end: float
+    hook: str
+    title: str
+    why: str = ""
+
+    @property
+    def seconds(self) -> float:
+        return self.end - self.start
+
+
+def transcript(words: list[Any], line: int = TRANSCRIPT_LINE) -> str:
+    """Расшифровка строками с меткой времени — вход для выбора кусков.
+
+    Метка нужна на каждой строке: без неё модель называет границы «на
+    третьей минуте», а код не умеет резать по прозе.
+    """
+    out: list[str] = []
+    for i in range(0, len(words), line):
+        chunk = words[i:i + line]
+        if not chunk:
+            continue
+        out.append(f"[{chunk[0].start:.0f}] "
+                   + " ".join(w.text for w in chunk))
+    return "\n".join(out)
+
+
+def _fit(raw: list[dict[str, Any]], duration: float) -> tuple[list[Fragment],
+                                                              list[str]]:
+    """Оставить куски, которые можно смонтировать. Отброшенное — назвать."""
+    good: list[Fragment] = []
+    lost: list[str] = []
+
+    def _at(d: dict[str, Any]) -> float:
+        """Ключ сортировки, который не падает на «start»: «0:20».
+
+        Сортировка идёт до разбора, и нечисловое время роняло всю
+        нарезку целиком — вместо того, чтобы отбросить один кусок и
+        назвать его человеку. Поймано стендом, цикл 12.
+        """
+        try:
+            return float(d.get("start"))
+        except (TypeError, ValueError):
+            return float("inf")               # такие уедут в конец и отпадут
+
+    items = sorted(raw, key=_at)
+    for d in items:
+        try:
+            start = float(d.get("start"))
+            end = float(d.get("end"))
+        except (TypeError, ValueError):
+            lost.append(f"«{str(d.get('hook') or '?')[:40]}»: время не число")
+            continue
+
+        hook = str(d.get("hook") or "").strip()
+        title = str(d.get("title") or "").strip() or hook
+        name = f"«{(hook or title or '?')[:40]}»"
+
+        if not hook:
+            lost.append(f"кусок {start:.0f}–{end:.0f} с: без хука")
+            continue
+        if start < 0 or end > duration + 0.5:
+            lost.append(f"{name}: {start:.0f}–{end:.0f} с не помещается "
+                        f"в запись ({duration:.0f} с)")
+            continue
+        if end - start < FRAG_MIN:
+            lost.append(f"{name}: {end - start:.0f} с — короче {FRAG_MIN:.0f}")
+            continue
+        if end - start > FRAG_MAX:
+            lost.append(f"{name}: {end - start:.0f} с — длиннее {FRAG_MAX:.0f}")
+            continue
+        if good and start < good[-1].end:
+            lost.append(f"{name}: наезжает на предыдущий кусок")
+            continue
+
+        good.append(Fragment(start, min(end, duration), hook, title,
+                             str(d.get("why") or "").strip()))
+    return good, lost
+
+
+async def fragments(chat_id: int, words: list[Any], duration: float, *,
+                    want: int = FRAG_WANT,
+                    ask: str = "") -> tuple[list[Fragment], list[str]]:
+    """Выбрать куски на рилсы из расшифровки длинной записи."""
+    b = desk.brand(chat_id)
+    if b is None:
+        raise NoWork("профиль бренда ещё не собран")
+
+    prompt = (
+        "## Задача\n\nЭто нарезка длинной записи, а не написание сценария. "
+        f"Запись идёт {duration:.0f} секунд. Выбери до {want} кусков, "
+        "каждый из которых работает отдельным роликом.\n\n"
+        "Правила — в твоей секции «Отдельная работа: нарезка длинной "
+        "записи». Время фрагментов в секундах от начала записи.\n\n"
+        "## Расшифровка\n\n" + transcript(words))
+    if (ask or "").strip():
+        prompt += f"\n\n## Что сказал человек\n\n{ask.strip()}"
+    prompt += ("\n\nОтветь одним JSON-объектом в формате из секции про "
+               "нарезку.")
+
+    answer = await agent.ask("reels", chat_id, prompt, brand_name=b.name(),
+                             profile=desk.profile(b, SECTIONS),
+                             max_tokens=FRAG_TOKENS)
+    data = agent.parse_json(answer, who="редактор reels")
+
+    good, lost = _fit(list(data.get("fragments") or []), duration)
+    lost += [str(n) for n in (data.get("notes") or []) if str(n).strip()]
+    log.info("нарезка: взято %s кусков, отброшено %s", len(good), len(lost))
+    return good[:want], lost
+
+
 # ── выгрузка ──────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
