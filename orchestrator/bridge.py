@@ -34,9 +34,10 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from config import ROOT
-from orchestrator import desk, research, strategy
+from orchestrator import design, desk, editor, research, strategy
 from storage import brand as brand_store
 from storage import db
 
@@ -126,12 +127,25 @@ class Result:
     session_id: str = ""
     said: str = ""                     # последняя реплика Director из JSON CLI
     artifacts: list[str] = field(default_factory=list)
-    landed: str = ""                   # что из плана посажено в базу
-    landed_ids: list[str] = field(default_factory=list)   # id посаженных тем
+    landed: str = ""                   # что посажено в базу, строкой человеку
+    plan_ids: list[str] = field(default_factory=list)   # темы плана
+    post_ids: list[str] = field(default_factory=list)   # темы с текстом
+    design_ids: list[str] = field(default_factory=list)  # темы с макетом
+    landed_obj: Any = None             # макет, который показывает Дизайнер
 
     @property
     def dir(self) -> Path:
         return TASKS_DIR / self.task_id
+
+    @property
+    def landed_ids(self) -> list[str]:
+        """Все посаженные темы. Кнопки выбираются по спискам выше.
+
+        Что посажено, знает только посадка, и разное сажается разными
+        кнопками: под планом «Утвердить», под текстом «В дизайн».
+        Один общий список годится для «сажали ли вообще», не больше.
+        """
+        return self.plan_ids + self.post_ids + self.design_ids
 
 
 # ── окружение ─────────────────────────────────────────────────────────
@@ -682,13 +696,13 @@ async def run(task_id: str) -> Result:
             proc.kill()
             await proc.wait()
             res.secs = round(time.monotonic() - started, 1)
-            harvest(res)
+            await harvest(res)
             return _fail(res, f"не уложился в {TIMEOUT} с", status="timeout")
     except OSError as e:
         return _fail(res, f"не удалось запустить процесс: {e}")
 
     res.secs = round(time.monotonic() - started, 1)
-    harvest(res)
+    await harvest(res)
     stdout = out.decode("utf-8", "replace").strip()
     stderr = err.decode("utf-8", "replace").strip()
 
@@ -814,8 +828,136 @@ async def snapshot(task_id: str) -> str:
 JSON_FENCE = re.compile(r"```json\s*(\{.*?\})\s*```", re.S)
 
 
-def harvest(res: Result) -> str:
-    """Посадить собранный субагентом план в состояние завода.
+def _contract(path: Path) -> tuple[dict[str, Any] | None, str]:
+    """Машинный контракт из артефакта роли. Ошибку называем, а не глотаем.
+
+    Берётся последний блок ```json в файле: перед ним лежит проза для
+    человека, и в ней могут быть свои примеры.
+    """
+    m = None
+    for m in JSON_FENCE.finditer(path.read_text(encoding="utf-8")):
+        pass
+    if m is None:
+        return None, "машинный контракт в нём не найден"
+    try:
+        return json.loads(m.group(1)), ""
+    except json.JSONDecodeError as e:
+        log.warning("%s: контракт не разобрался: %s", path.name, e)
+        return None, "его машинный контракт не разобрался"
+
+
+def _post_files(res: Result) -> list[Path]:
+    """Артефакты Редактора. Их может быть несколько: тема на площадку.
+
+    `final.md` не берётся: это письмо человеку, а не артефакт роли. Пока
+    Редактор писал текст прямо туда, посадить его было нельзя — рядом с
+    прозой Director контракт роли не отличить от пересказа.
+    """
+    return sorted(p for p in res.dir.glob("post*.md") if p.is_file())
+
+
+def _land_posts(res: Result, chat_id: int) -> str:
+    """Посадить тексты Редактора: файл в бренд, тема в `draft`.
+
+    Проверку и запись делает `editor.land` — тот же валидатор голоса и та
+    же запись, что у старого Редактора. Отказ валидатора это отказ: тема
+    остаётся `idea`, и человек слышит почему, а не получает кнопку
+    «Ок» под текстом, которого в заводе нет.
+    """
+    files = _post_files(res)
+    if not files:
+        return ""
+
+    landed, notes = [], []
+    for path in files:
+        data, why = _contract(path)
+        if data is None:
+            notes.append(f"{path.name}: {why} — в базу не записан")
+            continue
+        try:
+            draft, rel = editor.land(chat_id, data)
+        except Exception as e:                   # noqa: BLE001
+            log.warning("%s: текст не сел: %s", res.task_id, e)
+            notes.append(f"текст не сел: {e}")
+            continue
+        landed.append(draft.theme["id"])
+        notes.append(f"Текст по теме {draft.theme['id']} записан "
+                     f"в {rel}, тема в статусе draft.")
+        if draft.notes:
+            notes.append("Редактор пометил: " + "; ".join(draft.notes[:3]))
+
+    res.post_ids = landed
+    res.landed = " ".join(notes)
+    log.info("%s: посажено текстов %s из %s",
+             res.task_id, len(landed), len(files))
+    return res.landed
+
+
+async def _land_design(res: Result, chat_id: int) -> str:
+    """Посадить макет Дизайнера: файлы в папку бренда, PNG рядом.
+
+    Асинхронна из-за рендера: PNG снимает headless Chrome, и ждать его
+    приходится по-настоящему. Из-за неё асинхронен и весь `harvest`.
+
+    Показ человеку сюда не входит: файлы кладёт мост, а картинки с
+    кнопками отдаёт `design.show` — тот же код, которым показывает старый
+    Дизайнер. Иначе у показа завелась бы вторая копия.
+    """
+    art = res.dir / "design.md"
+    if not art.exists():
+        return ""
+
+    data, why = _contract(art)
+    if data is None:
+        return f"Макет собран, но {why} — в папку бренда не записан."
+
+    try:
+        lay = await design.land(chat_id, data)
+    except Exception as e:                       # noqa: BLE001
+        log.warning("%s: макет не сел: %s", res.task_id, e)
+        return f"Макет собран, но не сел: {e}"
+
+    res.landed_obj = lay
+    res.design_ids = [lay.theme["id"]]
+    note = [f"Макет по теме {lay.theme['id']}: {len(lay.pngs)} PNG и "
+            f"{len(lay.htmls)} HTML в posts/ папки бренда."]
+    if lay.findings:
+        note.append("Проверка поймала: " + "; ".join(lay.findings[:3]))
+    res.landed = " ".join(note)
+    return res.landed
+
+
+def _land_plan(res: Result, chat_id: int) -> str:
+    """Посадить план Стратега: темы в базу, выгрузка в папку бренда.
+
+    Проверку и запись делает `strategy.land` — тот же код, которым сажает
+    план старый путь. Дом у правила один.
+    """
+    art = res.dir / "strategy.md"
+    if not art.exists():
+        return ""
+
+    data, why = _contract(art)
+    if data is None:
+        return f"План собран, но {why} — в базу не записан."
+
+    try:
+        plan, saved, rel = strategy.land(chat_id, data)
+    except Exception as e:                       # noqa: BLE001
+        log.warning("%s: план не сел: %s", res.task_id, e)
+        return f"План собран, но в базу не сел: {e}"
+
+    res.plan_ids = [t["id"] for t in saved]
+    note = [f"Записано тем: {len(saved)}. Выгрузка — {rel}."]
+    if plan.unmet:
+        note.append("Не сошлось: " + "; ".join(plan.unmet[:4]))
+    log.info("%s: посажено тем %s, отброшено %s",
+             res.task_id, len(saved), len(plan.unmet))
+    return " ".join(note)
+
+
+async def harvest(res: Result) -> str:
+    """Посадить собранное субагентом в состояние завода.
 
     До этого результат нового пути не возвращался в завод вовсе: субагент
     писал `strategy.md`, папка задачи лежала в `.gitignore`, и следующий
@@ -824,8 +966,16 @@ def harvest(res: Result) -> str:
     мост не заходит. Дата вне окна и второй пост в тот же день доезжали до
     человека как рабочий план.
 
-    Проверку и запись делает `strategy.land` — тот же код, которым сажает
-    план старый путь. Дом у правила один.
+    **Что сажать, решают файлы на диске, а не объявленный workflow.**
+    Минимальный workflow это работа Director, и он вправе свернуть план до
+    одного текста: тема уже стоит в базе статусом `idea`, Стратег не
+    нужен. Прогон 2026-08-31-plan-04 так и прошёл — шапка задачи говорила
+    `plan`, реально отработал один Редактор, — и посадка, разбиравшая
+    объявленный workflow, не нашла `strategy.md` и молча вышла. Готовый
+    текст восемь минут пролежал в `tasks/`, который в `.gitignore`.
+
+    Файл на диске это факт: `strategy.md` значит Стратег отработал,
+    `post*.md` — Редактор, `design.md` — Дизайнер. Разбирать надо факт.
 
     Идёт **всегда**, а не только при удаче: прогон 2026-08-31-plan-01 упёрся
     в потолок на Идеаторе, а `strategy.md` лежал готовым с 00:18. Работа,
@@ -833,41 +983,16 @@ def harvest(res: Result) -> str:
 
     Возвращает строку для человека; пусто — сажать было нечего.
     """
-    row = db.one("SELECT chat_id, workflow FROM bridge_runs WHERE task_id = ?",
+    row = db.one("SELECT chat_id FROM bridge_runs WHERE task_id = ?",
                  res.task_id)
-    if not row or row["workflow"] != "plan":
+    if not row:
         return ""
+    chat_id = row["chat_id"]
 
-    art = res.dir / "strategy.md"
-    if not art.exists():
-        return ""
+    notes = [_land_plan(res, chat_id), _land_posts(res, chat_id),
+             await _land_design(res, chat_id)]
 
-    m = None
-    for m in JSON_FENCE.finditer(art.read_text(encoding="utf-8")):
-        pass                        # берём последний блок: он машинный контракт
-    if m is None:
-        log.warning("%s: в strategy.md нет блока json", res.task_id)
-        return "План собран, но машинный контракт в нём не найден — в базу не записан."
-
-    try:
-        data = json.loads(m.group(1))
-    except json.JSONDecodeError as e:
-        log.warning("%s: контракт Стратега не разобрался: %s", res.task_id, e)
-        return "План собран, но его машинный контракт не разобрался — в базу не записан."
-
-    try:
-        plan, saved, rel = strategy.land(row["chat_id"], data)
-    except Exception as e:                       # noqa: BLE001
-        log.warning("%s: план не сел: %s", res.task_id, e)
-        return f"План собран, но в базу не сел: {e}"
-
-    res.landed_ids = [t["id"] for t in saved]
-    note = [f"Записано тем: {len(saved)}. Выгрузка — {rel}."]
-    if plan.unmet:
-        note.append("Не сошлось: " + "; ".join(plan.unmet[:4]))
-    res.landed = " ".join(note)
-    log.info("%s: посажено тем %s, отброшено %s",
-             res.task_id, len(saved), len(plan.unmet))
+    res.landed = " ".join(n for n in notes if n)
     return res.landed
 
 
