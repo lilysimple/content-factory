@@ -20,7 +20,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta
 from statistics import median
 from typing import Any
 
@@ -58,6 +58,11 @@ class Stats:
     best: list[tuple[int, str]] = field(default_factory=list)
     worst: list[tuple[int, str]] = field(default_factory=list)
 
+    window: str = ""             # окно, по которому считано; пусто — вся отдача
+    outside: int = 0            # постов вне окна
+    undated: int = 0            # постов без даты
+    covered: bool = True        # лента дотянулась до начала окна
+
     @property
     def enough(self) -> bool:
         """Хватает ли данных, чтобы вообще говорить о «зашло — не зашло».
@@ -86,11 +91,68 @@ def _cut(text: str, n: int = 60) -> str:
     return line[:n] + ("…" if len(line) > n else "")
 
 
-def measure(src: sources.Source) -> Stats:
+@dataclass(frozen=True)
+class Window:
+    """Окно, по которому считается сводка.
+
+    Заведено потому, что без него медиана считалась по всей отдаче ленты.
+    На живых источниках это окна до года шириной: у @addmeto лента отдала
+    посты с ноября по март, и его медиана 49 100 уехала в сводку 31.08 как
+    ориентир недели. Числа были верные, подпись «повестка недели» — нет.
+    """
+    start: date
+    end: date
+    name: str                        # ГГГГ-Wnn той недели, что покрываем
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.start} — {self.end})"
+
+    def holds(self, when: datetime | None) -> bool:
+        if when is None:
+            return False
+        d = when.date()
+        return self.start <= d <= self.end
+
+    def split(self, posts: list[sources.Post]) -> tuple[list, int, int]:
+        """Посты внутри окна, сколько вне и сколько без даты."""
+        inside = [p for p in posts if self.holds(p.date)]
+        undated = sum(1 for p in posts if p.date is None)
+        return inside, len(posts) - len(inside) - undated, undated
+
+    def reaches(self, posts: list[sources.Post]) -> bool:
+        """Дотянулась ли лента до начала окна.
+
+        Страница `t.me/s/` отдаёт последние двадцать постов и не больше.
+        У активного канала это меньше недели, и тогда срез неполон — про
+        это надо сказать, а не молча посчитать по тому, что доехало.
+        """
+        dated = [p.date.date() for p in posts if p.date]
+        return bool(dated) and min(dated) <= self.start
+
+
+def last_week(today: date | None = None) -> Window:
+    """Прошлая ISO-неделя: понедельник по воскресенье.
+
+    Сводка гоняется в понедельник и покрывает неделю, которая кончилась, а
+    не ту, что началась вчера. Имя окна — неделя, которую покрываем, чтобы
+    файл `research/ГГГГ-Wnn.md` назывался по своему содержимому.
+    """
+    today = today or date.today()
+    monday = today - timedelta(days=today.weekday() + 7)
+    sunday = monday + timedelta(days=6)
+    return Window(monday, sunday, f"{monday:%G-W%V}")
+
+
+def measure(src: sources.Source, *, window: Window | None = None) -> Stats:
     """Что видно по числам. Без интерпретаций — их даёт модель."""
     st = Stats(channel=src.url, title=src.title, subscribers=src.subscribers)
-    seen = [(p.views, p.text) for p in src.posts if p.views is not None]
-    st.posts = len(src.posts)
+    posts = src.posts
+    if window is not None:
+        posts, st.outside, st.undated = window.split(posts)
+        st.window = str(window)
+        st.covered = window.reaches(src.posts)
+    seen = [(p.views, p.text) for p in posts if p.views is not None]
+    st.posts = len(posts)
     st.with_views = len(seen)
     if not seen:
         return st
@@ -367,6 +429,14 @@ def latest(b) -> tuple[str, str]:
 DIGEST_PATH = "research/profile-digest.md"
 DIGEST_FILES = ("goals", "platforms")        # что попадает в тело выжимки
 STAMP_FILES = ("core", "goals", "platforms")  # что сторожим хешем
+
+# Какие секции ядра уезжают в индекс. «Цель» ловит раздел «Цель этапа»,
+# который дописывает онбординг на O9: без него Стратег планировал неделю,
+# не зная, к чему бренд идёт. «Голос» намеренно не входит: его
+# читают роли, которые пишут текст, а стоп-слова из него берёт
+# `check_voice` детерминированно и прямо из `core.md`. Копия в индексе
+# стала бы вторым домом для входа валидатора, а они расходятся.
+CORE_SECTIONS = ("Кто это", "Аудитория", "Цель", "Формат")
 DIGEST_CUT = 1500                            # знаков с одного файла
 
 # Пропорция воронки из goals.md: «прогрев 50 / продукт 30 / личное 20».
@@ -398,8 +468,28 @@ def _sha(text: str) -> str:
 
 
 def _stamp(b) -> str:
-    """Отпечаток файлов, на которых стоит план."""
-    return _sha("\n".join(f"{k}:{_sha(b.read(k))}" for k in STAMP_FILES))
+    """Отпечаток файлов, на которых стоит план.
+
+    Считается по `stat()`, а не по содержимому: проверка кэша не должна
+    читать то, ради чего кэш и заведён. Прошлая версия вычитывала все
+    файлы профиля целиком — на `lily-space` это 7 800 знаков на каждый
+    вызов, — только чтобы выяснить, что ничего не менялось.
+
+    Смена `mtime` без смены содержимого (`git checkout`) даёт лишнюю
+    пересборку, и это правильный размен: пересборка идёт кодом и модель
+    не зовёт. Обратное — содержимое поменялось, а `mtime` и размер те же
+    — означает, что файл не писали.
+    """
+    marks = []
+    for key in STAMP_FILES:
+        path = b.path(brand_store.PROFILE.get(key, key))
+        try:
+            st = path.stat()
+        except OSError:
+            marks.append(f"{key}:-")     # файла нет — это тоже состояние
+        else:
+            marks.append(f"{key}:{st.st_mtime_ns}:{st.st_size}")
+    return _sha("\n".join(marks))
 
 
 def _funnel(text: str) -> dict[str, int] | None:
@@ -432,6 +522,16 @@ def _build(b) -> ProfileDigest:
     """Собрать выжимку заново."""
     body: list[str] = []
     missing: list[str] = []
+
+    # Ядро идёт секциями, а не файлом: роли читают свою часть, и целиком
+    # его не нужно никому. Полный `core.md` это 7 800 знаков против 3 100
+    # в трёх секциях.
+    core = [_cut(block) for needle in CORE_SECTIONS
+            if (block := b.section("core", needle))]
+    if core:
+        body.append("### core.md\n\n" + "\n\n".join(core))
+    else:
+        missing.append("core")
 
     for key in DIGEST_FILES:
         text = b.read(key).strip()
@@ -475,9 +575,13 @@ def _build(b) -> ProfileDigest:
               f"<!-- funnel: warm={funnel['warm']} prod={funnel['prod']} "
               f"pers={funnel['pers']} backup={int(dg.backup)} -->\n"
               f"<!-- missing: {' '.join(dg.missing)} -->\n\n"
-              "# Выжимка профиля для Стратега\n\n"
-              "Собрана кодом из файлов профиля. Пересобирается, когда они "
-              "меняются, а не на каждый план.\n")
+              "# Индекс профиля\n\n"
+              "Собран кодом из файлов профиля. Пересобирается, когда они "
+              "меняются, а не на каждый план: отпечаток считается по "
+              "`stat()`, файлы при живом кэше не читаются вовсе.\n\n"
+              "Это то, что роли читают вместо `core.md`. Исключение — "
+              "«Голос бренда» и стоп-слова: их берут из `core.md` те, кто "
+              "пишет текст, и `check_voice` читает их оттуда же.\n")
     b.artifact(DIGEST_PATH, header + "\n" + dg.text)
     log.info("выжимка профиля пересобрана: %s, нет файлов: %s",
              dg.stamp, ", ".join(dg.missing) or "все на месте")

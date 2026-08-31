@@ -17,6 +17,7 @@ import html
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from urllib.parse import urlparse
 
 import httpx
@@ -35,6 +36,16 @@ BLANKS = re.compile(r"\n{3,}")
 TG_TEXT = re.compile(
     r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', re.S)
 TG_VIEWS = re.compile(r'<span class="tgme_widget_message_views">([^<]+)</span>')
+
+# Дату поста лента отдаёт, и это выяснилось не сразу: сводка 2026-08-31
+# написала «дат у постов лента не отдаёт» и построила медиану на постах
+# разного возраста. Отдаёт — атрибутом `datetime` в подвале сообщения.
+#
+# `[^>]*datetime=` обязателен: в чанке с видео есть ещё один `<time>`, это
+# длительность ролика, и у него атрибута нет. Берём последнее совпадение —
+# подвал идёт в конце сообщения, а у пересланного поста первым стоит время
+# оригинала.
+TG_TIME = re.compile(r'<time[^>]*datetime="([^"]+)"')
 
 # Граница одного сообщения в ленте `t.me/s/`. По ней страница режется на
 # сообщения, и текст с просмотрами берётся внутри каждого.
@@ -73,10 +84,22 @@ def _views(raw: str) -> int | None:
         return None
 
 
+def _when(chunk: str) -> datetime | None:
+    """Время поста из подвала сообщения. Не разобралось — прочерк, не ноль."""
+    stamps = TG_TIME.findall(chunk)
+    if not stamps:
+        return None
+    try:
+        return datetime.fromisoformat(stamps[-1])
+    except ValueError:
+        return None
+
+
 @dataclass
 class Post:
     text: str
     views: int | None = None
+    date: datetime | None = None
 
     @property
     def length(self) -> int:
@@ -176,7 +199,9 @@ async def fetch(url: str, *, limit: int = 40) -> Source:
             if not text:
                 continue                     # картинка без подписи
             seen = TG_VIEWS.search(chunk)
-            src.posts.append(Post(text, _views(seen.group(1)) if seen else None))
+            src.posts.append(Post(text,
+                                  _views(seen.group(1)) if seen else None,
+                                  _when(chunk)))
             if len(src.posts) >= limit:
                 break
         if not src.posts:

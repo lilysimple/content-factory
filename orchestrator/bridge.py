@@ -36,12 +36,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from config import ROOT
-from orchestrator import strategy
+from orchestrator import desk, research, strategy
+from storage import brand as brand_store
 from storage import db
 
 log = logging.getLogger("bridge")
 
 TASKS_DIR = ROOT / "tasks"
+
+# События недели: вебинар, прогрев, запуск. Ведёт человек, читает Стратег.
+EVENTS_PATH = "plans/events.md"
 
 # Что получает подпроцесс. Всё остальное отрезается: см. шапку модуля.
 # ANTHROPIC_API_KEY сюда не входит намеренно — авторизация идёт входом CLI,
@@ -118,6 +122,7 @@ class Result:
     session_id: str = ""
     said: str = ""                     # последняя реплика Director из JSON CLI
     artifacts: list[str] = field(default_factory=list)
+    landed: str = ""                   # что из плана посажено в базу
 
     @property
     def dir(self) -> Path:
@@ -334,19 +339,131 @@ def _themes(chat_id: int) -> list[str]:
 
 
 def _nothing(chat_id: int) -> list[str]:
-    """Workflow, которому фактов из базы не нужно. Ресёрчер ходит наружу."""
+    """Workflow, которому фактов из базы не нужно."""
     return []
+
+
+def _index(chat_id: int) -> list[str]:
+    """Индекс профиля: путь и отпечаток, а не содержимое.
+
+    Профиль читает не роль, а код: `research.profile_digest` нарезает
+    `core.md`, `goals.md` и `platforms.md` и держит результат в папке
+    бренда. Отпечаток считается по `stat()`, поэтому при живом кэше файлы
+    профиля не читаются вовсе.
+
+    В `input.md` уезжает путь, а не текст: индекс нужен Стратегу, а
+    Director его не читает и платить за него в своём контексте не должен.
+    """
+    b = desk.brand(chat_id)
+    if b is None:
+        return ["", "## Индекс профиля", "",
+                "Профиль бренда не собран. Роли работают на дефолтах и "
+                "говорят об этом строкой."]
+    try:
+        dg = research.profile_digest(b)
+    except Exception as e:                       # noqa: BLE001
+        log.warning("индекс профиля не собрался: %s", e)
+        return ["", "## Индекс профиля", "",
+                f"Собрать индекс не удалось: {e}. Читай `core.md` сам."]
+
+    out = ["", "## Индекс профиля", "",
+           f"Файл: `{research.DIGEST_PATH}` в папке бренда",
+           f"Отпечаток: `{dg.stamp}`",
+           "",
+           "Это то, что читают вместо `core.md`: собран кодом, "
+           "пересобирается только при смене файлов профиля. Целиком "
+           "`core.md` открывать не надо — в индексе уже нарезаны нужные "
+           "секции. Исключение одно: «Голос бренда» и стоп-слова живут в "
+           "`core.md`, оттуда их берут те, кто пишет текст."]
+    if dg.missing:
+        names = ", ".join(brand_store.PROFILE.get(k, k) for k in dg.missing)
+        out += ["", f"Нет в профиле: {names}. Индекс говорит, чем это "
+                    "заменено, и роль называет дыру строкой."]
+    out.append(f"Пропорция воронки: {dg.ratio}"
+               + (" — запасная, в профиле её нет."
+                  if dg.backup else " — из `goals.md`, это правило бренда."))
+    # Пересборка это факт о задаче, а не служебная деталь: план прошлой
+    # недели стоял на другой версии профиля, и утверждённое тогда стоит
+    # сверить, а не считать согласованным.
+    out.append("Файлы профиля менялись: индекс пересобран только что."
+               if dg.rebuilt else
+               "Файлы профиля не менялись: индекс взят готовым, ни один из "
+               "них не читался.")
+    return out
+
+
+def _digest(chat_id: int) -> list[str]:
+    """Последняя сводка Ресёрчера: путь, неделя и покрывает ли она окно.
+
+    Текст сюда не едет по той же причине, что и индекс: сводка нужна
+    Стратегу, а не Director. Главное, что сообщается фактом, — покрывает
+    ли последняя сводка прошлую неделю. Сводка за W33 в плане на W36 это
+    не фактура, а археология, и решать это должен не тон промпта.
+    """
+    b = desk.brand(chat_id)
+    if b is None:
+        return []
+    week, _ = research.latest(b)
+    want = research.last_week()
+
+    out = ["", "## Сводка Ресёрчера", ""]
+    if not week:
+        out += [f"Сводок в папке бренда нет вовсе, а нужна за {want.name} "
+                f"({want.start} — {want.end}). Плана без фактуры это не "
+                "запрещает, но строка об этом обязательна."]
+        return out
+
+    out.append(f"Последняя: `research/{week}.md` в папке бренда")
+    if week == want.name:
+        out += ["", f"Покрывает прошлую неделю ({want.start} — {want.end}). "
+                    "Это свежая фактура: читай её и не пересобирай."]
+    else:
+        out += ["", f"Прошлая неделя это {want.name} ({want.start} — "
+                    f"{want.end}), а последняя сводка за {week}. Свежей "
+                    "фактуры нет: либо зови Ресёрчера, либо скажи строкой, "
+                    "что план стоит на старой сводке, и назови её неделю."]
+    return out
+
+
+def _events(chat_id: int) -> list[str]:
+    """События недели: вебинар, прогрев, запуск. Факт, а не догадка.
+
+    Без этого файла Стратег планирует неделю, ничего не зная про вебинар
+    в среду, и прогрев к нему не ставит. Спросить в headless-прогоне
+    некого: конец хода Director это конец процесса, поэтому источник —
+    файл, который человек ведёт сам.
+    """
+    b = desk.brand(chat_id)
+    if b is None:
+        return []
+    text = ""
+    path = b.path(EVENTS_PATH)
+    if path.exists():
+        text = path.read_text(encoding="utf-8").strip()
+
+    out = ["", "## События недели", ""]
+    if not text:
+        out += [f"`{EVENTS_PATH}` не заведён или пуст: событий на неделю не "
+                "заявлено. Планируй без привязки к запуску и скажи об этом "
+                "строкой — прогрев к вебинару, о котором ты не знаешь, "
+                "поставить нельзя."]
+        return out
+    out += [f"Из `{EVENTS_PATH}` папки бренда:", ""]
+    out += [ln for ln in text.splitlines() if ln.strip()]
+    out += ["", "Это заявленные человеком события. Слот под прогрев ставится "
+                "от них, а даты сверяются со списком свободных слотов выше."]
+    return out
 
 
 # Какие факты кладутся в `input.md` под какой workflow. Факты, не роли:
 # свободный слот и незакрытая тема — это данные задачи, как папка бренда.
 CONTEXT = {
-    "plan":     _slots,
-    "post":     _themes,
-    "reels":    _themes,
-    "design":   _themes,
-    "idea":     _themes,
-    "research": _nothing,
+    "plan":     (_slots, _index, _digest, _events),
+    "post":     (_themes, _index),
+    "reels":    (_themes, _index),
+    "design":   (_themes, _index),
+    "idea":     (_themes, _index, _digest),
+    "research": (_index,),
 }
 
 
@@ -378,7 +495,8 @@ def create_task(chat_id: int, ask: str, *, workflow: str, today: str,
         # воспользовался и пошёл угадывать относительный — промахнулся и
         # потратил лишний ход. Факт в контракте должен выглядеть как факт.
         lines.append(f"Папка бренда: `{Path(brand_path).resolve()}`")
-    lines += CONTEXT.get(workflow, _nothing)(chat_id)
+    for build in CONTEXT.get(workflow, (_nothing,)):
+        lines += build(chat_id)
     lines += ["", "## Запрос человека", "", ask.strip() or
               "Собери контент-план на неделю.", "",
               "## Куда положить результат", "",
@@ -430,11 +548,13 @@ async def run(task_id: str) -> Result:
             proc.kill()
             await proc.wait()
             res.secs = round(time.monotonic() - started, 1)
+            harvest(res)
             return _fail(res, f"не уложился в {TIMEOUT} с", status="timeout")
     except OSError as e:
         return _fail(res, f"не удалось запустить процесс: {e}")
 
     res.secs = round(time.monotonic() - started, 1)
+    harvest(res)
     stdout = out.decode("utf-8", "replace").strip()
     stderr = err.decode("utf-8", "replace").strip()
 
@@ -470,12 +590,74 @@ async def run(task_id: str) -> Result:
     if not res.text:
         return _fail(res, "final.md пустой")
 
+    if res.landed:
+        res.text += "\n\n" + for_telegram(res.landed)
+
     res.ok = True
     res.artifacts = sorted(p.name for p in res.dir.glob("*.md"))
     _finish(res, "done")
     log.info("задача %s готова за %s с, артефактов %s",
              task_id, res.secs, len(res.artifacts))
     return res
+
+
+JSON_FENCE = re.compile(r"```json\s*(\{.*?\})\s*```", re.S)
+
+
+def harvest(res: Result) -> str:
+    """Посадить собранный субагентом план в состояние завода.
+
+    До этого результат нового пути не возвращался в завод вовсе: субагент
+    писал `strategy.md`, папка задачи лежала в `.gitignore`, и следующий
+    прогон видел те же слоты свободными. Хуже того, слот на выходе не
+    проверял никто — `strategy._fit` живёт внутри старого `build`, куда
+    мост не заходит. Дата вне окна и второй пост в тот же день доезжали до
+    человека как рабочий план.
+
+    Проверку и запись делает `strategy.land` — тот же код, которым сажает
+    план старый путь. Дом у правила один.
+
+    Идёт **всегда**, а не только при удаче: прогон 2026-08-31-plan-01 упёрся
+    в потолок на Идеаторе, а `strategy.md` лежал готовым с 00:18. Работа,
+    которую выбросили из-за таймаута на следующем шаге, оплачена полностью.
+
+    Возвращает строку для человека; пусто — сажать было нечего.
+    """
+    row = db.one("SELECT chat_id, workflow FROM bridge_runs WHERE task_id = ?",
+                 res.task_id)
+    if not row or row["workflow"] != "plan":
+        return ""
+
+    art = res.dir / "strategy.md"
+    if not art.exists():
+        return ""
+
+    m = None
+    for m in JSON_FENCE.finditer(art.read_text(encoding="utf-8")):
+        pass                        # берём последний блок: он машинный контракт
+    if m is None:
+        log.warning("%s: в strategy.md нет блока json", res.task_id)
+        return "План собран, но машинный контракт в нём не найден — в базу не записан."
+
+    try:
+        data = json.loads(m.group(1))
+    except json.JSONDecodeError as e:
+        log.warning("%s: контракт Стратега не разобрался: %s", res.task_id, e)
+        return "План собран, но его машинный контракт не разобрался — в базу не записан."
+
+    try:
+        plan, saved, rel = strategy.land(row["chat_id"], data)
+    except Exception as e:                       # noqa: BLE001
+        log.warning("%s: план не сел: %s", res.task_id, e)
+        return f"План собран, но в базу не сел: {e}"
+
+    note = [f"Записано тем: {len(saved)}. Выгрузка — {rel}."]
+    if plan.unmet:
+        note.append("Не сошлось: " + "; ".join(plan.unmet[:4]))
+    res.landed = " ".join(note)
+    log.info("%s: посажено тем %s, отброшено %s",
+             res.task_id, len(saved), len(plan.unmet))
+    return res.landed
 
 
 def _reason(stdout: str, stderr: str, rc: int, said: str = "") -> str:
@@ -524,6 +706,8 @@ def _fail(res: Result, why: str, *, status: str = "failed") -> Result:
     done = [a for a in res.artifacts if a != "input.md"]
     if done:
         res.error += ". Успело лечь на диск: " + ", ".join(done)
+    if res.landed:
+        res.error += ". " + res.landed
     _finish(res, status)
     log.error("задача %s: %s", res.task_id, res.error)
     return res

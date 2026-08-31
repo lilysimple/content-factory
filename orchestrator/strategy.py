@@ -480,6 +480,35 @@ async def build(chat_id: int, ask: str) -> tuple[str, Plan, list[dict[str, Any]]
         brand_name=brand_name, profile=profile, max_tokens=MAX_TOKENS)
 
     data = agent.parse_json(answer, who="стратег")
+    plan, saved, _ = land(chat_id, data, free=free, window=window,
+                          brand_name=brand_name, b=b)
+    return brand_name, plan, saved
+
+
+def land(chat_id: int, data: dict[str, Any], *,
+         free: list[Slot] | None = None,
+         window: list[date] | None = None,
+         brand_name: str = "",
+         b: Any = None) -> tuple[Plan, list[dict[str, Any]], str]:
+    """Посадить план: проверить слоты кодом, записать темы, выгрузить файл.
+
+    Публичный шов, а не деталь `build`. Планировать умеют два пути — старый
+    Стратег и субагент через мост, — а проверять слоты, писать в базу и
+    выгружать файл должен один код. Пока эта работа лежала внутри `build`,
+    у моста её не было вовсе: субагент отдавал `strategy.md`, и дата вне
+    окна доезжала до человека как рабочий план.
+
+    Возвращает план, записанные темы и путь выгрузки.
+    """
+    if b is None:
+        brand_name, _, b = _profile(chat_id)
+    if not brand_name:
+        brand_name = b.name()
+    if window is None:
+        window = _window(chat_id)
+    if free is None:
+        _, free = _free(chat_id, window)
+
     themes, rejected = _fit(data.get("themes") or [], free)
     if rejected:
         log.warning("отброшено тем: %s", len(rejected))
@@ -492,9 +521,9 @@ async def build(chat_id: int, ask: str) -> tuple[str, Plan, list[dict[str, Any]]
 
     saved = _save(chat_id, plan, b.version())
     week = window[0].isocalendar()
-    b.artifact(f"plans/{week.year}-W{week.week:02d}.md",
-               _markdown(brand_name, plan, saved, window))
-    return brand_name, plan, saved
+    rel = f"plans/{week.year}-W{week.week:02d}.md"
+    b.artifact(rel, _markdown(brand_name, plan, saved, window))
+    return plan, saved, rel
 
 
 # ── разговор с человеком ──────────────────────────────────────────────
