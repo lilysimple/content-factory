@@ -59,6 +59,17 @@ PLATFORMS: dict[str, tuple[str, ...]] = {
 }
 AUTO_PUBLISH = ("telegram",)
 
+# Площадки, снятые с планирования. Из набора форматов площадка при этом не
+# убирается: темы на ней уже стоят, и Редактор с Дизайнером обязаны их
+# понимать. Меняется только одно — новых свободных слотов там не бывает, и
+# слот оттуда `_fit` не примет, что бы ни принесла модель.
+#
+# YouTube снят 31.08: снимать и монтировать видео каждую неделю бренд
+# сейчас не может, а слот, который никто не закроет, это не план, а
+# обещание. Вернуть площадку — убрать её отсюда, одной строкой.
+PAUSED = ("youtube",)
+PLANNED = tuple(p for p in PLATFORMS if p not in PAUSED)
+
 # Форматы, которые произносят вслух: их берёт Редактор Reels, а не
 # Редактор. Граница нужна обоим, поэтому живёт рядом с набором форматов.
 SPOKEN = ("reels", "shorts")
@@ -124,7 +135,7 @@ def _busy(chat_id: int, window: list[date]) -> dict[Slot, str]:
 
 def _free(chat_id: int, window: list[date]) -> tuple[dict[Slot, str], list[Slot]]:
     busy = _busy(chat_id, window)
-    free = [(d.isoformat(), p) for d in window for p in PLATFORMS
+    free = [(d.isoformat(), p) for d in window for p in PLANNED
             if (d.isoformat(), p) not in busy]
     return busy, free
 
@@ -170,6 +181,10 @@ def _fit(themes: list[dict[str, Any]],
         if plat not in PLATFORMS:
             rejected.append(f"«{title}» отброшена: площадка "
                             f"{plat or 'не указана'} не подключена")
+            continue
+        if plat in PAUSED:
+            rejected.append(f"«{title}» отброшена: {plat} снят с "
+                            "планирования, слотов там нет")
             continue
         if (day, plat) not in allowed:
             rejected.append(f"«{title}» отброшена: {day or 'дата не указана'} "
@@ -311,11 +326,18 @@ def _layers(chat_id: int, busy: dict[Slot, str], free: list[Slot],
     else:
         lines.append("Нормы площадок есть в выжимке выше: держись их, а не "
                      "общих соображений. Технический набор форматов ниже.")
-    for plat, formats in PLATFORMS.items():
-        lines.append(f"- `{plat}`: {', '.join(formats)}")
-    lines.append("Публикуется автоматом только Telegram. Слоты Instagram и "
-                 "YouTube человек выкладывает руками, поэтому не ставь их "
-                 "больше, чем можно реально снять и смонтировать за неделю.")
+    for plat in PLANNED:
+        lines.append(f"- `{plat}`: {', '.join(PLATFORMS[plat])}")
+    if PAUSED:
+        lines.append("Снято с планирования: " + ", ".join(PAUSED)
+                     + ". Слотов там нет и тем туда не ставь, даже если "
+                       "тема просится именно в этот формат.")
+    hands = [p for p in PLANNED if p not in AUTO_PUBLISH]
+    if hands:
+        lines.append("Публикуется автоматом только Telegram. Слоты "
+                     + ", ".join(hands) + " человек выкладывает руками, "
+                     "поэтому не ставь их больше, чем можно реально снять и "
+                     "смонтировать за неделю.")
     lines.append("")
 
     lines.append("### Запрос человека")
@@ -484,7 +506,7 @@ async def build(chat_id: int, ask: str) -> tuple[str, Plan, list[dict[str, Any]]
     if not free:
         raise NoSlots(
             f"с {window[0].isoformat()} по {window[-1].isoformat()} заняты "
-            f"все слоты на всех площадках ({', '.join(PLATFORMS)})")
+            f"все слоты на всех площадках ({', '.join(PLANNED)})")
 
     answer = await agent.ask(
         "strategy", chat_id,
@@ -549,12 +571,42 @@ _batch: dict[int, list[str]] = {}
 _awaiting_fix: set[int] = set()
 
 
-def _kb() -> InlineKeyboardMarkup:
+def kb(prefix: str = "plan") -> InlineKeyboardMarkup:
+    """Кнопки согласования плана. Префикс говорит, чей план согласуют.
+
+    Планировать умеют два пути — старый Стратег (`plan:`) и субагент через
+    мост (`bplan:`), — а согласование у них одно и то же: утвердить, дать
+    правку, попросить другие темы. Пока клавиатура была приватной, у плана
+    из моста кнопок не было вовсе: человек получал готовую неделю простым
+    текстом и не мог с ней ничего сделать.
+    """
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Утвердить", callback_data="plan:ok"),
-        InlineKeyboardButton(text="✏️ Правки", callback_data="plan:fix"),
-        InlineKeyboardButton(text="🔄 Другие темы", callback_data="plan:redo"),
+        InlineKeyboardButton(text="✅ Утвердить",
+                             callback_data=f"{prefix}:ok"),
+        InlineKeyboardButton(text="✏️ Правки", callback_data=f"{prefix}:fix"),
+        InlineKeyboardButton(text="🔄 Другие темы",
+                             callback_data=f"{prefix}:redo"),
     ]])
+
+
+def remember(chat_id: int, ids: list[str]) -> None:
+    """Запомнить батч, по которому работают кнопки.
+
+    Публичная точка входа для моста: темы туда кладёт `strategy.land`, а
+    знать про них должен тот же `_batch`, иначе «Другие темы» под планом
+    из моста удалят чужой батч или ничего.
+    """
+    _batch[chat_id] = list(ids)
+
+
+def batch(chat_id: int) -> list[str]:
+    """Батч, показанный последним. Пусто — план уже неактуален."""
+    return list(_batch.get(chat_id, []))
+
+
+def forget(chat_id: int) -> int:
+    """Убрать неутверждённый батч. Публичная обёртка над `_drop`."""
+    return _drop(chat_id)
 
 
 def _drop(chat_id: int) -> int:
@@ -603,7 +655,7 @@ async def run(reg, chat_id: int, ask: str, topic: str = "strategy") -> None:
 
     _batch[chat_id] = [t["id"] for t in saved]
     await reg.say("strategy", chat_id, card(brand_name, plan, saved),
-                  kb=_kb(), topic=topic)
+                  kb=kb(), topic=topic)
 
 
 async def revise(reg, chat_id: int, instruction: str,

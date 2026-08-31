@@ -3,6 +3,9 @@
 Слот стал парой «дата плюс площадка». Проверяется, что пара держится:
 чужая площадка не проходит, формат не из набора помечается, а Telegram
 и Instagram спокойно стоят в один день.
+
+Снятая с планирования площадка (`strategy.PAUSED`) проверяется здесь же:
+слотов на ней нет, тема туда не садится, и отказ говорится вслух.
 """
 from __future__ import annotations
 
@@ -51,8 +54,8 @@ async def main() -> None:
     reg = FakeRegistry()
     win = [d.isoformat() for d in strategy._window(CHAT)]
 
-    # ── 1. три площадки в один день ───────────────────────────────────
-    print("\n1. Три площадки в один день")
+    # ── 1. две площадки в один день, третья снята ─────────────────────
+    print("\n1. Две площадки в один день, снятая отброшена")
     wipe()
     install(plan([
         {"date": win[0], "plat": "telegram", "format": "пост", "title": "тг"},
@@ -61,18 +64,24 @@ async def main() -> None:
     ]))
     await strategy.run(reg, CHAT, "план")
     got = rows()
-    check("все три встали в один день", len(got) == 3, f"{len(got)}")
-    check("площадки разные", {r["plat"] for r in got} ==
-          {"telegram", "instagram", "youtube"}, str({r["plat"] for r in got}))
+    check("встали только площадки из плана", len(got) == len(strategy.PLANNED),
+          f"{len(got)}")
+    check("площадки разные", {r["plat"] for r in got} == set(strategy.PLANNED),
+          str({r["plat"] for r in got}))
+    check("снятая площадка в базу не села",
+          not [r for r in got if r["plat"] in strategy.PAUSED],
+          str([r["id"] for r in got]))
     check("id содержат площадку",
           {r["id"] for r in got} == {f"{win[0]}-{p}-01"
-                                     for p in ("telegram", "instagram", "youtube")},
+                                     for p in strategy.PLANNED},
           str(sorted(r["id"] for r in got)))
 
     card = reg.last()
     check("в карточке видны площадки",
-          all(p in card.text for p in ("telegram", "instagram", "youtube")),
+          all(p in card.text for p in strategy.PLANNED),
           "площадка не показана")
+    check("отказ по снятой площадке назван",
+          "снят с планирования" in card.text, card.text[-200:])
     check("посчитано по площадкам", "Площадки:" in card.text)
     check("ручные слоты помечены", "✋" in card.text,
           "не сказано, что вне Telegram руками")
@@ -145,11 +154,15 @@ async def main() -> None:
     busy, free = strategy._free(CHAT, strategy._window(CHAT))
     check("telegram на этот день занят", (win[5], "telegram") not in free)
     check("instagram на этот день свободен", (win[5], "instagram") in free)
-    check("youtube на этот день свободен", (win[5], "youtube") in free)
+    check("снятой площадки в свободных слотах нет",
+          not [s for s in free if s[1] in strategy.PAUSED],
+          str([s for s in free if s[1] in strategy.PAUSED][:3]))
 
     layers = strategy._layers(CHAT, busy, free, "план")
     check("слоты показаны парой", "Свободные слоты" in layers)
-    check("форматы перечислены", "карусель" in layers and "shorts" in layers)
+    check("форматы перечислены", "карусель" in layers and "reels" in layers)
+    check("снятая площадка названа в слоях",
+          "Снято с планирования" in layers and strategy.PAUSED[0] in layers)
     check("сказано про ручную публикацию", "руками" in layers)
 
 

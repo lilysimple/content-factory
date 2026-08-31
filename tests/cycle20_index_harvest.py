@@ -306,6 +306,8 @@ async def main() -> None:
                    CHAT, bad[0]),
           "проверку слота на этом пути не делал никто")
     check("отброшенное названо человеку", "не сошлось" in note.lower(), note)
+    check("id посаженных тем известны наружу",
+          res.landed_ids == [r["id"] for r in rows], str(res.landed_ids))
     check("выгрузка плана легла в бренд",
           any(p.name.startswith(f"{window[0].isocalendar().year}-W")
               for p in b.path("plans").glob("*.md")))
@@ -343,6 +345,40 @@ async def main() -> None:
     check("нет артефакта — нет посадки",
           bridge.harvest(bridge.Result(task_id=t5)) == "",
           "файла нет значит субагент не отработал")
+
+    # ── 7б. События недели спрашиваются до запуска ────────────────────
+    #
+    # Спросить Стратега посреди прогона некому: конец хода Director это
+    # конец процесса. Значит вопрос задаётся заранее, а ответ ложится в
+    # файл со штампом окна — иначе про ту же неделю спросят второй раз.
+    print("\n7б. События недели")
+
+    events = b.path(bridge.EVENTS_PATH)
+    events.unlink(missing_ok=True)
+    check("файла нет — спрашиваем", not bridge.events_known(CHAT))
+
+    window = bridge.plan_window(CHAT)
+    check("в вопросе названо окно датами",
+          window[0] in bridge.events_question(CHAT), bridge.events_question(CHAT))
+
+    check("ответ про вебинар считается событием",
+          bridge.save_events(CHAT, f"{window[2]} вебинар про контент-завод"))
+    check("файл заведён", events.exists())
+    check("про это окно больше не спрашиваем", bridge.events_known(CHAT))
+    check("событие доехало фактом в input.md",
+          "вебинар" in "\n".join(bridge._events(CHAT)))
+
+    check("«нет» это тоже ответ", not bridge.save_events(CHAT, "нет"))
+    check("после «нет» не спрашиваем снова", bridge.events_known(CHAT))
+
+    # Прошлая неделя в файле остаётся, но в промпт не едет: чужое событие
+    # рядом с нынешним читается как ещё одно событие недели.
+    events.write_text("## Неделя 2020-01-01 — 2020-01-07\n\n"
+                      "- вебинар пятилетней давности\n", encoding="utf-8")
+    check("старая неделя не считается заявленной",
+          not bridge.events_known(CHAT))
+
+    events.unlink(missing_ok=True)
 
     # ── 8. Адаптеры собраны кодом и не разошлись с источником ─────────
     print("\n8. Адаптеры субагентов")

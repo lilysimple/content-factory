@@ -47,6 +47,10 @@ TASKS_DIR = ROOT / "tasks"
 # События недели: вебинар, прогрев, запуск. Ведёт человек, читает Стратег.
 EVENTS_PATH = "plans/events.md"
 
+# Чем человек отвечает «событий нет». Ответ всё равно пишется в файл: штамп
+# с датами окна и есть ответ на вопрос «про эту неделю уже спрашивали».
+NO_EVENTS = {"нет", "ничего", "нету", "нет событий", "пусто", "-", "—"}
+
 # Что получает подпроцесс. Всё остальное отрезается: см. шапку модуля.
 # ANTHROPIC_API_KEY сюда не входит намеренно — авторизация идёт входом CLI,
 # учётные данные лежат в Keychain, и подпроцесс берёт их сам.
@@ -123,6 +127,7 @@ class Result:
     said: str = ""                     # последняя реплика Director из JSON CLI
     artifacts: list[str] = field(default_factory=list)
     landed: str = ""                   # что из плана посажено в базу
+    landed_ids: list[str] = field(default_factory=list)   # id посаженных тем
 
     @property
     def dir(self) -> Path:
@@ -455,6 +460,24 @@ def _history(chat_id: int) -> list[str]:
     return out
 
 
+def _events_block(text: str, chat_id: int) -> str:
+    """Кусок `events.md` про это окно, а не файл целиком.
+
+    Файл ведётся неделями и растёт: прошлый вебинар, попав в промпт вместе
+    с нынешним, читается как ещё одно событие недели. Блок выбирается по
+    дате из окна в заголовке; не нашли — отдаём файл как есть, потому что
+    человек мог написать его свободной формой.
+    """
+    try:
+        window = plan_window(chat_id)
+    except Exception:                            # noqa: BLE001
+        return text.strip()
+    blocks = re.split(r"^(?=##\s)", text, flags=re.M)
+    mine = [b.strip() for b in blocks
+            if any(day in b.split("\n", 1)[0] for day in window)]
+    return "\n\n".join(mine) if mine else text.strip()
+
+
 def _events(chat_id: int) -> list[str]:
     """События недели: вебинар, прогрев, запуск. Факт, а не догадка.
 
@@ -469,7 +492,8 @@ def _events(chat_id: int) -> list[str]:
     text = ""
     path = b.path(EVENTS_PATH)
     if path.exists():
-        text = path.read_text(encoding="utf-8").strip()
+        text = _events_block(b.path(EVENTS_PATH).read_text(encoding="utf-8"),
+                             chat_id)
 
     out = ["", "## События недели", ""]
     if not text:
@@ -483,6 +507,82 @@ def _events(chat_id: int) -> list[str]:
     out += ["", "Это заявленные человеком события. Слот под прогрев ставится "
                 "от них, а даты сверяются со списком свободных слотов выше."]
     return out
+
+
+# ── события недели ────────────────────────────────────────────────────
+#
+# Спросить человека в момент прогона нельзя: мост это headless-запуск, и
+# конец хода Director это конец процесса. Поэтому вопрос задаётся **до**
+# запуска, обычным сообщением в чате, а ответ ложится в файл, который
+# Стратег получает фактом в `input.md`.
+
+def plan_window(chat_id: int) -> list[str]:
+    """Окно плана датами. То же окно, что у слотов: дом правила один."""
+    window, _ = strategy.free_slots(chat_id)
+    return [d.isoformat() for d in window]
+
+
+def events_known(chat_id: int) -> bool:
+    """Заявлены ли события на это окно.
+
+    Не «есть ли файл»: файл с прошлой недели ничего не говорит про эту, а
+    Стратег, не знающий про вебинар в среду, прогрев к нему не поставит.
+    Признак свежести — дата из окна, встреченная в тексте. Ответ «событий
+    нет» пишется тем же кодом со штампом окна, поэтому второй раз про ту
+    же неделю не спрашиваем.
+    """
+    b = desk.brand(chat_id)
+    if b is None:
+        return True                  # нет бренда — спрашивать не о чем
+    path = b.path(EVENTS_PATH)
+    if not path.exists():
+        return False
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        return False
+    try:
+        window = plan_window(chat_id)
+    except Exception:                            # noqa: BLE001
+        return True                  # окно не посчиталось — не мучаем человека
+    return any(day in text for day in window)
+
+
+def events_question(chat_id: int) -> str:
+    """Вопрос человеку перед планом. Окно называется датами, а не «неделей»."""
+    try:
+        window = plan_window(chat_id)
+        span = f"{window[0]} — {window[-1]}"
+    except Exception:                            # noqa: BLE001
+        span = "ближайшую неделю"
+    return ("Прежде чем планировать: что на неделе " + span + "?\n"
+            "Вебинар, запуск, дедлайн, эфир — с датой. Под них ставится "
+            "прогрев, а сам я о них не знаю.\n\n"
+            "Ответь одним сообщением или напиши «нет».")
+
+
+def save_events(chat_id: int, answer: str) -> bool:
+    """Записать события окна в `plans/events.md`. Возвращает True, если есть что.
+
+    Пишется всегда, включая «нет»: штамп с датами окна — это и есть ответ
+    на вопрос «спрашивали ли уже про эту неделю».
+    """
+    b = desk.brand(chat_id)
+    if b is None:
+        return False
+    try:
+        window = plan_window(chat_id)
+    except Exception:                            # noqa: BLE001
+        return False
+
+    said = (answer or "").strip()
+    none = said.lower().strip(".!… ") in NO_EVENTS
+    block = [f"## Неделя {window[0]} — {window[-1]}", ""]
+    block += ["- событий не заявлено"] if none else \
+             [ln if ln.startswith("-") else f"- {ln}"
+              for ln in said.splitlines() if ln.strip()]
+    b.append(EVENTS_PATH, "\n" + "\n".join(block) + "\n")
+    return not none
+
 
 
 # Какие факты кладутся в `input.md` под какой workflow. Факты, не роли:
@@ -761,6 +861,7 @@ def harvest(res: Result) -> str:
         log.warning("%s: план не сел: %s", res.task_id, e)
         return f"План собран, но в базу не сел: {e}"
 
+    res.landed_ids = [t["id"] for t in saved]
     note = [f"Записано тем: {len(saved)}. Выгрузка — {rel}."]
     if plan.unmet:
         note.append("Не сошлось: " + "; ".join(plan.unmet[:4]))

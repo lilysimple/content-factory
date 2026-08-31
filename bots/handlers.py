@@ -40,6 +40,16 @@ TOPIC = {"plan": "strategy", "post": "review", "reels": "reels",
 AS_WORKFLOW = {"strategy": "plan", "editor": "post", "reels": "reels",
                "design": "design", "research": "research"}
 
+# Задача, которая ждёт ответа человека, прежде чем уйти в мост.
+# chat_id → (запрос, workflow, топик). Спрашивать в момент прогона нельзя:
+# конец хода Director это конец процесса, будить его некому.
+_await_events: dict[int, tuple[str, str, str]] = {}
+
+# Человек нажал «Правки» под планом, собранным мостом, и сейчас пишет,
+# что поправить. Старый Стратег держит своё ожидание сам
+# (`strategy.wants_fix`), у моста роли-хозяина нет — состояние живёт здесь.
+_await_plan_fix: dict[int, str] = {}
+
 
 def topic_key_of(chat_id: int, thread_id: int | None) -> str | None:
     if thread_id is None:
@@ -124,6 +134,15 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         tenant = db.ensure_tenant(chat_id, cfg.default_tz)
         b = desk.brand(chat_id)
 
+        # Прогрев к вебинару, о котором Стратег не знает, поставить нельзя,
+        # а спросить его самого посреди прогона некому. Поэтому спрашиваем
+        # здесь, до запуска, и только когда про это окно ещё не спрашивали.
+        if workflow == "plan" and not bridge.events_known(chat_id):
+            _await_events[chat_id] = (ask, workflow, tkey)
+            await registry.say("assistant", chat_id,
+                               bridge.events_question(chat_id), topic=tkey)
+            return
+
         try:
             task_id = bridge.create_task(
                 chat_id, ask, workflow=workflow, today=desk.today(chat_id),
@@ -150,7 +169,12 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
                                f"{res.error}", topic=tkey)
             return
 
-        await registry.say("assistant", chat_id, res.text, topic=tkey)
+        # План, посаженный в базу, согласуется теми же тремя кнопками, что
+        # и план старого Стратега: батч помнит `strategy`, дом у него один.
+        if res.landed_ids:
+            strategy.remember(chat_id, res.landed_ids)
+        await registry.say("assistant", chat_id, res.text, topic=tkey,
+                           kb=strategy.kb("bplan") if res.landed_ids else None)
 
         tail = [f"Задача <code>{task_id}</code>, {res.secs} с"]
         if res.cost is not None:
@@ -243,6 +267,29 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         if msg.video or (msg.document and (msg.document.mime_type or "")
                         .startswith("video/")):
             await handle_footage(chat_id, msg, tkey or "reels")
+            return
+
+        # Ответ на вопрос про события недели: он не новая задача, а
+        # недостающий факт для той, что уже ждёт запуска.
+        if chat_id in _await_events:
+            pending_ask, wf, ekey = _await_events.pop(chat_id)
+            has = bridge.save_events(chat_id, raw)
+            await registry.say(
+                "assistant", chat_id,
+                ("Записала события в <code>plans/events.md</code>, "
+                 "прогрев поставлю от них." if has else
+                 "Хорошо, неделя без событий — планирую без прогрева."),
+                topic=ekey)
+            await bridge_task(chat_id, pending_ask, wf, ekey)
+            return
+
+        # Правка к плану, собранному мостом. Пересборка это новый прогон:
+        # субагент живёт ровно один ход, договорить с ним нельзя.
+        if chat_id in _await_plan_fix:
+            fkey = _await_plan_fix.pop(chat_id)
+            strategy.forget(chat_id)
+            await bridge_task(chat_id, f"Правка к прошлому плану: {raw}",
+                              "plan", fkey)
             return
 
         # Человек нажал «Правки» под планом и сейчас пишет, что поправить.
@@ -385,6 +432,45 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             await strategy.on_callback(registry, chat_id, action,
                                        topic=tkey or "strategy")
             return
+        if kind == "bplan":
+            tkey = (topic_key_of(chat_id, cb.message.message_thread_id)
+                    or "strategy")
+            ids = strategy.batch(chat_id)
+            if not ids:
+                await registry.say("assistant", chat_id,
+                                   "Этот план уже неактуален, собери заново.",
+                                   topic=tkey)
+                return
+            if action == "ok":
+                # Темы остаются `idea`: утверждён смысл, текстов ещё нет.
+                strategy.remember(chat_id, [])
+                await registry.say(
+                    "assistant", chat_id,
+                    f"Утвердила, {len(ids)} тем в плане. Выгрузка лежит в "
+                    "<code>plans/</code> в папке бренда.\n\n"
+                    "Дальше за текстами: скажи «напиши пост», и возьму "
+                    "ближайшую тему.", topic=tkey)
+                return
+            if action == "fix":
+                _await_plan_fix[chat_id] = tkey
+                await registry.say(
+                    "assistant", chat_id,
+                    "Напиши одним сообщением, что поправить: тему, день, "
+                    "перекос по воронке. Пересоберу план — это новый "
+                    "прогон, займёт несколько минут.", topic=tkey)
+                return
+            if action == "redo":
+                dropped = strategy.forget(chat_id)
+                await registry.say(
+                    "assistant", chat_id,
+                    f"Убрала прошлый батч ({dropped} тем), собираю другой.",
+                    topic=tkey)
+                await bridge_task(
+                    chat_id, "Прошлый батч не подошёл. Дай другие темы: "
+                             "другие углы и другие заходы, не перестановку "
+                             "тех же.", "plan", tkey)
+            return
+
         if kind == "post":
             tkey = topic_key_of(chat_id, cb.message.message_thread_id)
             await editor.on_callback(registry, chat_id, action,
