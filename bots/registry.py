@@ -13,7 +13,9 @@ from dataclasses import dataclass
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import (TelegramBadRequest,
+                                TelegramNetworkError,
+                                TelegramRetryAfter)
 from aiogram.types import InlineKeyboardMarkup
 
 from config import cfg
@@ -188,6 +190,23 @@ class Registry:
             except TelegramRetryAfter as e:
                 log.warning("flood control, жду %s с", e.retry_after)
                 await asyncio.sleep(e.retry_after + 0.5)
+            except TelegramNetworkError as e:
+                # Сеть отвалилась — ждём и пробуем снова.
+                #
+                # Раньше эта ветка отсутствовала, и сетевая ошибка летела
+                # мимо цикла на первой же попытке. Стоило это дорого:
+                # 01.09 у Мака на час пропала сеть, `bridge_task` уже
+                # отработал 330 секунд, а `res.text` не ушёл — задача,
+                # которая **удалась**, дошла до человека молчанием.
+                # Повторить отправку дёшево, потерять работу дорого.
+                if attempt == 2:
+                    log.error("сеть не дала отправить в %s/%s: %s",
+                              chat_id, topic, e)
+                    raise
+                pause = 2 ** attempt
+                log.warning("сеть подвела (%s), жду %s с и пробую снова",
+                            e, pause)
+                await asyncio.sleep(pause)
             except TelegramBadRequest as e:
                 msg = str(e).lower()
                 # Топик удалили руками — пересоздаём и пробуем ещё раз.
