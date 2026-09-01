@@ -22,6 +22,12 @@ whisper. Здесь остаётся сборка: собрать props, поз�
 секунду), а человек на камере говорит в своём темпе. Дубль без звуковой
 дорожки субтитров не получает вовсе — вместо них возвращается титул
 хука, и человеку об этом говорится строкой.
+
+Расшифровка слышит речь, а не имена: «клод», «ремоушен», «антропик»
+приезжают в караоке ровно так, как звучат. Правит это словарь бренда
+(`montage/subtitles.md`), а не второй проход модели: ошибка на каждом
+дубле одна и та же. Словарь применяется сам, пополняется правкой
+человека под карточкой и переписывает субтитры без новой расшифровки.
 """
 from __future__ import annotations
 
@@ -107,7 +113,8 @@ class Reel:
     still: Path | None = None
     still_at: float = 0.0
     quiet: list[tuple[float, float]] = field(default_factory=list)
-    words: list[footage.Word] = field(default_factory=list)
+    subs: list[dict[str, Any]] = field(default_factory=list)
+    piece: tuple[float, float] | None = None
     face: footage.Face | None = None
     crop: tuple[float, float] = (0.5, 0.5)
     anchor: str = "bottom"
@@ -160,6 +167,87 @@ def _footage(b) -> Path:
         raise NoFootage("видео ещё не пришло. Снимите ролик по сценарию и "
                         "пришлите файлом в этот топик")
     return files[0]
+
+
+# ── словарь субтитров ─────────────────────────────────────────────────
+#
+# Файл бренда, а не настройка кода: «клод» вместо Claude это ошибка про
+# этот бренд, у соседнего в кадре другие имена. Формат человеческий —
+# строка «как слышно -> как правильно», потому что править его будут
+# руками не реже, чем кнопкой.
+#
+# Пустая правая часть значит «выбросить»: слова-паразиты и «ээ» из
+# расшифровки в караоке не нужны.
+
+LEXICON = "montage/subtitles.md"
+LEX_NOTE = "по словарю субтитров поправлено слов: "
+
+# Стрелка в любом виде, который человек напишет с телефона. Знак «=»
+# сюда не берём: в прозе он встречается чаще, чем в замене.
+ARROW = re.compile(r"^\s*[-*]?\s*(.{1,80}?)\s*(?:->|-->|=>|→|—>)\s*(.{0,80})\s*$")
+# «клод» на «Claude» — та же замена словами. Кавычки обязательны: без них
+# фраза «замени клод на claude код» разбирается двумя способами.
+QUOTED = re.compile(r"[«\"\']([^«»\"\']{1,80})[»\"\']\s*(?:на|→|->)\s*"
+                    r"[«\"\']([^«»\"\']{0,80})[»\"\']")
+
+# Пояснение в файле идёт комментариями, а не прозой: строка «как слышно
+# -> как правильно» посреди объяснения сама разбирается как замена.
+LEX_HEAD = ("# Словарь субтитров\n"
+            "#\n"
+            "# Строка на замену: как слышно -> как правильно.\n"
+            "# Пустая правая часть выбрасывает слово из субтитров.\n"
+            "# Строки, начинающиеся с #, — комментарии.\n")
+
+
+def lexicon(b) -> list[tuple[str, str]]:
+    """Замены бренда. Нет файла — нет замен, и это не поломка."""
+    out: list[tuple[str, str]] = []
+    for line in (b.read(LEXICON) or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = ARROW.match(line)
+        if m and footage.norm(m.group(1)):
+            out.append((m.group(1).strip(), m.group(2).strip()))
+    return out
+
+
+def fixes(text: str) -> list[tuple[str, str]]:
+    """Правка человека → пары замен. Не разобрали — пустой список."""
+    out: list[tuple[str, str]] = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = QUOTED.search(line) or ARROW.match(line)
+        if m and footage.norm(m.group(1)):
+            out.append((m.group(1).strip(), m.group(2).strip()))
+    return out
+
+
+def remember(b, pairs: list[tuple[str, str]]) -> None:
+    """Правка это словарь бренда, а не разовая замена в одном ролике."""
+    if not pairs:
+        return
+    known = {footage.norm(src) for src, _ in lexicon(b)}
+    if not b.path(LEXICON).exists():
+        b.artifact(LEXICON, LEX_HEAD)
+    for src, dst in pairs:
+        if footage.norm(src) in known:
+            continue                    # то же слово во второй раз
+        known.add(footage.norm(src))
+        b.append(LEXICON, f"{src} -> {dst}")
+
+
+def _relex(reel: Reel, rules: list[tuple[str, str]]) -> None:
+    """Субтитры ролика из сырых слов и словаря. Считается заново каждый
+    раз: словарь пополняется, а `reel.subs` остаются тем, что услышано.
+    """
+    subs, fixed = footage.relex(reel.subs, rules)
+    reel.pages = footage.pages(subs)
+    reel.findings = [f for f in reel.findings if not f.startswith(LEX_NOTE)]
+    if fixed:
+        reel.findings.append(f"{LEX_NOTE}{fixed}")
 
 
 def _cover(b, theme_id: str) -> Path | None:
@@ -676,8 +764,6 @@ async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
         (public / video_name).unlink(missing_ok=True)
         if cover_name:
             (public / cover_name).unlink(missing_ok=True)
-        if reel.still:
-            reel.still.unlink(missing_ok=True)
 
     if proc.returncode != 0 or not out_path.exists():
         tail = err.decode(errors="replace").strip().splitlines()[-8:]
@@ -695,7 +781,8 @@ async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
 BUDGET_SECONDS = 50
 
 
-async def analyse(reel: Reel, *, say=None) -> None:
+async def analyse(reel: Reel, *, say=None,
+                  rules: list[tuple[str, str]] | None = None) -> None:
     """Три прохода по дублю: паузы, активная зона, слова.
 
     Ни один из них не обязателен для монтажа: отказ прохода — это строка
@@ -745,7 +832,11 @@ async def analyse(reel: Reel, *, say=None) -> None:
     if not words:
         reel.findings.append("в дубле не нашлось речи — субтитров не будет")
         return
-    reel.pages = footage.pages(footage.cut_words(words, reel.cuts))
+    # На столе остаётся услышанное, а не исправленное: словарь может
+    # пополниться правкой человека, и тогда он применяется к тому же
+    # транскрипту заново, без второй расшифровки.
+    reel.subs = footage.cut_words(words, reel.cuts)
+    _relex(reel, rules or [])
 
 
 async def _intro(reel: Reel, b, size: tuple[int, int]) -> None:
@@ -862,7 +953,7 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
                   f"из <code>{video.name}</code> ({size[0]}×{size[1]}).\n"
                   "Рендер идёт дольше макета, до нескольких минут.")
 
-    await analyse(reel, say=say)
+    await analyse(reel, say=say, rules=lexicon(b))
     await _intro(reel, b, size)
 
     reel.out = await render(reel, size)
@@ -973,6 +1064,7 @@ async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]
                   f"({probe.duration / 60:.0f} мин): слушаю, ищу паузы, "
                   "потом выберу куски на ролики.")
 
+    rules = lexicon(b)
     quiet = await footage.silences(video)
     whole = footage.timeline(probe.duration, quiet)
     track = await footage.pan(video)
@@ -1004,7 +1096,8 @@ async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]
                     accent=accent, probe=probe, cuts=cuts, spec=spec)
         reel.focus = track
         reel.pan = footage.cut_track(track, cuts)
-        reel.pages = footage.pages(footage.cut_words(words, cuts))
+        reel.subs = footage.cut_words(words, cuts)
+        _relex(reel, rules)
         reel.lines = cover_lines(frag.hook, size, spec)
         if spec_gap:
             reel.findings.append(spec_gap)
@@ -1040,10 +1133,13 @@ async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]
             await footage.clip(video, frag.start, frag.end, piece)
             reel.video = piece
             reel.cuts = cuts.shift(frag.start)
+            reel.piece = (frag.start, frag.end)
 
             reel.out = await render(reel, size)
         except (NoRenderer, footage.NoFfmpeg) as e:
             log.warning("кусок %s не собрался: %s", tid, e)
+            if reel.still:
+                reel.still.unlink(missing_ok=True)
             with db.tx() as c:
                 c.execute("UPDATE themes SET status = 'failed', "
                           "skip_reason = ? WHERE id = ? AND chat_id = ?",
@@ -1064,9 +1160,71 @@ async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]
     return out
 
 
+# ── правка субтитров ──────────────────────────────────────────────────
+#
+# Правка это не новый монтаж: дубль тот же, паузы те же, кадр тот же.
+# Меняются только слова, и второй раз слушать запись незачем — на столе
+# лежат услышанные слова с таймингами, а словарь применяется к ним
+# заново. Дорогим остаётся один рендер, и его не обойти: субтитры вшиты
+# в кадр.
+
+
+class NoRedo(RuntimeError):
+    """Пересобрать нечем: нет исходника или нет расшифровки."""
+
+
+async def refit(reel: Reel, b, *, say=None) -> Reel:
+    """Тот же ролик с субтитрами по обновлённому словарю."""
+    if not reel.subs:
+        raise NoRedo("субтитров у этого ролика нет — править нечего")
+    if reel.cuts is None or reel.probe is None:
+        raise NoRedo("этот ролик собран в другом запуске завода — "
+                     "пришлите дубль и повторите «смонтируй»")
+    source = reel.video
+    if not source.exists():
+        raise NoRedo("исходный дубль уже убран — пришлите его снова "
+                     "и повторите «смонтируй»")
+
+    _relex(reel, lexicon(b))
+
+    plat = reel.theme.get("plat") or "instagram"
+    fmt = reel.theme.get("format") or "reels"
+    size = design.CANVAS.get(design._key(plat, fmt)) \
+        or design.CANVAS.get((plat, None)) or (1080, 1920)
+
+    lost = "кадр обложки не сохранился — первый кадр собран без него"
+    if reel.cover and not reel.cover.exists():
+        reel.cover = None
+        if lost not in reel.findings:       # правок может быть несколько
+            reel.findings.append(lost)
+
+    # Кусок нарезки рендерится сам по себе: `reel.cuts` у него считаются
+    # от начала куска, а не от начала записи.
+    clip = None
+    try:
+        if reel.piece:
+            clip = TOOLS / f".clip-{reel.theme['id']}.mp4"
+            if say:
+                await say("Вырезаю кусок заново и пересобираю субтитры.")
+            await footage.clip(source, reel.piece[0], reel.piece[1], clip)
+            reel.video = clip
+        reel.out = await render(reel, size)
+    finally:
+        reel.video = source
+        if clip:
+            clip.unlink(missing_ok=True)
+    return reel
+
+
 # ── выгрузка ──────────────────────────────────────────────────────────
 
-def _save(b, reel: Reel, *, drop_source: bool = True) -> Path:
+def _save(b, reel: Reel) -> Path:
+    """Готовый ролик в папку бренда.
+
+    Исходник тут не трогаем: пока карточка на столе, человек может
+    поправить слово в субтитрах, и ролик пересобирается из того же
+    дубля. Исходник и кадр-обложка уходят приёмкой (`_drop`).
+    """
     tid = reel.theme["id"]
     blob = reel.out.read_bytes()
     path = b.artifact(f"posts/{tid}-reel.mp4", blob)
@@ -1076,10 +1234,33 @@ def _save(b, reel: Reel, *, drop_source: bool = True) -> Path:
         c.execute("UPDATE themes SET asset = ?, updated_at = datetime('now') "
                   "WHERE id = ? AND chat_id = ?",
                  (f"posts/{tid}-reel.mp4", tid, reel.theme["chat_id"]))
-    if drop_source:                             # при нарезке — после всех
-        reel.video.unlink(missing_ok=True)      # исходник разобран
     reel.out.unlink(missing_ok=True)            # временный файл в tools/
     return path
+
+
+def _drop(b, reel: Reel) -> None:
+    """Приёмка: разобранный дубль и кадр под обложку больше не нужны.
+
+    Удаляем только то, что лежит в папке входящих этого бренда: карточка
+    могла пережить рестарт, и поднятый из базы ролик несёт `/dev/null`
+    вместо пути к дублю.
+    """
+    if reel.still:
+        reel.still.unlink(missing_ok=True)
+    if b is None:
+        return
+    try:
+        if reel.video.parent == incoming_dir(b) and reel.video.exists():
+            reel.video.unlink()
+    except OSError as e:                                     # noqa: BLE001
+        log.warning("исходник не убрался: %s", e)
+
+
+def _sweep() -> None:
+    """Кадры-обложки прошлых карточек. Новый монтаж стирает стол —
+    значит и пересобирать по ним уже нечего."""
+    for old in TOOLS.glob(".still-*.png"):
+        old.unlink(missing_ok=True)
 
 
 # ── карточка и кнопки ─────────────────────────────────────────────────
@@ -1101,6 +1282,16 @@ table = desk.Desk("montage", corrections="montage-corrections.md",
 
 def wants_fix(chat_id: int) -> bool:
     return table.wants_fix(chat_id)
+
+
+def wants_relex(chat_id: int, ask: str) -> bool:
+    """Замена словами под готовой карточкой — правка субтитров.
+
+    Кнопку «Правки» человек нажимает не всегда: «субтитры: клод ->
+    Claude» приходит просто сообщением. Собирать на него ролик заново
+    значит потерять минуты рендера на работу, которой не просили.
+    """
+    return bool(fixes(ask)) and table.get(chat_id) is not None
 
 
 def _kb(theme_id: str) -> InlineKeyboardMarkup:
@@ -1131,8 +1322,22 @@ def caption(reel: Reel) -> str:
     return "\n".join(out)
 
 
+async def show(reg, chat_id: int, reel: Reel, topic: str = "reels") -> None:
+    """Карточка, файл и кнопки. Один показ на монтаж, нарезку и правку:
+    пока их было два, у правки не было кнопок вовсе."""
+    path = _save(desk.brand(chat_id), reel)
+    reel.out = path
+    table.hold(chat_id, reel)
+    await reg.say("reels", chat_id, caption(reel), topic=topic)
+    await reg.send_file("reels", chat_id, path.read_bytes(), path.name,
+                        topic=topic)
+    await reg.say("reels", chat_id, "Принимаем?", kb=_kb(reel.theme["id"]),
+                  topic=topic)
+
+
 async def run(reg, chat_id: int, ask: str, topic: str = "reels") -> None:
     table.clear(chat_id)
+    _sweep()
 
     async def say(text: str) -> None:
         await reg.say("reels", chat_id, text, topic=topic)
@@ -1157,36 +1362,22 @@ async def run(reg, chat_id: int, ask: str, topic: str = "reels") -> None:
         return
 
     reel.theme.setdefault("chat_id", chat_id)
-    path = _save(desk.brand(chat_id), reel)
-    reel.out = path
-    table.hold(chat_id, reel)
-
-    await say(caption(reel))
-    await reg.send_file("reels", chat_id, path.read_bytes(), path.name,
-                        topic=topic)
-    await reg.say("reels", chat_id, "Принимаем?", kb=_kb(reel.theme["id"]),
-                  topic=topic)
+    await show(reg, chat_id, reel, topic)
 
 
 async def run_split(reg, chat_id: int, ask: str,
                     topic: str = "reels") -> None:
     """Длинная запись → пачка роликов, каждый со своей карточкой."""
     table.clear(chat_id)
-    b = desk.brand(chat_id)
+    _sweep()
 
     async def say(text: str) -> None:
         await reg.say("reels", chat_id, text, topic=topic)
 
     async def deliver(reel: Reel, last: bool) -> None:
-        # Исходник убираем после последнего: он один на всю пачку.
-        path = _save(b, reel, drop_source=last)
-        reel.out = path
-        table.hold(chat_id, reel)
-        await say(caption(reel))
-        await reg.send_file("reels", chat_id, path.read_bytes(), path.name,
-                            topic=topic)
-        await reg.say("reels", chat_id, "Принимаем?",
-                      kb=_kb(reel.theme["id"]), topic=topic)
+        # Исходник один на всю пачку и живёт до приёмки: по нему идёт
+        # пересборка субтитров.
+        await show(reg, chat_id, reel, topic)
 
     try:
         made = await split(chat_id, ask, say=say, deliver=deliver)
@@ -1217,22 +1408,65 @@ async def run_split(reg, chat_id: int, ask: str,
 
 async def revise(reg, chat_id: int, instruction: str,
                  topic: str = "reels") -> None:
-    reel = table.take(chat_id)
+    """Правка под карточкой. Разбираем ровно одно: слова субтитров.
+
+    Всё остальное в монтаже это съёмка, а не текст: подвинуть кадр или
+    перерезать паузы правкой словами нельзя, и обещать этого не будем.
+    А неверно расслышанное имя — самая частая претензия к готовому
+    ролику, и стоит она одного рендера.
+    """
+    reel = table.get(chat_id)
+
+    async def say(text: str) -> None:
+        await reg.say("reels", chat_id, text, topic=topic)
+
     if reel is None:
-        await reg.say("reels", chat_id, "Этот монтаж уже неактуален.",
-                      topic=topic)
+        await say("Этот монтаж уже неактуален.")
         return
+
+    pairs = fixes(instruction)
+    if not pairs:
+        table.await_fix(chat_id, reel)          # остаёмся в правках
+        await say_unsupported(reg, chat_id, topic)
+        return
+
     table.note(chat_id, reel.theme["id"], instruction)
-    # Правка перерезает то же видео заново — исходник для этого должен
-    # быть ещё на месте, поэтому revise не подходит, если человек уже
-    # прислал новый дубль поверх: тогда это новый /montage, а не правка.
-    await say_unsupported(reg, chat_id, topic)
+    b = desk.brand(chat_id)
+    # Словарь пополняется до всякой пересборки: даже если этот ролик
+    # пересобрать нечем, следующий дубль приедет уже с исправлением.
+    remember(b, pairs)
+    listed = ", ".join(f"<b>{src}</b> → {dst or '—'}" for src, dst in pairs[:5])
+    await say(f"Записала в словарь субтитров: {listed}.")
+
+    try:
+        reel = await refit(reel, b, say=say)
+    except NoRedo as e:
+        table.hold(chat_id, reel)
+        await say(f"Этот ролик пересобрать нечем: {e}. Словарь я запомнила — "
+                  "в следующем ролике эти слова приедут исправленными.")
+        return
+    except (NoRenderer, NotInstalled, footage.NoFfmpeg) as e:
+        table.hold(chat_id, reel)
+        await say(f"Не пересобралось: {e}")
+        return
+    except Exception as e:                                   # noqa: BLE001
+        log.exception("субтитры не пересобрались")
+        table.hold(chat_id, reel)
+        await say(f"Не пересобралось: {desk.reason(e)}")
+        return
+
+    await show(reg, chat_id, reel, topic)
 
 
 async def say_unsupported(reg, chat_id: int, topic: str) -> None:
-    await reg.say("reels", chat_id,
-                  "Текстовые правки монтажа пока не разбираю: пришлите "
-                  "новый дубль видео и повторите /montage.", topic=topic)
+    await reg.say(
+        "reels", chat_id,
+        "Из правок монтажа разбираю слова субтитров: напишите строкой "
+        "«как слышно -&gt; как правильно», например <code>клод -&gt; Claude</code> "
+        "или «клод» на «Claude». Можно несколько строк сразу, пустая правая "
+        "часть выбрасывает слово.\n\n"
+        "Всё остальное — кадр, паузы, обложку — правкой словами не соберу: "
+        "пришлите новый дубль и повторите «смонтируй».", topic=topic)
 
 
 async def on_callback(reg, chat_id: int, action: str,
@@ -1258,6 +1492,10 @@ async def on_callback(reg, chat_id: int, action: str,
     if reel is None:
         await say("Этот монтаж уже неактуален.")
         return
+
+    # Работа принята: дубль и кадр-обложку держали ради правки субтитров,
+    # больше они не нужны.
+    _drop(desk.brand(chat_id), reel)
 
     if action == "ok":
         await say(f"Принято. Файл лежит в <code>posts/{theme_id}-reel.mp4</code> "

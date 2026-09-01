@@ -828,3 +828,87 @@ async def cover_shot(video: Path, track: list[Focus], duration: float,
                     f"спокойный кадр ({calm:.1f} с)")
     at, face = best
     return Shot(at, await still(video, at, out), face, note)
+
+
+# ── словарь исправлений: что слышно → что сказано ─────────────────────
+#
+# Whisper слышит русскую речь, а бренд говорит именами: Claude, Remotion,
+# Anthropic, названия своих продуктов. В словаре модели их нет, и в
+# караоке приезжает «клод», «ремоушен», «антропик» — ошибка не случайная,
+# а одна и та же на каждом дубле. Значит лечится она таблицей бренда, а
+# не переслушиванием: модель здесь не зовут вовсе.
+#
+# Замена идёт по нормализованной форме (регистр, «ё», знаки препинания не
+# считаются) и по фразе целиком, а не по одному слову: «клод код» это два
+# слова транскрипта и одно имя. Тайминги фразы раскладываются поровну на
+# слова замены, хвостовой знак препинания остаётся от исходного слова —
+# иначе запятая в караоке пропадёт вместе с ошибкой.
+
+_WORD_RX = re.compile(r"\w+", re.U)
+_TAIL_RX = re.compile(r"[^\w]+$", re.U)
+MIN_WORD = 0.12           # столько держится слово, если тайминги схлопнулись
+
+
+def norm(text: str) -> str:
+    """Форма для сравнения: без регистра, «ё» и знаков препинания."""
+    return " ".join(_WORD_RX.findall(text.lower().replace("ё", "е")))
+
+
+def _respan(run: list[dict], dst: str) -> list[dict]:
+    """Слова замены на таймингах исходной фразы."""
+    parts = dst.split()
+    if not parts:
+        return []                       # пустая замена — слово выброшено
+    first = str(run[0]["text"])
+    if first[:1].isupper() and parts[0][:1].islower():
+        parts[0] = parts[0][0].upper() + parts[0][1:]
+    tail = _TAIL_RX.search(str(run[-1]["text"]))
+    if tail:
+        parts[-1] += tail.group()
+
+    start, end = float(run[0]["start"]), float(run[-1]["end"])
+    step = (end - start) / len(parts)
+    if step <= 0:
+        step = MIN_WORD
+    return [{"text": p, "start": round(start + i * step, 3),
+             "end": round(start + (i + 1) * step, 3)}
+            for i, p in enumerate(parts)]
+
+
+def relex(words: list[dict],
+          rules: list[tuple[str, str]]) -> tuple[list[dict], int]:
+    """Пословный транскрипт → он же с исправлениями словаря.
+
+    Вторым — сколько слов транскрипта поправлено: человеку это строка в
+    карточке, а не тихая правка у него за спиной.
+    """
+    table: dict[str, str] = {}
+    for src, dst in rules:
+        key = norm(src)
+        if key:
+            table[key] = dst.strip()
+    if not table or not words:
+        return list(words), 0
+
+    span = max(len(k.split()) for k in table)
+    out: list[dict] = []
+    fixed = 0
+    i = 0
+    while i < len(words):
+        hit = None
+        # Длинная фраза важнее короткой: «клод код» не должен разбираться
+        # правилом про «клод», иначе второе слово останется как слышно.
+        for n in range(min(span, len(words) - i), 0, -1):
+            key = norm(" ".join(str(w["text"]) for w in words[i:i + n]))
+            if key in table:
+                hit = (n, table[key])
+                break
+        if hit is None:
+            out.append(words[i])
+            i += 1
+            continue
+        n, dst = hit
+        out.extend(_respan(words[i:i + n], dst))
+        fixed += n
+        i += n
+    return out, fixed

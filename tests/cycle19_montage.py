@@ -406,5 +406,99 @@ def main() -> None:
               20.0, 4)[-1] > 12.0)
 
 
+    # ── 25. словарь субтитров ─────────────────────────────────────────
+    #
+    # Расшифровка слышит речь, а не имена: «клод» вместо Claude приезжает
+    # на каждом дубле одинаково. Проверяем ровно арифметику замены —
+    # whisper сюда не зовём.
+    print("\n25. Словарь правит расслышанное")
+    heard = [{"text": "Клод", "start": 0.0, "end": 0.5},
+             {"text": "код,", "start": 0.5, "end": 1.0},
+             {"text": "это", "start": 1.0, "end": 1.3},
+             {"text": "ээ", "start": 1.3, "end": 1.5},
+             {"text": "ремоушен.", "start": 1.5, "end": 2.0}]
+    fixed, n = footage.relex(heard, [("клод код", "Claude Code"),
+                                     ("ремоушен", "Remotion"), ("ээ", "")])
+    said = [w["text"] for w in fixed]
+    check("фраза целиком важнее слова",
+          said[:2] == ["Claude", "Code,"], str(said))
+    check("заглавная буква исходного слова осталась",
+          said[0] == "Claude", said[0])
+    check("запятая не пропала вместе с ошибкой", said[1].endswith(","),
+          said[1])
+    check("пустая замена выбрасывает слово", "ээ" not in said, str(said))
+    check("поправленные слова посчитаны", n == 4, str(n))
+    check("тайминги фразы не разъехались",
+          fixed[0]["start"] == 0.0 and fixed[1]["end"] == 1.0, str(fixed[:2]))
+    check("без словаря транскрипт не трогается",
+          footage.relex(heard, []) == (heard, 0))
+    check("«ё» и регистр сравнению не мешают",
+          footage.relex([{"text": "Всё", "start": 0.0, "end": 0.4}],
+                        [("все", "всё-таки")])[1] == 1)
+
+    print("\n26. Правка человека разбирается в пары замен")
+    check("стрелка", montage.fixes("клод -> Claude") == [("клод", "Claude")],
+          str(montage.fixes("клод -> Claude")))
+    check("стрелка знаком", montage.fixes("клод → Claude")
+          == [("клод", "Claude")])
+    check("словами в кавычках",
+          montage.fixes("замени «ремоушен» на «Remotion»")
+          == [("ремоушен", "Remotion")],
+          str(montage.fixes("замени «ремоушен» на «Remotion»")))
+    check("несколько строк сразу",
+          len(montage.fixes("клод -> Claude\n- ээ ->")) == 2,
+          str(montage.fixes("клод -> Claude\n- ээ ->")))
+    check("пустая правая часть это выбросить",
+          montage.fixes("ээ ->") == [("ээ", "")], str(montage.fixes("ээ ->")))
+    check("обычная просьба заменой не считается",
+          montage.fixes("подвинь заголовок на две строки ниже") == [],
+          str(montage.fixes("подвинь заголовок на две строки ниже")))
+
+    print("\n27. Словарь живёт в папке бренда")
+    b3 = _brand()
+    b3.path(montage.LEXICON).unlink(missing_ok=True)
+    check("нет файла — нет замен", montage.lexicon(b3) == [])
+    montage.remember(b3, [("клод", "Claude"), ("ээ", "")])
+    montage.remember(b3, [("Клод", "Claude Code")])   # то же слово второй раз
+    got = montage.lexicon(b3)
+    check("замены записаны", ("клод", "Claude") in got, str(got))
+    check("пустая замена пережила запись", ("ээ", "") in got, str(got))
+    check("дубль слова не заводится дважды", len(got) == 2, str(got))
+    check("шапка файла не читается как замена",
+          all("Словарь" not in src for src, _ in got), str(got))
+
+    print("\n28. Правка пересобирает субтитры, а не расшифровку")
+    reel = montage.Reel(theme={"id": "t9"}, video=_brand().path("нет.mov"))
+    reel.subs = list(heard)
+    reel.findings = ["что-то не сошлось", montage.LEX_NOTE + "1"]
+    montage._relex(reel, [("ремоушен", "Remotion")])
+    check("страницы собраны из исправленных слов",
+          "Remotion." in [w["text"] for p in reel.pages for w in p["words"]],
+          str(reel.pages))
+    check("услышанное на столе осталось", reel.subs == heard, str(reel.subs[:1]))
+    check("прошлый счёт правок не задвоился",
+          sum(f.startswith(montage.LEX_NOTE) for f in reel.findings) == 1,
+          str(reel.findings))
+    check("чужая находка не потерялась",
+          "что-то не сошлось" in reel.findings, str(reel.findings))
+
+
+    print("\n29. Замена словами не собирает ролик заново")
+    from bots.router import resolve as _resolve
+    check("«поправь субтитры» уходит монтажу, а не Редактору",
+          _resolve("поправь субтитры: клод -> Claude", None, {}).role
+          == "montage",
+          _resolve("поправь субтитры: клод -> Claude", None, {}).role)
+    montage.table.clear(CHAT)
+    check("без карточки на столе это не правка",
+          not montage.wants_relex(CHAT, "клод -> Claude"))
+    montage.table.hold(CHAT, reel)
+    check("с карточкой на столе замена это правка",
+          montage.wants_relex(CHAT, "клод -> Claude"))
+    check("«смонтируй» правкой не считается",
+          not montage.wants_relex(CHAT, "смонтируй ролик"))
+    montage.table.clear(CHAT)
+
+
 main()
 raise SystemExit(report())
