@@ -50,6 +50,10 @@ _await_events: dict[int, tuple[str, str, str]] = {}
 # (`strategy.wants_fix`), у моста роли-хозяина нет — состояние живёт здесь.
 _await_plan_fix: dict[int, str] = {}
 
+# То же для текста, собранного мостом: chat_id → (тема, топик). Старый
+# Редактор держит своё ожидание в `Desk`, у моста дома для него нет.
+_await_post_fix: dict[int, tuple[str, str]] = {}
+
 
 def topic_key_of(chat_id: int, thread_id: int | None) -> str | None:
     if thread_id is None:
@@ -169,12 +173,40 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
                                f"{res.error}", topic=tkey)
             return
 
-        # План, посаженный в базу, согласуется теми же тремя кнопками, что
-        # и план старого Стратега: батч помнит `strategy`, дом у него один.
-        if res.landed_ids:
-            strategy.remember(chat_id, res.landed_ids)
-        await registry.say("assistant", chat_id, res.text, topic=tkey,
-                           kb=strategy.kb("bplan") if res.landed_ids else None)
+        # Посаженное согласуется теми же кнопками, что и у старых ролей.
+        # Кнопка без посадки была бы обманом: соглашаться не с чем, пока
+        # в базе ничего не изменилось.
+        #
+        # Кнопки выбираются по тому, что **село**, а не по тому, какой
+        # workflow объявлен в шапке задачи. Director вправе свернуть план
+        # до одного текста, и в прогоне 2026-08-31-plan-04 так и вышло:
+        # задача звалась `plan`, отработал Редактор, а кнопок под текстом
+        # не было — их искали по слову «post», которого в шапке не стояло.
+        kb = None
+        if res.plan_ids:
+            strategy.remember(chat_id, res.plan_ids)
+            kb = strategy.kb("bplan")
+        elif len(res.post_ids) == 1:
+            kb = editor.kb(res.post_ids[0], "bpost")
+
+        await registry.say("assistant", chat_id, res.text, topic=tkey, kb=kb)
+
+        # Макет уезжает человеку картинками и файлами, а не строкой в
+        # чате: показывает его тот же `design.show`, что и у старого
+        # Дизайнера, поэтому и кнопки под ним те же самые.
+        if res.landed_obj is not None:
+            await design.show(registry, chat_id, res.landed_obj,
+                              topic=tkey or "design")
+
+        # Текстов может быть несколько, а клавиатура у сообщения одна:
+        # тогда каждая тема получает свою строку со своими кнопками.
+        if len(res.post_ids) > 1:
+            for tid in res.post_ids:
+                await registry.say(
+                    "assistant", chat_id,
+                    f"Текст по теме <code>{tid}</code> записан, "
+                    "тема в статусе draft.",
+                    topic=tkey, kb=editor.kb(tid, "bpost"))
 
         tail = [f"Задача <code>{task_id}</code>, {res.secs} с"]
         if res.cost is not None:
@@ -281,6 +313,15 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
                  "Хорошо, неделя без событий — планирую без прогрева."),
                 topic=ekey)
             await bridge_task(chat_id, pending_ask, wf, ekey)
+            return
+
+        # Правка к тексту, собранному мостом. Тот же порядок, что у плана:
+        # договорить с субагентом нельзя, поэтому правка это новый прогон.
+        if chat_id in _await_post_fix:
+            tid, pkey = _await_post_fix.pop(chat_id)
+            await bridge_task(chat_id,
+                              f"Правка к тексту темы {tid}: {raw}",
+                              "post", pkey)
             return
 
         # Правка к плану, собранному мостом. Пересборка это новый прогон:
@@ -469,6 +510,42 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
                     chat_id, "Прошлый батч не подошёл. Дай другие темы: "
                              "другие углы и другие заходы, не перестановку "
                              "тех же.", "plan", tkey)
+            return
+
+        if kind == "bpost":
+            tkey = (topic_key_of(chat_id, cb.message.message_thread_id)
+                    or "review")
+            act, _, tid = action.partition(":")
+            theme = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
+                           tid, chat_id)
+            if theme is None:
+                await registry.say("assistant", chat_id,
+                                   "Этой темы уже нет в плане.", topic=tkey)
+                return
+            if act == "fix":
+                _await_post_fix[chat_id] = (tid, tkey)
+                await registry.say(
+                    "assistant", chat_id,
+                    "Напиши одним сообщением, что поправить. Перепишу "
+                    "текст — это новый прогон, займёт несколько минут.",
+                    topic=tkey)
+                return
+            if act not in {"ok", "design"}:
+                return
+            # «В дизайн» это и приёмка текста тоже: Дизайнер работает
+            # только с `ready`, верстать неутверждённое незачем.
+            desk.ready(chat_id, tid)
+            if act == "ok":
+                await registry.say(
+                    "assistant", chat_id,
+                    f"Готово, <code>{tid}</code> в статусе ready. "
+                    + editor.handoff(dict(theme)), topic=tkey)
+                return
+            await registry.say("assistant", chat_id,
+                               f"Приняла текст <code>{tid}</code>, "
+                               "передаю в вёрстку.", topic=tkey)
+            await bridge_task(chat_id, f"свёрстай макет по теме {tid}",
+                              "design", "design")
             return
 
         if kind == "post":

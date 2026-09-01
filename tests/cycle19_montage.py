@@ -297,6 +297,114 @@ def main() -> None:
           str(beats))
     check("лишних блоков не появилось", len(beats) == 2, str(list(beats)))
 
+    # ── 20. лицо на обложке ───────────────────────────────────────────
+    #
+    # Требование бренда: кадр обложки — с человеком, и текст не ложится
+    # ему на лицо. Сам детектор лиц тут не зовём (это swift и полсекунды
+    # на кадр), проверяем арифметику вокруг него: кроп ведётся за лицом,
+    # блок текста уходит от лица, и обе работы отдают то, что понимает
+    # композиция.
+    print("\n20. Кроп ведётся за лицом")
+    canvas = (1080, 1920)
+    # Кадр записи экрана 2940×1912: на холст 9:16 влезает по высоте, по
+    # ширине теряет две трети. Лицо у левого края при кропе по центру
+    # уехало бы за границу.
+    left = footage.Face(0.08, 0.30, 0.10, 0.16)
+    fx, fy, top, bottom = montage.cover_crop(left, (2940, 1912), canvas)
+    check("кроп ушёл к левому краю", fx < 0.25, f"{fx:.3f}")
+    check("по высоте кадр не двигали", abs(fy - 0.5) < 0.01, f"{fy:.3f}")
+    check("лицо осталось в холсте", 0 < top < bottom < 1,
+          f"{top:.3f}–{bottom:.3f}")
+
+    mid = footage.Face(0.45, 0.30, 0.10, 0.16)
+    fx2, _, _, _ = montage.cover_crop(mid, (2940, 1912), canvas)
+    check("лицо по центру кроп не сдвигает", abs(fx2 - 0.5) < 0.06,
+          f"{fx2:.3f}")
+
+    vert = footage.Face(0.30, 0.10, 0.30, 0.20)
+    fxv, fyv, topv, botv = montage.cover_crop(vert, (1080, 1920), canvas)
+    check("вертикальный дубль не кропается",
+          abs(fxv - 0.5) < 0.01 and abs(fyv - 0.5) < 0.01, f"{fxv} {fyv}")
+    check("полоса лица совпала с рамкой",
+          abs(topv - 0.10) < 0.01 and abs(botv - 0.30) < 0.01,
+          f"{topv:.3f}–{botv:.3f}")
+
+    print("\n21. Текст обложки уходит от лица")
+    lines = montage.cover_lines("Я перестала писать посты руками",
+                                canvas, dict(montage.COVER_DEFAULTS))
+    block = montage._block_height(lines, 0, False)
+
+    plain = montage.place_cover(lines, canvas, None)
+    check("без лица блок остаётся внизу", plain["anchor"] == "bottom",
+          str(plain["anchor"]))
+    check("отступ по ТЗ", plain["inset"] == round(1920 * montage.COVER_INSET),
+          str(plain["inset"]))
+
+    # Лицо в верхней трети: низ свободен, блок остаётся внизу.
+    high = montage.place_cover(lines, canvas, (0.10, 0.30))
+    check("лицо сверху — текст внизу", high["anchor"] == "bottom",
+          str(high["anchor"]))
+    check("текст не задел лицо",
+          1920 - high["inset"] - block > 0.30 * 1920,
+          f"{high['inset']} {block:.0f}")
+
+    # Лицо в нижней половине: внизу места нет, блок поднимается наверх.
+    low = montage.place_cover(lines, canvas, (0.55, 0.95))
+    check("лицо снизу — текст наверх", low["anchor"] == "top",
+          str(low["anchor"]))
+    check("блок кончается выше лица",
+          low["inset"] + montage._block_height(low["lines"], 0, False)
+          < 0.55 * 1920, f"{low['inset']}")
+    check("на ужатие ушли не все строки", len(low["lines"]) == len(lines),
+          str(len(low["lines"])))
+
+    # Лицо во весь кадр: увести текст некуда, и это говорится строкой.
+    huge = montage.place_cover(lines, canvas, (0.03, 0.99))
+    check("лицо во весь кадр — честная строка", bool(huge["note"]),
+          str(huge["note"]))
+
+    print("\n22. Размытие «авто» слушает лицо")
+    reel = montage.Reel(theme={"id": "t1"}, video=harness.TMP / "x.mp4")
+    reel.still = harness.TMP / "still.png"
+    reel.cover = reel.still
+    reel.spec = dict(montage.COVER_DEFAULTS, blur="авто")
+    reel.face = footage.Face(0.4, 0.2, 0.2, 0.2)
+    check("кадр с лицом не размываем", not montage._blur(reel))
+    reel.face = None
+    check("кадр без лица размываем", montage._blur(reel))
+    reel.spec = dict(montage.COVER_DEFAULTS, blur="нет")
+    check("прямой запрет сильнее авто", not montage._blur(reel))
+
+    print("\n23. Кадр-проба берётся из паузы, а не из речи")
+    pauses = [(0.2, 1.4), (4.0, 5.2), (9.0, 9.6), (12.0, 14.0)]
+    got = footage.quiet_times(pauses)
+    check("проба поднята к первой секунде", 1.0 in got and 0.8 not in got,
+          str(got))
+    check("короткая пауза не годится", 9.3 not in got, str(got))
+    check("пауза, кончающаяся до первой секунды, не годится",
+          footage.quiet_times([(0.0, 1.1)]) == [],
+          str(footage.quiet_times([(0.0, 1.1)])))
+    check("проба стоит посередине паузы",
+          footage.quiet_times([(10.0, 11.4)]) == [10.7],
+          str(footage.quiet_times([(10.0, 11.4)])))
+    check("середина длинной паузы взята", 13.0 in got, str(got))
+    check("окно куска сужает список",
+          footage.quiet_times(pauses, (10.0, 20.0)) == [13.0],
+          str(footage.quiet_times(pauses, (10.0, 20.0))))
+    check("без пауз список пуст", footage.quiet_times([]) == [])
+
+    print("\n24. Рамки лиц разбираются из ответа детектора")
+    raw = {"faces": [{"x": 0.3, "y": 0.2, "w": 0.2, "h": 0.25, "conf": 0.9},
+                     {"x": 0.9, "y": 0.9, "w": 0.01, "h": 0.01, "conf": 0.9},
+                     {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2, "conf": 0.1}]}
+    got = footage._face_of(raw)
+    check("лицо в кадре осталось одно", len(got) == 1, str(got))
+    check("центр посчитан", abs(got[0].cx - 0.4) < 0.01, str(got[0].cx))
+    check("детектор ищет по всему дублю",
+          montage.footage._spread(
+              [footage.Focus(t / 2, 0.5, 0.5, w=t) for t in range(0, 40)],
+              20.0, 4)[-1] > 12.0)
+
 
 main()
 raise SystemExit(report())

@@ -285,8 +285,13 @@ async def main() -> None:
 
     res = await bridge.run(tid)
     check("прогон успешен", res.ok, res.error)
-    check("текст прочитан из final.md", res.text == "План недели готов.",
-          res.text[:60])
+    check("текст прочитан из final.md",
+          res.text.startswith("План недели готов."), res.text[:60])
+    # `strategy.md` здесь без машинного контракта, значит план не сел.
+    # Молчание об этом хуже неполного ответа: человек прочитал бы «план
+    # готов» и пошёл бы искать его в базе, где ничего нет.
+    check("несостоявшаяся посадка названа человеку",
+          "контракт" in res.text.lower(), res.text[:120])
     check("стоимость снята из JSON", res.cost == 0.42, str(res.cost))
     check("session_id снят", res.session_id == "abc", res.session_id)
     # Список читается человеком как «что отдали роли». Свои файлы Python в

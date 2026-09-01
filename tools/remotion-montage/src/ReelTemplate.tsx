@@ -219,6 +219,9 @@ export const ReelTemplate: React.FC<ReelProps> = (props) => {
                   width: '100%',
                   height: '100%',
                   objectFit: 'cover',
+                  objectPosition: `${(props.coverFocus.x * 100).toFixed(
+                    1,
+                  )}% ${(props.coverFocus.y * 100).toFixed(1)}%`,
                   ...(props.coverBlur
                     ? {filter: 'blur(16px)', scale: 1.12}
                     : {}),
@@ -253,6 +256,8 @@ export const ReelTemplate: React.FC<ReelProps> = (props) => {
             font={props.coverFont}
             weight={props.coverWeight}
             titleSize={props.titleSize}
+            anchor={props.coverAnchor}
+            inset={props.coverInset || props.height * 0.11}
           />
         </Sequence>
       ) : null}

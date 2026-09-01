@@ -19,6 +19,9 @@ export const Root: React.FC = () => {
       defaultProps={{
         videoPath: '',
         coverBlur: false,
+        coverFocus: {x: 0.5, y: 0.5},
+        coverAnchor: 'bottom',
+        coverInset: 0,
         coverLines: [],
         coverFont: 'Manrope',
         coverWeight: 800,

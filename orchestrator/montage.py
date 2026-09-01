@@ -106,6 +106,12 @@ class Reel:
     pan: list[dict[str, float]] = field(default_factory=list)
     still: Path | None = None
     still_at: float = 0.0
+    quiet: list[tuple[float, float]] = field(default_factory=list)
+    words: list[footage.Word] = field(default_factory=list)
+    face: footage.Face | None = None
+    crop: tuple[float, float] = (0.5, 0.5)
+    anchor: str = "bottom"
+    inset: int = 0
     pages: list[dict[str, Any]] = field(default_factory=list)
     out: Path | None = None
     findings: list[str] = field(default_factory=list)
@@ -272,13 +278,24 @@ def _cover_spec(b, plat: str, fmt: str) -> tuple[dict[str, str], str | None]:
 # размытый фон читается всегда, а резкий кадр с мелким чужим текстом под
 # заголовком — нет. Тихая догадка, ошибающаяся в половине случаев, хуже
 # честной настройки: макет с нечитаемым заголовком выглядит рабочим.
+#
+# `blur: авто` в ТЗ стоял с самого начала, а кода за ним не было — он
+# молча означал «размывать». Теперь означает ровно то, что написано:
+# лицо в кадре найдено — не размываем (ради лица кадр и выбирался),
+# не найдено — размываем, потому что под текстом остался интерфейс.
+# Это уже не догадка по светлоте: детектор лиц либо нашёл лицо, либо нет.
+
+AUTO_BLUR = ("авто", "auto")
+NO_BLUR = ("нет", "no", "false", "0")
 
 
 def _blur(reel: Reel, at: float = 0.0) -> bool:
     if not (reel.still and reel.cover == reel.still):
         return False
     mode = (reel.spec.get("blur") or "да").lower()
-    return mode not in ("нет", "no", "false", "0")
+    if mode in AUTO_BLUR:
+        return reel.face is None
+    return mode not in NO_BLUR
 
 
 # ── раскладка обложки ─────────────────────────────────────────────────
@@ -393,6 +410,124 @@ def cover_lines(hook: str, size: tuple[int, int],
     return lines
 
 
+# ── лицо на обложке ───────────────────────────────────────────────────
+#
+# Требование бренда, а не украшение: обложка рилса это плитка в сетке
+# профиля, её листают по лицу, и заголовок поверх лица портит её молча.
+# Отсюда две работы, обе арифметические.
+#
+# Первая — кроп. Кадр из дубля ложится на холст рилса через `object-fit:
+# cover`, и запись экрана 2940×1912 теряет по бокам две трети ширины. При
+# кропе по центру человек, сидящий не по центру, уезжает за край: кадр «с
+# лицом» превращается в кадр со стеной. Поэтому кроп ведётся за лицом —
+# `coverFocus`, та же точка, что `object-position` в CSS.
+#
+# Вторая — куда лечь тексту. Блок хука по умолчанию стоит внизу, и на
+# портретном кадре это ровно то место, где лицо. Считаем высоту блока и
+# кладём его в свободную полосу: под лицом, если она больше, над лицом,
+# если под ним не помещается. Не помещается нигде — ужимаем кегль тем же
+# коэффициентом, что и `cover_lines`, и если и это не спасает, говорим
+# человеку строкой, а не отдаём обложку с текстом по лицу.
+
+FACE_PAD = 0.035          # доля высоты холста: воздух между лицом и текстом
+COVER_INSET = 0.11        # отступ блока от низа, как в ТЗ обложки
+COVER_EDGE = 0.05         # ближе к краю холста блок не подводим
+TITLE_GAP = 18            # отступ под заголовком темы, как в Cover.tsx
+TITLE_LINE = 1.25
+BRAND_BLOCK = 52          # строка бренда с отступом, как в Cover.tsx
+
+
+def cover_crop(face: footage.Face, src: tuple[int, int],
+               canvas: tuple[int, int]) -> tuple[float, float, float, float]:
+    """Точка кропа за лицом и полоса лица на холсте.
+
+    Отдаёт `(focus_x, focus_y, top, bottom)`: первые два — доли для
+    `object-position`, вторые — где лицо оказалось на холсте, в долях его
+    высоты. Считается ровно то, что потом сделает браузер, поэтому
+    правило живёт здесь, а не в композиции.
+    """
+    sw, sh = src
+    cw, ch = canvas
+    if sw <= 0 or sh <= 0:
+        return 0.5, 0.5, face.y, face.y + face.h
+    scale = max(cw / sw, ch / sh)
+    dw, dh = sw * scale, sh * scale
+
+    def follow(size: float, box: float, centre: float) -> float:
+        """Доля object-position, при которой центр лица в центре холста."""
+        room = box - size                      # ≤ 0, если кадр обрезается
+        if room >= 0:
+            return 0.5
+        return min(1.0, max(0.0, (box / 2 - centre * size) / room))
+
+    fx = follow(dw, cw, face.cx)
+    fy = follow(dh, ch, face.cy)
+    top = ((ch - dh) * fy + face.y * dh) / ch
+    return fx, fy, top, top + face.h * dh / ch
+
+
+def _block_height(lines: list[dict[str, Any]], title_px: int,
+                  brand: bool) -> float:
+    """Высота блока обложки в пикселях: заголовок, строки хука, подпись."""
+    total = sum(l["size"] * LINE_HEIGHT for l in lines)
+    if title_px:
+        total += title_px * TITLE_LINE + TITLE_GAP
+    if brand:
+        total += BRAND_BLOCK
+    return total
+
+
+def place_cover(lines: list[dict[str, Any]], canvas: tuple[int, int],
+                band: tuple[float, float] | None, *, title_px: int = 0,
+                brand: bool = False) -> dict[str, Any]:
+    """Куда поставить блок обложки, чтобы он не лёг на лицо.
+
+    `band` — полоса лица на холсте в долях высоты. Нет лица — блок стоит
+    внизу, как стоял. Отдаёт якорь, отступ от его края, возможно ужатые
+    строки и строку «не сошлось», если места не хватило нигде.
+    """
+    h = canvas[1]
+    out: dict[str, Any] = {"anchor": "bottom", "inset": round(h * COVER_INSET),
+                           "lines": lines, "note": None}
+    if not band or not lines:
+        return out
+
+    edge = h * COVER_EDGE
+    top, bottom = band[0] * h, band[1] * h
+    below = (h - edge) - (bottom + h * FACE_PAD)
+    above = (top - h * FACE_PAD) - edge
+    block = _block_height(lines, title_px, brand)
+
+    if block <= below:
+        # Низ остаётся низом: отступ по ТЗ, если он не наезжает на лицо.
+        room = h - (bottom + h * FACE_PAD) - block
+        out["inset"] = round(min(h * COVER_INSET, max(edge, room)))
+        return out
+    if block <= above:
+        out["anchor"] = "top"
+        room = top - h * FACE_PAD - block
+        out["inset"] = round(min(h * COVER_INSET, max(edge, room)))
+        return out
+
+    # Не помещается целиком — ужимаем блок в ту полосу, что больше.
+    room = max(below, above)
+    if room > 0:
+        k = room / block
+        small = [dict(l, size=int(max(COVER_MIN, l["size"] * k)))
+                 for l in lines]
+        if _block_height(small, title_px, brand) <= room:
+            out["lines"] = small
+            out["anchor"] = "bottom" if below >= above else "top"
+            out["inset"] = round(edge)
+            return out
+
+    out["note"] = ("лицо занимает почти весь кадр — текст обложки ужать "
+                   "некуда, он лёг поверх. Стоит снять дубль, где лицо не "
+                   "по центру, или задать обложку у Дизайнера")
+    return out
+
+
+
 # ── разбор сценария: хук и CTA из notes-файла Редактора Reels ────────
 
 BEAT_RX = re.compile(
@@ -482,6 +617,9 @@ async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
         "videoPath": video_name,
         "coverPath": cover_name,
         "coverBlur": _blur(reel),
+        "coverFocus": {"x": reel.crop[0], "y": reel.crop[1]},
+        "coverAnchor": reel.anchor,
+        "coverInset": reel.inset or round(h * COVER_INSET),
         "title": (reel.title if 0 < len(reel.title) <= TITLE_LIMIT else None),
         "hook": reel.hook or None,
         "coverLines": reel.lines,
@@ -569,6 +707,7 @@ async def analyse(reel: Reel, *, say=None) -> None:
     quiet: list[tuple[float, float]] = []
     if reel.probe.has_audio:
         quiet = await footage.silences(reel.video)
+        reel.quiet = quiet
     else:
         reel.findings.append("в дубле нет звуковой дорожки: ни субтитров, "
                              "ни нарезки пауз — в кадре останется титул хука")
@@ -642,18 +781,58 @@ async def _intro(reel: Reel, b, size: tuple[int, int]) -> None:
             f"обложка <code>{cover.name}</code> свёрстана под другой холст — "
             "на первый кадр взят кадр из дубля")
 
-    at = footage.calm_at(reel.focus)
+    dur = reel.probe.duration if reel.probe else 0.0
     try:
-        reel.still = await footage.still(
-            reel.video, at, TOOLS / f".still-{tid}.png")
-        reel.still_at = at
-        reel.cover = reel.still
-        if not cover:
-            reel.findings.append(
-                f"обложки от Дизайнера нет — на первый кадр взят самый "
-                f"спокойный кадр дубля ({at:.1f} с)")
+        shot = await footage.cover_shot(
+            reel.video, reel.focus, dur, TOOLS / f".still-{tid}.png",
+            quiet=reel.quiet)
     except footage.NoFfmpeg as e:
         reel.findings.append(f"кадр на обложку не снялся: {e}")
+        return
+
+    reel.still = shot.path
+    reel.still_at = shot.at
+    reel.cover = shot.path
+    reel.face = shot.face
+    if shot.note:
+        reel.findings.append(shot.note)
+    elif not cover:
+        reel.findings.append(
+            f"обложки от Дизайнера нет — на первый кадр взят кадр дубля с "
+            f"лицом в кадре ({shot.at:.1f} с)")
+
+    _place(reel, size)
+
+
+def _place(reel: Reel, size: tuple[int, int]) -> None:
+    """Кроп за лицом и блок текста мимо лица.
+
+    Требование бренда к обложке рилса: кадр берётся с человеком, и слова
+    не ложатся ему на лицо. Обе работы считает код — модели здесь нет
+    вовсе, а промахнувшийся мимо лица заголовок человек замечает уже на
+    готовом ролике.
+    """
+    band = None
+    if reel.face and reel.probe:
+        fx, fy, top, bottom = cover_crop(
+            reel.face, (reel.probe.width, reel.probe.height), size)
+        reel.crop = (round(fx, 4), round(fy, 4))
+        band = (top, bottom)
+
+    shown = reel.title if 0 < len(reel.title) <= TITLE_LIMIT else ""
+    spot = place_cover(
+        reel.lines, size, band,
+        title_px=title_size(shown, size[0], reel.spec) if shown else 0,
+        brand=bool(reel.theme.get("brand_name")))
+    reel.lines = spot["lines"]
+    reel.anchor = spot["anchor"]
+    reel.inset = spot["inset"]
+    if spot["note"]:
+        reel.findings.append(spot["note"])
+    elif band and reel.anchor == "top":
+        reel.findings.append(
+            "лицо в нижней половине кадра — текст обложки поднят наверх, "
+            "чтобы не лечь на него")
 
 
 async def build(chat_id: int, ask: str, *, say=None) -> Reel:
@@ -837,9 +1016,6 @@ async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]
                 f"после вырезанных пауз кусок стал коротким: "
                 f"{cuts.total:.0f} с")
 
-        # Обложка — спокойный кадр внутри самого куска, а не начала записи.
-        at = footage.calm_at([f for f in track if frag.start <= f.t <= frag.end]
-                             or track, window=frag.end)
         if say:
             await say(f"Собираю {n} из {len(frags)}: <b>{frag.hook}</b> "
                       f"({_clock(frag.start)}–{_clock(frag.end)}, "
@@ -847,10 +1023,17 @@ async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]
 
         piece = TOOLS / f".clip-{tid}.mp4"
         try:
-            reel.still = await footage.still(
-                video, at, TOOLS / f".still-{tid}.png")
-            reel.still_at = at
-            reel.cover = reel.still
+            # Обложка — кадр внутри самого куска, а не начала записи, и
+            # по тому же правилу, что у целого дубля: сначала кадр с
+            # лицом, иначе самый спокойный.
+            shot = await footage.cover_shot(
+                video, track, probe.duration, TOOLS / f".still-{tid}.png",
+                window=(frag.start, frag.end), quiet=quiet)
+            reel.still, reel.still_at = shot.path, shot.at
+            reel.cover, reel.face = shot.path, shot.face
+            if shot.note:
+                reel.findings.append(shot.note)
+            _place(reel, size)
 
             # Рендерим вырезанный кусок, а не всю запись: перемотка к
             # четырнадцатой минуте на каждый кадр роняет браузер.

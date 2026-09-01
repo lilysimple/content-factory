@@ -34,7 +34,8 @@ from harness import CHAT, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
-from orchestrator import bridge, desk, research, sources, strategy  # noqa: E402
+from orchestrator import (bridge, design, desk, research,           # noqa: E402
+                          sources, strategy)
 from storage import db                                            # noqa: E402
 
 db.init(cfg.db_path)
@@ -290,7 +291,7 @@ async def main() -> None:
         + json.dumps(contract, ensure_ascii=False) + "\n```\n", encoding="utf-8")
 
     res = bridge.Result(task_id=task_id)
-    note = bridge.harvest(res)
+    note = await bridge.harvest(res)
 
     check("посадка что-то сказала", bool(note), note)
     rows = db.q("SELECT * FROM themes WHERE chat_id = ? AND date = ?",
@@ -320,7 +321,7 @@ async def main() -> None:
                             brand_slug=b.slug, brand_path=str(b.root))
     (bridge.TASKS_DIR / t2 / "strategy.md").write_text(
         "# План\n\nпроза без контракта\n", encoding="utf-8")
-    note = bridge.harvest(bridge.Result(task_id=t2))
+    note = await bridge.harvest(bridge.Result(task_id=t2))
     check("контракт не найден — сказано, а не молчание",
           "контракт" in note.lower(), note)
 
@@ -329,29 +330,222 @@ async def main() -> None:
                             brand_slug=b.slug, brand_path=str(b.root))
     (bridge.TASKS_DIR / t3 / "strategy.md").write_text(
         "```json\n{ это не json }\n```\n", encoding="utf-8")
-    note = bridge.harvest(bridge.Result(task_id=t3))
+    note = await bridge.harvest(bridge.Result(task_id=t3))
     check("битый json назван", "разобрал" in note.lower(), note)
 
     free_bridge()
     t4 = bridge.create_task(CHAT, "сводка", workflow="research",
                             today="2026-08-31", brand_slug=b.slug,
                             brand_path=str(b.root))
-    check("не-план не сажается", bridge.harvest(bridge.Result(task_id=t4)) == "",
+    check("не-план не сажается", await bridge.harvest(bridge.Result(task_id=t4)) == "",
           "сажать план из сводки нечего")
 
     free_bridge()
     t5 = bridge.create_task(CHAT, "план", workflow="plan", today="2026-08-31",
                             brand_slug=b.slug, brand_path=str(b.root))
     check("нет артефакта — нет посадки",
-          bridge.harvest(bridge.Result(task_id=t5)) == "",
+          await bridge.harvest(bridge.Result(task_id=t5)) == "",
           "файла нет значит субагент не отработал")
 
-    # ── 7б. События недели спрашиваются до запуска ────────────────────
+    # ── 7а. Посадка текста Редактора ──────────────────────────────────
+    #
+    # Кнопка «Ок» под текстом, которого нет в заводе, это обман: человек
+    # соглашается, а соглашаться не с чем. Значит текст должен садиться
+    # тем же кодом, что у старого Редактора, и валидатор здесь настоящий
+    # гейт, а не самопроверка субагента.
+    print("\n7а. Посадка текста")
+
+    tid = "2026-09-09-telegram-77"
+    with db.tx() as c:
+        c.execute("DELETE FROM themes WHERE id = ?", (tid,))
+        c.execute("INSERT INTO themes (id, chat_id, date, plat, format, goal, "
+                  "status, title, hook, why) VALUES "
+                  "(?,?,?,?,?,'warm','idea',?,?,?)",
+                  (tid, CHAT, "2026-09-09", "telegram", "пост",
+                   "тема под текст", "хук", "кому и зачем"))
+
+    clean = ("Первая строка держит сама.\n\nВторая мысль про конкретный "
+             "вечер и открытый файл. Дальше вывод, что делать завтра.")
+
+    def post_task(contract: dict, name: str = "post.md") -> bridge.Result:
+        free_bridge()
+        t = bridge.create_task(CHAT, "напиши пост", workflow="post",
+                               today="2026-08-31", brand_slug=b.slug,
+                               brand_path=str(b.root))
+        (bridge.TASKS_DIR / t / name).write_text(
+            "текст для человека\n\n```json\n"
+            + json.dumps(contract, ensure_ascii=False) + "\n```\n",
+            encoding="utf-8")
+        return bridge.Result(task_id=t)
+
+    res = post_task({"theme_id": tid, "text": clean,
+                     "checks": {"voice": 5}, "hold": "", "breaks": "",
+                     "notes": ["ссылку на вебинар уточнить"]})
+    note = await bridge.harvest(res)
+    row = db.one("SELECT * FROM themes WHERE id = ?", tid)
+
+    check("тема переведена в draft", row["status"] == "draft", row["status"])
+    check("путь к тексту записан", row["asset"] == f"posts/{tid}.md",
+          row["asset"])
+    check("текст лёг в папку бренда", clean.split("\n")[0] in b.read(row["asset"]))
+    check("id темы известен наружу для кнопок", res.landed_ids == [tid],
+          str(res.landed_ids))
+    check("пометки Редактора не проглочены", "вебинар" in note, note)
+
+    # ── 7б. Валидатор голоса сильнее самопроверки субагента ───────────
+    print("\n7б. Отказ валидатора на пути моста")
+
+    tid2 = "2026-09-10-telegram-77"
+    with db.tx() as c:
+        c.execute("DELETE FROM themes WHERE id = ?", (tid2,))
+        c.execute("INSERT INTO themes (id, chat_id, date, plat, format, goal, "
+                  "status, title, hook, why) VALUES "
+                  "(?,?,?,?,?,'warm','idea',?,?,?)",
+                  (tid2, CHAT, "2026-09-10", "telegram", "пост",
+                   "тема с длинным тире", "хук", "кому и зачем"))
+
+    res = post_task({"theme_id": tid2,
+                     "text": "Первая строка — и сразу мысль.",
+                     "checks": {"voice": 5}, "notes": []})
+    note = await bridge.harvest(res)
+    check("текст с находкой не сел",
+          db.one("SELECT status FROM themes WHERE id = ?", tid2)["status"]
+          == "idea", "самопроверке субагента поверили на слово")
+    check("отказ назван человеку", "не сел" in note.lower(), note)
+    check("кнопок под несевшим текстом не будет", res.landed_ids == [],
+          str(res.landed_ids))
+
+    res = post_task({"theme_id": "нет-такой-темы", "text": clean,
+                     "checks": {"voice": 5}})
+    check("чужой id темы отброшен",
+          "не сел" in (await bridge.harvest(res)).lower())
+
+    res = post_task({"theme_id": tid, "text": clean}, name="final.md")
+    check("final.md артефактом роли не считается",
+          await bridge.harvest(res) == "",
+          "письмо человеку не контракт: посадить его нельзя")
+
+    # ── 7в. Сажается сделанное, а не объявленное ──────────────────────
+    #
+    # Director вправе свернуть план до одного текста: тема уже стоит в
+    # базе статусом idea, значит Стратег не нужен. Прогон
+    # 2026-08-31-plan-04 так и прошёл — и текст не сел, потому что
+    # посадка разбирала объявленный workflow и не нашла strategy.md.
+    # Восемь минут работы пролежали в tasks/, а он в .gitignore.
+    print("\n7в. Шапка говорит plan, отработал Редактор")
+
+    tid3 = "2026-09-11-telegram-77"
+    with db.tx() as c:
+        c.execute("DELETE FROM themes WHERE id = ?", (tid3,))
+        c.execute("INSERT INTO themes (id, chat_id, date, plat, format, goal, "
+                  "status, title, hook, why) VALUES "
+                  "(?,?,?,?,?,'warm','idea',?,?,?)",
+                  (tid3, CHAT, "2026-09-11", "telegram", "пост",
+                   "тема под свёрнутый план", "хук", "кому и зачем"))
+
+    free_bridge()
+    t6 = bridge.create_task(CHAT, "напиши пост по теме", workflow="plan",
+                            today="2026-08-31", brand_slug=b.slug,
+                            brand_path=str(b.root))
+    (bridge.TASKS_DIR / t6 / "post.md").write_text(
+        "текст для человека\n\n```json\n"
+        + json.dumps({"theme_id": tid3, "text": clean,
+                      "checks": {"voice": 5}}, ensure_ascii=False)
+        + "\n```\n", encoding="utf-8")
+
+    res = bridge.Result(task_id=t6)
+    note = await bridge.harvest(res)
+    check("текст сел, хотя задача звалась планом",
+          db.one("SELECT status FROM themes WHERE id = ?", tid3)["status"]
+          == "draft", "посадка поверила шапке, а не диску")
+    check("кнопки получит текст, а не план",
+          res.post_ids == [tid3] and res.plan_ids == [],
+          f"post_ids={res.post_ids} plan_ids={res.plan_ids}")
+    check("посадка сказала об этом", bool(note), note)
+
+    # ── 7б-2. Посадка макета Дизайнера ────────────────────────────────
+    #
+    # Макет должен оказаться в проекте, а не только в чате: папку бренда
+    # отдают клиенту, а `tasks/` лежит в `.gitignore`. Разметку по
+    # шаблонной площадке собирает код из слотов — второй копии шаблона в
+    # этом проекте быть не должно.
+    print("\n7б-2. Посадка макета")
+
+    real_render = design.render
+
+    async def fake_render(path, size):
+        png = path.with_suffix(".png")
+        png.write_bytes(b"\x89PNG")
+        return png
+
+    design.render = fake_render                # Chrome тут не проверяем
+    try:
+        tid3 = "2026-09-11-telegram-77"
+        copy = "Кода не писала ни строчки. Навык нужен тот же самый."
+        b.artifact(f"posts/{tid3}.md", f"<!-- {tid3} -->\n\n{copy}")
+        with db.tx() as c:
+            c.execute("DELETE FROM themes WHERE id = ?", (tid3,))
+            c.execute("INSERT INTO themes (id, chat_id, date, plat, format, "
+                      "rubric, goal, status, title, asset) VALUES "
+                      "(?,?,'2026-09-11','telegram','пост','Путь','warm',"
+                      "'ready','Путь в AI',?)", (tid3, CHAT, f"posts/{tid3}.md"))
+
+        def design_task(contract: dict) -> bridge.Result:
+            free_bridge()
+            t = bridge.create_task(CHAT, "свёрстай макет", workflow="design",
+                                   today="2026-08-31", brand_slug=b.slug,
+                                   brand_path=str(b.root))
+            (bridge.TASKS_DIR / t / "design.md").write_text(
+                "что собрано\n\n```json\n"
+                + json.dumps(contract, ensure_ascii=False) + "\n```\n",
+                encoding="utf-8")
+            return bridge.Result(task_id=t)
+
+        res = design_task({
+            "theme_id": tid3,
+            "cards": [{"name": "cover", "slots": {
+                "rubric": "ПУТЬ В AI", "headline": "Кода не писала",
+                "headline_accent": " ни строчки",
+                "subtitle": "Навык нужен тот же самый",
+                "photo": "author.jpg"}}],
+            "accent": "терракота на слове", "notes": []})
+        note = await bridge.harvest(res)
+
+        html = b.path(f"posts/{tid3}-cover.html")
+        check("макет лёг в папку бренда, а не в задачу", html.exists(), note)
+        check("PNG рядом с макетом", html.with_suffix(".png").exists())
+        check("слоты положены рядом",
+              b.path(f"posts/{tid3}-cover.slots.json").exists(),
+              "без них правка снова стала бы разговором про HTML")
+        check("разметку собрал код из шаблона",
+              "Кода не писала" in html.read_text(encoding="utf-8")
+              and "{{headline}}" not in html.read_text(encoding="utf-8"))
+        check("макет есть чем показать человеку",
+              res.landed_obj is not None and len(res.landed_obj.pngs) == 1,
+              str(res.landed_obj))
+        check("тема названа в отчёте", tid3 in note, note)
+
+        res = design_task({"theme_id": "нет-такой-темы", "cards": [
+            {"name": "cover", "slots": {"headline": "х"}}]})
+        check("макет без своей темы не сел",
+              "не сел" in (await bridge.harvest(res)).lower())
+
+        with db.tx() as c:
+            c.execute("UPDATE themes SET asset = NULL WHERE id = ?", (tid3,))
+        res = design_task({"theme_id": tid3, "cards": [
+            {"name": "cover", "slots": {"headline": "х"}}]})
+        check("верстать без утверждённого текста не станем",
+              "текст" in (await bridge.harvest(res)).lower(),
+              "верстать черновик значит верстать дважды")
+    finally:
+        design.render = real_render
+
+    # ── 7в. События недели спрашиваются до запуска ────────────────────
     #
     # Спросить Стратега посреди прогона некому: конец хода Director это
     # конец процесса. Значит вопрос задаётся заранее, а ответ ложится в
     # файл со штампом окна — иначе про ту же неделю спросят второй раз.
-    print("\n7б. События недели")
+    print("\n7в. События недели")
 
     events = b.path(bridge.EVENTS_PATH)
     events.unlink(missing_ok=True)

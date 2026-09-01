@@ -519,7 +519,25 @@ async def build(chat_id: int, ask: str, *, say=None) -> Layout:
         await say(f"Макет собран, рендерю {len(cards)} "
                   f"{'картинку' if len(cards) == 1 else 'картинок'}.")
 
-    for i, c in enumerate(cards, 1):
+    await emit(b, lay, size, copy, photos, slots=bool(tpls))
+    return lay
+
+
+async def emit(b, lay: Layout, size: tuple[int, int], copy: str,
+               photos: list[str], *, slots: bool) -> Layout:
+    """Проверить макеты, положить в папку бренда и отрендерить PNG.
+
+    Общий шов для двух путей: так верстает старый Дизайнер и так же
+    садится макет, собранный субагентом через мост. Пока это лежало
+    внутри `build`, у моста записи не было вовсе — файлы оставались в
+    `tasks/{id}/`, а папка задачи в `.gitignore`. Человек видел картинку
+    в чате, а в проекте у него не было ничего.
+
+    `inspect` здесь настоящий гейт: он прогоняется по обоим путям и
+    субагенту на слово не верит.
+    """
+    theme = lay.theme
+    for i, c in enumerate(lay.cards, 1):
         html = str(c["html"]).strip()
         # Имя карточки идёт в имя файла, поэтому чистится до латиницы.
         # Вычистилось до пустого — берём порядковый номер.
@@ -537,14 +555,66 @@ async def build(chat_id: int, ask: str, *, say=None) -> Layout:
         # разговором про HTML: модели пришлось бы показывать разметку,
         # чтобы она вернула разметку. Со слотами круг правки — это две
         # сотни байт туда и обратно.
-        if tpls:
+        if slots:
             b.artifact(f"posts/{theme['id']}-{name}.slots.json",
                        _json.dumps(c.get("slots") or {}, ensure_ascii=False,
                                    indent=2))
 
     log.info("%s: карточек %s, находок %s, заметок %s", theme["id"],
-             len(cards), len(lay.findings), len(lay.notes))
+             len(lay.cards), len(lay.findings), len(lay.notes))
     return lay
+
+
+def size_of(theme: dict[str, Any]) -> tuple[int, int]:
+    """Холст темы. Считается в одном месте: путей показа теперь два."""
+    plat = theme.get("plat") or "telegram"
+    return CANVAS.get(_key(plat, theme.get("format") or "")) \
+        or CANVAS[(plat, None)]
+
+
+async def land(chat_id: int, data: dict[str, Any]) -> Layout:
+    """Посадить макет, собранный субагентом через мост.
+
+    Публичный шов, как `strategy.land` у плана и `editor.land` у текста.
+    Разметку по шаблонным площадкам собирает код (`_fill`), даже если
+    субагент прислал слоты: дом у шаблона один, и второй копии разметки
+    в этом проекте быть не должно.
+    """
+    b = desk.brand(chat_id)
+    if b is None:
+        raise NoWork("профиля бренда нет, класть макет некуда")
+
+    tid = str(data.get("theme_id") or "").strip()
+    if not tid:
+        raise NoWork("в контракте нет `theme_id`: непонятно, к какой теме "
+                     "относится макет")
+    row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
+                 tid, chat_id)
+    if row is None:
+        raise NoWork(f"темы {tid} нет в базе")
+    theme = dict(row)
+    if not theme.get("asset"):
+        raise NoWork(f"у темы {tid} нет утверждённого текста: верстать "
+                     "черновик значит верстать дважды")
+
+    plat = theme.get("plat") or "telegram"
+    fmt = theme.get("format") or ""
+    tpls = _templates(plat, fmt)
+    photos = _photos(b)
+    copy = _copy(b, theme)
+
+    if tpls:
+        cards = _cards_from_slots(data, tpls, photos)
+    else:
+        cards = [c for c in (data.get("cards") or [])
+                 if isinstance(c, dict) and str(c.get("html") or "").strip()]
+    if not cards:
+        raise NoWork(f"по теме {tid} не пришло ни одного макета")
+
+    lay = Layout(theme=theme, cards=cards,
+                 accent=str(data.get("accent") or ""),
+                 notes=[str(n) for n in (data.get("notes") or [])])
+    return await emit(b, lay, size_of(theme), copy, photos, slots=bool(tpls))
 
 
 # ── карточка и кнопки ─────────────────────────────────────────────────
@@ -578,8 +648,8 @@ def _kb(theme_id: str) -> InlineKeyboardMarkup:
     ]])
 
 
-async def _show(reg, chat_id: int, lay: Layout, size: tuple[int, int],
-                topic: str, head: str = "") -> None:
+async def show(reg, chat_id: int, lay: Layout, size: tuple[int, int] | None = None,
+               topic: str = "design", head: str = "") -> None:
     """Отдать макет человеку и встать в ожидание кнопки.
 
     Один код на сборку и на точечную правку. Пока это лежало внутри `run`,
@@ -587,6 +657,7 @@ async def _show(reg, chat_id: int, lay: Layout, size: tuple[int, int],
     копией показа — а у этого проекта уже есть история с четырьмя копиями
     одной роли, где каждая починка чинила одну из четырёх.
     """
+    size = size or size_of(lay.theme)
     table.hold(chat_id, lay)
     if head:
         await reg.say("design", chat_id, head, topic=topic)
@@ -648,10 +719,7 @@ async def run(reg, chat_id: int, ask: str, topic: str = "design") -> None:
         await say(f"Макет не собрался: {desk.reason(e)}")
         return
 
-    plat = lay.theme.get("plat") or "telegram"
-    size = CANVAS.get(_key(plat, lay.theme.get("format") or "")) \
-        or CANVAS[(plat, None)]
-    await _show(reg, chat_id, lay, size, topic)
+    await show(reg, chat_id, lay, size_of(lay.theme), topic)
 
 
 # Слова, после которых правка это всё-таки пересборка. Точечная правка
@@ -796,7 +864,7 @@ async def _patch_slots(reg, chat_id: int, lay: Layout, htmls: list[Path],
 
     log.info("%s: правка по слотам, изменено %s из %s",
              theme["id"], len(touched), len(htmls))
-    await _show(reg, chat_id, out, size, topic,
+    await show(reg, chat_id, out, size, topic,
                 head=f"Поправлено карточек: {len(touched)} из {len(htmls)}.")
 
 
@@ -892,7 +960,7 @@ async def _patch(reg, chat_id: int, lay: Layout, htmls: list[Path],
 
     log.info("%s: точечная правка, изменено %s из %s",
              theme["id"], len(touched), len(htmls))
-    await _show(reg, chat_id, out, size, topic,
+    await show(reg, chat_id, out, size, topic,
                 head=f"Поправлено карточек: {len(touched)} из {len(htmls)}.")
 
 

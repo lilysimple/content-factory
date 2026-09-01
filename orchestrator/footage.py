@@ -577,3 +577,254 @@ def cut_track(track: list[Focus], tl: Timeline) -> list[dict[str, float]]:
             continue
         out.append({"t": round(t, 3), "x": f.x, "y": f.y})
     return out
+
+
+# ── лицо в кадре ──────────────────────────────────────────────────────
+#
+# Обложка рилса должна быть кадром с человеком, а не случайной секундой
+# записи: плитку в сетке профиля листают по лицу, а не по интерфейсу. И
+# заголовок не должен ложиться человеку на лицо — это первое, что видно,
+# и испорчено оно бывает молча.
+#
+# «На глаз» такой кадр не находится. Признаки, которые пробовали и
+# померили на настоящем материале, не разделяют съёмку и запись экрана
+# (разбор — в ТЗ обложки бренда). Поэтому спрашиваем детектор лиц macOS:
+# framework Vision уже стоит в системе, новой библиотеки в venv не
+# заводит и модели на диск не кладёт. Скрипт — `tools/facebox.swift`,
+# один запуск на все кадры сразу: swift компилирует его при каждом
+# вызове, и три секунды на кадр вместо трёх на пачку — плохая сделка.
+#
+# Детектора нет (нет Xcode CLT, не тот Mac) — это **не** поломка монтажа:
+# обложка собирается по-старому, самым спокойным кадром, и человеку об
+# этом говорится строкой. Молчаливая подмена хуже неполной обложки.
+
+FACE_SCRIPT = ROOT / "tools" / "facebox.swift"
+FACE_TIMEOUT = 180
+FACE_MIN_CONF = 0.4
+FACE_MIN_SIDE = 0.05      # доля высоты кадра: меньше — человек в толпе,
+                          # а не в кадре, и обложку на нём не строят
+FACE_SHOTS = 8            # столько кадров-кандидатов снимаем на пробу
+
+
+class NoVision(RuntimeError):
+    """Детектор лиц не отозвался."""
+
+
+@dataclass
+class Face:
+    x: float                # доли кадра, начало в левом верхнем углу
+    y: float
+    w: float
+    h: float
+    conf: float = 0.0
+
+    @property
+    def cx(self) -> float:
+        return self.x + self.w / 2
+
+    @property
+    def cy(self) -> float:
+        return self.y + self.h / 2
+
+
+def _face_of(raw: dict) -> list[Face]:
+    out = []
+    for f in raw.get("faces") or []:
+        face = Face(float(f.get("x") or 0), float(f.get("y") or 0),
+                    float(f.get("w") or 0), float(f.get("h") or 0),
+                    float(f.get("conf") or 0))
+        if face.conf >= FACE_MIN_CONF and face.h >= FACE_MIN_SIDE:
+            out.append(face)
+    return out
+
+
+async def faces(shots: list[Path]) -> list[list[Face]]:
+    """Лица на каждом кадре, в том же порядке. Пусто — лиц нет."""
+    if not shots:
+        return []
+    if not FACE_SCRIPT.exists():
+        raise NoVision(f"нет {FACE_SCRIPT.name}")
+    proc = await asyncio.create_subprocess_exec(
+        "swift", str(FACE_SCRIPT), *[str(p) for p in shots],
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(),
+                                          timeout=FACE_TIMEOUT)
+    except asyncio.TimeoutError as e:
+        proc.kill()
+        await proc.wait()
+        raise NoVision(f"детектор лиц не уложился в {FACE_TIMEOUT} с") from e
+    if proc.returncode != 0:
+        tail = err.decode(errors="replace").strip().splitlines()[-2:]
+        raise NoVision("детектор лиц не запустился: " + " | ".join(tail))
+
+    found: dict[str, list[Face]] = {}
+    for line in out.decode(errors="replace").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            raw = json.loads(line)
+        except ValueError:
+            continue
+        found[str(raw.get("path") or "")] = _face_of(raw)
+    return [found.get(str(p), []) for p in shots]
+
+
+def _spread(track: list[Focus], duration: float, n: int,
+            window: tuple[float, float] | None = None) -> list[float]:
+    """По самому спокойному кадру из каждого куска дубля.
+
+    Кандидаты берутся со всей записи, а не из первых секунд: человек
+    входит в кадр когда угодно, и требование «на обложке лицо» иначе не
+    выполнить. Спокойный кадр внутри куска — по той же причине, что и у
+    `calm_at`: середина взмаха рукой смазана.
+
+    `window` сужает поиск до куска нарезки: обложка куска должна быть
+    кадром этого куска, а не соседнего.
+    """
+    start, end = window or (STILL_SKIP, duration)
+    start = max(start, STILL_SKIP if not window else start)
+    if end <= start:
+        return []
+    n = max(1, n)
+    step = (end - start) / n
+    out: list[float] = []
+    for i in range(n):
+        lo = start + i * step
+        hi = lo + step
+        chunk = [f for f in track if lo <= f.t < hi]
+        out.append(min(chunk, key=lambda f: f.w).t if chunk
+                   else round(lo + step / 2, 2))
+    return out
+
+
+SUB_EDGE = 0.25           # отступ от краёв паузы: титр гаснет не мгновенно
+
+
+def speech_gaps(words: list["Word"], duration: float) -> list[tuple[float, float]]:
+    """Куски, где не звучит ни одного слова, — по пословному транскрипту.
+
+    Точнее пауз из `silences`: тишиной там считается уровень звука, а
+    вшитый субтитр держится ровно по словам. Хвост после последней
+    реплики тишиной обычно не признаётся вовсе (дыхание, комната), а
+    субтитра там уже нет — и это лучший кадр под обложку.
+    """
+    out: list[tuple[float, float]] = []
+    cursor = 0.0
+    for w in sorted(words, key=lambda w: w.start):
+        if w.start > cursor:
+            out.append((cursor, w.start))
+        cursor = max(cursor, w.end)
+    if duration > cursor:
+        out.append((cursor, duration))
+    return out
+
+
+def quiet_times(quiet: list[tuple[float, float]],
+                window: tuple[float, float] | None = None,
+                min_len: float | None = None) -> list[float]:
+    """Середины пауз — секунды, где на записи никто не говорит.
+
+    Нужны обложке. Записи, снятые не в этом заводе, часто приходят с
+    вшитыми субтитрами, и кадр посреди реплики уносит на обложку чужую
+    строку поверх лица. Где человек молчит, титра нет — это факт
+    записи, а не догадка по пикселям, и считается он бесплатно: паузы
+    монтаж уже нашёл, чтобы их вырезать.
+    """
+    out: list[float] = []
+    for a, b in quiet:
+        # Отступаем от краёв паузы: титр гаснет не в ту же миллисекунду,
+        # в которую человек замолчал.
+        lo, hi = a + SUB_EDGE, b - SUB_EDGE
+        if b - a < (SILENCE_MIN + 2 * SUB_EDGE if min_len is None else min_len):
+            continue
+        t = min(max((a + b) / 2, lo, STILL_SKIP), hi)
+        if t < STILL_SKIP or (window and not (window[0] <= t <= window[1])):
+            continue
+        out.append(round(t, 2))
+    return out
+
+
+@dataclass
+class Shot:
+    """Кадр, который встанет на обложку."""
+    at: float
+    path: Path | None = None
+    face: Face | None = None
+    note: str | None = None      # что не сошлось, человеку строкой
+
+
+async def cover_shot(video: Path, track: list[Focus], duration: float,
+                     out: Path, *,
+                     window: tuple[float, float] | None = None,
+                     quiet: list[tuple[float, float]] | None = None,
+                     words: list["Word"] | None = None) -> Shot:
+    """Кадр под обложку: с лицом, в паузе, иначе самый спокойный.
+
+    Возвращает и рамку лица — по ней монтаж уводит текст так, чтобы он не
+    лёг человеку на лицо. `window` сужает поиск до куска нарезки,
+    `quiet` — паузы дубля: кадр из паузы предпочтительнее, потому что на
+    записи с вшитыми субтитрами там нет чужой строки.
+    """
+    if window:
+        inside = [f for f in track if window[0] <= f.t <= window[1]] or track
+        calm = calm_at(inside, window=window[1])
+    else:
+        calm = calm_at(track)
+    # Транскрипт точнее тишины: субтитр держится по словам, а не по
+    # уровню звука. Есть он — считаем по нему, нет — по паузам.
+    if words:
+        silent = quiet_times(speech_gaps(words, duration), window,
+                             min_len=2 * SUB_EDGE)[:FACE_SHOTS]
+    else:
+        silent = quiet_times(quiet or [], window)[:FACE_SHOTS]
+    times = _spread(track, duration, FACE_SHOTS, window)
+    times = silent + [t for t in sorted({calm, *times}) if t not in silent]
+
+    probes: list[Path] = []
+    try:
+        for i, t in enumerate(times):
+            probes.append(await still(video, t, out.parent / f".probe-{i}.png"))
+        found = await faces(probes)
+    except NoFfmpeg:
+        for p in probes:
+            p.unlink(missing_ok=True)
+        raise
+    except NoVision as e:
+        for p in probes:
+            p.unlink(missing_ok=True)
+        return Shot(calm, await still(video, calm, out), None,
+                    f"лицо в кадре не искали ({e}) — на обложку взят самый "
+                    f"спокойный кадр ({calm:.1f} с)")
+
+    # Порядок предпочтения: сначала кадры из пауз (там нет вшитого
+    # субтитра), внутри них — тот, где лицо крупнее. Обложка с человеком
+    # в полный рост на плитке 1080×1920 читается хуже, чем портрет.
+    def pick(among: list[float]) -> tuple[float, Face] | None:
+        best: tuple[float, Face] | None = None
+        for t, fs in zip(times, found):
+            if t not in among or not fs:
+                continue
+            face = max(fs, key=lambda f: f.w * f.h)
+            if best is None or face.w * face.h > best[1].w * best[1].h:
+                best = (t, face)
+        return best
+
+    for p in probes:
+        p.unlink(missing_ok=True)
+
+    note = None
+    best = pick(silent)
+    if best is None:
+        best = pick(times)
+        if best is not None and silent:
+            note = ("в паузах дубля лица не нашлось — кадр взят из речи, "
+                    "и если на записи вшиты субтитры, строка попадёт "
+                    "на обложку")
+    if best is None:
+        return Shot(calm, await still(video, calm, out), None,
+                    f"лица в дубле не нашлось — на обложку взят самый "
+                    f"спокойный кадр ({calm:.1f} с)")
+    at, face = best
+    return Shot(at, await still(video, at, out), face, note)

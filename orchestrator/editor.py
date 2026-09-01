@@ -58,6 +58,10 @@ class VoiceRefused(RuntimeError):
     """Текст не прошёл проверку голоса за отведённые круги."""
 
 
+class LandRefused(RuntimeError):
+    """Текст с моста не сел: нет темы, пустой текст, находка валидатора."""
+
+
 @dataclass
 class Draft:
     theme: dict[str, Any]
@@ -203,6 +207,67 @@ def _save(chat_id: int, b, draft: Draft) -> str:
     return rel
 
 
+def land(chat_id: int, data: dict[str, Any]) -> tuple[Draft, str]:
+    """Посадить текст, собранный субагентом через мост.
+
+    Публичный шов, а не деталь `run`, — ровно как `strategy.land` у плана.
+    Писать текст умеют два пути, а проверять его валидатором, класть в
+    `posts/{id}.md` и переводить тему в `draft` должен один код.
+
+    До этого текст с моста не возвращался в завод вовсе: он оставался в
+    `tasks/{id}/`, а папка задачи в `.gitignore`. Человек читал пост в
+    чате, соглашался с ним — и соглашаться было не с чем: в базе тема
+    оставалась `idea`, Дизайнеру и Публикатору текста не доставалось.
+
+    Внешняя проверка здесь настоящая. Субагент прогоняет `check_voice` на
+    себе для быстрой обратной связи, но верить ему на слово нельзя:
+    промпт это просьба, границу держит код. Находка — отказ, тема
+    остаётся `idea`, и человек слышит об этом.
+
+    Возвращает черновик и путь выгрузки.
+    """
+    b = desk.brand(chat_id)
+    if b is None:
+        raise LandRefused("профиля бренда нет, класть текст некуда")
+
+    tid = str(data.get("theme_id") or "").strip()
+    if not tid:
+        raise LandRefused("в контракте нет `theme_id`: непонятно, к какой "
+                          "теме относится текст")
+
+    row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
+                 tid, chat_id)
+    if row is None:
+        raise LandRefused(f"темы {tid} нет в базе")
+    if row["status"] == "skip":
+        raise LandRefused(f"тема {tid} снята")
+
+    text = str(data.get("text") or "").strip()
+    if not text:
+        raise LandRefused(f"текст по теме {tid} пуст")
+
+    draft = Draft(
+        theme=dict(row), text=text,
+        checks={k: int(v) for k, v in (data.get("checks") or {}).items()
+                if isinstance(v, (int, float))},
+        hold=str(data.get("hold") or ""),
+        breaks=str(data.get("breaks") or ""),
+        notes=[str(n) for n in (data.get("notes") or [])])
+
+    findings = check_voice.check(text, stopwords=b.stopwords())
+    if findings:
+        raise LandRefused(
+            f"текст по теме {tid} не прошёл проверку голоса: "
+            + ", ".join(dict.fromkeys(f.rule for f in findings)))
+    if draft.checks and draft.voice < VOICE_FLOOR:
+        raise LandRefused(f"текст по теме {tid} отклонён самим Редактором: "
+                          f"балл voice {draft.voice} ниже {VOICE_FLOOR}")
+
+    rel = _save(chat_id, b, draft)
+    log.info("текст с моста посажен: %s", rel)
+    return draft, rel
+
+
 # ── карточка и кнопки ─────────────────────────────────────────────────
 
 def _recover(chat_id: int, theme_id: str) -> Draft | None:
@@ -227,19 +292,26 @@ def wants_fix(chat_id: int) -> bool:
     return table.wants_fix(chat_id)
 
 
-def _kb(theme_id: str) -> InlineKeyboardMarkup:
+def kb(theme_id: str, prefix: str = "post") -> InlineKeyboardMarkup:
     """id темы едет в самой кнопке.
 
     Черновик живёт в памяти процесса, а бот перезапускается. Без id
     любая кнопка под карточкой, пережившей рестарт, отвечает «уже
     неактуален» — и человек, который вчера согласовал текст, сегодня
     не может его принять. 64 байта Telegram на это хватает.
+
+    Префикс говорит, чей это текст: `post` — старый Редактор, `bpost` —
+    субагент через мост. Кнопки те же самые, а вот правка расходится:
+    старому Редактору её отдаёт `revise`, субагенту — новый прогон, потому
+    что он живёт ровно один ход и договорить с ним нельзя.
     """
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Ок", callback_data=f"post:ok:{theme_id}"),
-        InlineKeyboardButton(text="✏️ Правки", callback_data=f"post:fix:{theme_id}"),
+        InlineKeyboardButton(text="✅ Ок",
+                             callback_data=f"{prefix}:ok:{theme_id}"),
+        InlineKeyboardButton(text="✏️ Правки",
+                             callback_data=f"{prefix}:fix:{theme_id}"),
         InlineKeyboardButton(text="🎨 В дизайн",
-                             callback_data=f"post:design:{theme_id}"),
+                             callback_data=f"{prefix}:design:{theme_id}"),
     ]])
 
 
@@ -254,7 +326,7 @@ def card(draft: Draft) -> str:
     return "\n".join(out)
 
 
-def _handoff(theme: dict[str, Any]) -> str:
+def handoff(theme: dict[str, Any]) -> str:
     """Что будет с текстом дальше. Состояние из данных, а не из фразы:
     кнопка полторы недели отвечала, что Публикатора нет, когда он был."""
     plat = theme.get("plat")
@@ -296,7 +368,7 @@ async def run(reg, chat_id: int, ask: str, topic: str = "review") -> None:
     log.info("%s: hold=%s | breaks=%s", draft.theme["id"], draft.hold,
              draft.breaks)
     await reg.say("editor", chat_id, card(draft),
-                  kb=_kb(draft.theme["id"]), topic=topic)
+                  kb=kb(draft.theme["id"]), topic=topic)
 
 
 async def revise(reg, chat_id: int, instruction: str,
@@ -346,7 +418,7 @@ async def on_callback(reg, chat_id: int, action: str,
 
     if action == "ok":
         await say(f"Готово, <code>{tid}</code> в статусе ready. "
-                  + _handoff(draft.theme))
+                  + handoff(draft.theme))
         return
 
     await say(f"Принял текст <code>{tid}</code> и передаю Дизайнеру.")
