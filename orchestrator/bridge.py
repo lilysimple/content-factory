@@ -38,11 +38,16 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from config import ROOT
-from orchestrator import design, desk, editor, research, strategy
+from orchestrator import cli, design, desk, editor, research, strategy
 from storage import brand as brand_store
 from storage import db
 
 log = logging.getLogger("bridge")
+
+KEEP = cli.KEEP
+FALLBACK_BINS = cli.FALLBACK_BINS
+clean_env = cli.clean_env
+which_claude = cli.which_claude
 
 TASKS_DIR = ROOT / "tasks"
 
@@ -53,30 +58,9 @@ EVENTS_PATH = "plans/events.md"
 # с датами окна и есть ответ на вопрос «про эту неделю уже спрашивали».
 NO_EVENTS = {"нет", "ничего", "нету", "нет событий", "пусто", "-", "—"}
 
-# Что получает подпроцесс. Всё остальное отрезается: см. шапку модуля.
-# ANTHROPIC_API_KEY сюда не входит намеренно — авторизация идёт входом CLI,
-# учётные данные лежат в Keychain, и подпроцесс берёт их сам.
-KEEP = ("PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "SHELL")
-
-# Где искать `claude`, если его нет в PATH.
-#
-# Это не перестраховка, а починка боевого отказа. Завод стоит на launchd,
-# а launchd даёт агенту голый PATH — `/usr/bin:/bin:/usr/sbin:/sbin`, без
-# `~/.local/bin`, куда ставится CLI. Из терминала мост работал, из-под
-# автозапуска `shutil.which("claude")` возвращал None, и **любая** задача
-# из Telegram падала бы на первой строке `run` с «бинарь не найден».
-# Поймано аудитом 30.08: живой прогон делался руками из терминала, и
-# телеграм-нога цепи ни разу не проверялась.
-#
-# Домашние пути разворачиваются от `HOME`, а не от текущего пользователя:
-# на VPS завод пойдёт под своим аккаунтом.
-FALLBACK_BINS = (
-    "~/.local/bin/claude",
-    "~/.claude/local/claude",
-    "/opt/homebrew/bin/claude",
-    "/usr/local/bin/claude",
-)
-
+# Окружение подпроцесса, поиск бинаря и разбор отказов живут в
+# `orchestrator/cli.py`: тем же пользуется роль, и две копии этой плиты
+# разъехались бы на первой же починке.
 # Инструменты, которые нужны Director. `Task` обязателен: без него он не
 # сможет позвать ни одного субагента, и весь смысл моста пропадёт.
 TOOLS = "Read,Write,Edit,Glob,Grep,Bash,Task,TodoWrite"
@@ -147,30 +131,6 @@ class Result:
         Один общий список годится для «сажали ли вообще», не больше.
         """
         return self.plan_ids + self.post_ids + self.design_ids
-
-
-# ── окружение ─────────────────────────────────────────────────────────
-
-def clean_env() -> dict[str, str]:
-    """Окружение подпроцесса. Белый список, а не наследование."""
-    return {k: os.environ[k] for k in KEEP if k in os.environ}
-
-
-def which_claude() -> str:
-    """Путь к CLI. Сначала PATH, потом известные места установки.
-
-    PATH под launchd беднее терминального, и на нём мост ломался целиком:
-    см. `FALLBACK_BINS`. Возвращается абсолютный путь, поэтому подпроцессу
-    хватает и голого PATH — искать себя ему уже не надо.
-    """
-    if found := shutil.which("claude"):
-        return found
-    for raw in FALLBACK_BINS:
-        p = Path(raw).expanduser()
-        if p.exists() and os.access(p, os.X_OK):
-            log.info("claude найден мимо PATH: %s", p)
-            return str(p)
-    return ""
 
 
 # ── результат для Telegram ────────────────────────────────────────────
@@ -884,7 +844,7 @@ async def run(task_id: str, on_step: StepCb | None = None) -> Result:
     stderr = errors.result().decode("utf-8", "replace").strip()
 
     if proc.returncode != 0:
-        return _fail(res, _reason(stdout, stderr, proc.returncode, res.said))
+        return _fail(res, cli.reason(stdout, stderr, proc.returncode, res.said))
 
     final = res.dir / "final.md"
     if not final.exists():
@@ -1160,38 +1120,6 @@ async def harvest(res: Result) -> str:
 
     res.landed = " ".join(n for n in notes if n)
     return res.landed
-
-
-def _reason(stdout: str, stderr: str, rc: int, said: str = "") -> str:
-    """Человеческая причина отказа вместо кода возврата.
-
-    Через неё проходит всё, что вернул CLI, поэтому «войди в CLI» человек
-    видит одинаково, чем бы вызов ни упал.
-
-    `said` — разобранное поле `result` из JSON CLI, то есть уже готовая
-    человеческая строка. Раньше она игнорировалась, и в запасной ветке
-    человеку уезжал **весь блок JSON**: при лимите сессии он получал в
-    Telegram `{"type":"result","subtype":"error_during_execution",…}`
-    вместо «упёрлись в лимит». Замерено живьём 30.08 — это самый вероятный
-    отказ на подписке, и он единственный не имел своей ветки.
-
-    Лимит подписки отделён от баланса намеренно. Денег новый путь не
-    тратит вовсе (раздел 11 миграции), и строка «закончились средства»
-    отправила бы человека пополнять баланс, которому ничего не грозит.
-    """
-    blob = f"{stdout}\n{stderr}".lower()
-    if "not logged in" in blob or "/login" in blob:
-        return ("Claude Code не авторизован. Один раз выполни `claude` и "
-                "`/login` в терминале")
-    if "credit balance" in blob or "insufficient" in blob:
-        return "закончились средства или исчерпан лимит"
-    if "session limit" in blob or "usage limit" in blob:
-        # Время сброса CLI кладёт в ту же строку — отдаём как есть.
-        why = "упёрлись в лимит подписки Claude Code (не в баланс API)"
-        return f"{why}. {said}" if said else why
-    if "rate limit" in blob or "429" in blob:
-        return "упёрлись в лимит запросов, попробуй позже"
-    return (said or stderr or stdout or f"процесс вернул код {rc}")[:300]
 
 
 def _fail(res: Result, why: str, *, status: str = "failed") -> Result:

@@ -19,10 +19,15 @@
 
 ```bash
 python3 -m venv .venv
-./.venv/bin/pip install aiogram anthropic apscheduler python-dotenv pypdf python-docx
-cp .env.example .env      # заполнить токены
+./.venv/bin/pip install aiogram httpx python-dotenv pypdf python-docx
+cp .env.example .env      # заполнить токены восьми ботов
+claude                    # один раз войти: /login, дальше Keychain
 ./run.sh
 ```
+
+Ключ Anthropic API заводу не нужен: модель зовётся через Claude Code по
+подписке, и `cli.clean_env` не пускает ключ в подпроцесс даже если он
+лежит в окружении.
 
 Завод стоит на автозапуске через `launchd`, и `run.sh` перезапускает
 именно агента. Поднимать `main.py` руками нельзя: Telegram разрешает

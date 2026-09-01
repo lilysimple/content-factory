@@ -31,7 +31,7 @@ from harness import CHAT, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
-from orchestrator import bridge                                   # noqa: E402
+from orchestrator import bridge, cli                                   # noqa: E402
 from storage import db                                            # noqa: E402
 
 db.init(cfg.db_path)
@@ -70,7 +70,7 @@ async def main() -> None:
     # ── окружение: что уезжает в подпроцесс ───────────────────────────
     os.environ["ANTHROPIC_API_KEY"] = "sk-ant-НЕ-ДОЛЖЕН-УТЕЧЬ"
     os.environ["BOT_ASSISTANT"] = "111:НЕ-ДОЛЖЕН-УТЕЧЬ"
-    env = bridge.clean_env()
+    env = cli.clean_env()
 
     check("PATH передан", "PATH" in env)
     check("HOME передан", "HOME" in env)
@@ -78,8 +78,8 @@ async def main() -> None:
           "ключ уехал бы в подпроцесс и увёл вызов на API-тариф")
     check("токен бота НЕ передан", "BOT_ASSISTANT" not in env,
           "токены восьми ботов не должны покидать процесс")
-    check("ничего лишнего вообще", set(env) <= set(bridge.KEEP),
-          str(sorted(set(env) - set(bridge.KEEP))))
+    check("ничего лишнего вообще", set(env) <= set(cli.KEEP),
+          str(sorted(set(env) - set(cli.KEEP))))
 
     # ── набор инструментов ────────────────────────────────────────────
     check("Task в наборе инструментов", "Task" in bridge.TOOLS,
@@ -255,21 +255,21 @@ async def main() -> None:
                   '"session_id":"x","total_cost_usd":0}')
     said = "You've hit your session limit \u00b7 resets 5:10am"
 
-    why = bridge._reason(limit_json, "", 1, said)
+    why = cli.reason(limit_json, "", 1, said)
     check("лимит подписки назван словами", "лимит подписки" in why, why)
     check("в отказ не уехал JSON", "{" not in why and '"type"' not in why, why)
     check("время сброса сохранено", "5:10am" in why, why)
     check("лимит подписки не назван балансом", "средства" not in why, why)
 
     check("незнакомый отказ берёт реплику CLI, а не stdout",
-          bridge._reason('{"result":"что-то пошло не так"}', "", 1,
+          cli.reason('{"result":"что-то пошло не так"}', "", 1,
                          "что-то пошло не так") == "что-то пошло не так")
     check("без реплики берётся stderr",
-          bridge._reason("", "boom", 1) == "boom")
+          cli.reason("", "boom", 1) == "boom")
     check("вход в CLI по-прежнему узнаётся",
-          "login" in bridge._reason("Not logged in", "", 1).lower())
+          "login" in cli.reason("Not logged in", "", 1).lower())
     check("баланс по-прежнему узнаётся",
-          "средства" in bridge._reason("credit balance too low", "", 1))
+          "средства" in cli.reason("credit balance too low", "", 1))
 
     r = row(stale)
     check("брошенный стал failed", r and r["status"] == "failed",
@@ -491,23 +491,23 @@ async def main() -> None:
     reset()
     (BIN / "claude").rename(BIN / "claude-hidden")
     os.environ["PATH"] = str(BIN)                 # бинаря в PATH больше нет
-    _fallback = bridge.FALLBACK_BINS
-    bridge.FALLBACK_BINS = (str(BIN / "claude-hidden"),)
-    check("бинарь находится мимо PATH", bridge.which_claude() ==
-          str(BIN / "claude-hidden"), bridge.which_claude())
+    _fallback = cli.FALLBACK_BINS
+    cli.FALLBACK_BINS = (str(BIN / "claude-hidden"),)
+    check("бинарь находится мимо PATH", cli.which_claude() ==
+          str(BIN / "claude-hidden"), cli.which_claude())
 
     # ── бинаря нет вообще ─────────────────────────────────────────────
     # Запасные пути тоже пусты, иначе тест нашёл бы настоящий CLI машины
     # и запустил его по-живому вместо заглушки.
-    bridge.FALLBACK_BINS = (str(BIN / "нет-такого"),)
-    check("пустой резолвер честно молчит", bridge.which_claude() == "",
-          bridge.which_claude())
+    cli.FALLBACK_BINS = (str(BIN / "нет-такого"),)
+    check("пустой резолвер честно молчит", cli.which_claude() == "",
+          cli.which_claude())
     tid = bridge.create_task(CHAT, "план", workflow="plan", today=TODAY)
     res = await bridge.run(tid)
     check("отсутствие claude названо", not res.ok and "claude" in res.error,
           res.error)
 
-    bridge.FALLBACK_BINS = _fallback
+    cli.FALLBACK_BINS = _fallback
     (BIN / "claude-hidden").rename(BIN / "claude")
     reset()
 

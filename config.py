@@ -18,7 +18,10 @@ def _chats(raw: str) -> set[int]:
 
 @dataclass(frozen=True)
 class Config:
-    anthropic_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+    # Ключа API здесь нет и быть не должно. Модель зовётся через CLI по
+    # подписке, авторизация — вход `claude` в терминале, учётные данные
+    # лежат в Keychain. Ключ в окружении увёл бы вызовы на API-тариф, то
+    # есть на деньги; `cli.clean_env` его в подпроцесс и не пускает.
     model: str = os.getenv("ANTHROPIC_MODEL", "claude-opus-5")
 
     # Модель и усилие на роль: MODEL_EDITOR, EFFORT_EDITOR. Распаковка и
