@@ -21,30 +21,24 @@ class Config:
     anthropic_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     model: str = os.getenv("ANTHROPIC_MODEL", "claude-opus-5")
 
-    # Модель и усилие можно задать отдельно на роль: MODEL_EDITOR, EFFORT_EDITOR.
-    # Распаковка и стратегия это суждение, публикация это форматирование —
-    # платить за них одинаково смысла нет.
+    # Модель и усилие на роль: MODEL_EDITOR, EFFORT_EDITOR. Распаковка и
+    # стратегия это суждение, форматирование — нет, платить одинаково незачем.
     #
-    # Это настройки **старого пути** — того, что ходит через `agent.ask`.
-    # На путь через Claude Code (`orchestrator/bridge.py`) они не влияют
-    # никак и влиять не должны: `clean_env` не пропускает в подпроцесс ни
-    # `ANTHROPIC_MODEL`, ни `MODEL_*`, потому что моделью и рантаймом там
-    # распоряжается сам Claude Code. Решение от 30.08, раздел 12 миграции.
+    # Настройки **старого пути**, того, что ходит через `agent.ask`. На путь
+    # через Claude Code (`orchestrator/bridge.py`) не влияют и не должны:
+    # `clean_env` не пропускает в подпроцесс ни `ANTHROPIC_MODEL`, ни
+    # `MODEL_*`, там моделью распоряжается сам Claude Code.
     #
-    # Два ключа здесь мертвы. Оставлены до снятия старого слоя (этап 8):
-    #   `publisher` — модель не зовёт вовсе, и это намеренно;
-    #   `ideator`   — в старом пути такой роли нет, `agent.ask("ideator", …)`
-    #                 не существует; живёт он только субагентом Claude Code.
-    # Не путать с `tokens["ideator"]` ниже: тот ключ живой, бот поднят.
+    # Роли здесь только те, что реально зовут модель. `publisher` не зовёт
+    # её вовсе, `ideator` живёт субагентом — их ключи сняты 01.09.
+    # Не путать с `tokens["ideator"]` ниже: тот живой, бот поднят.
+    _ASK_ROLES = ("assistant", "research", "strategy", "editor", "reels", "design")
+
     role_models: dict[str, str] = field(default_factory=lambda: {
-        role: os.getenv(f"MODEL_{role.upper()}", "")
-        for role in ("assistant", "research", "strategy", "ideator", "editor",
-                     "reels", "design", "publisher")
+        role: os.getenv(f"MODEL_{role.upper()}", "") for role in Config._ASK_ROLES
     })
     role_effort: dict[str, str] = field(default_factory=lambda: {
-        role: os.getenv(f"EFFORT_{role.upper()}", "")
-        for role in ("assistant", "research", "strategy", "ideator", "editor",
-                     "reels", "design", "publisher")
+        role: os.getenv(f"EFFORT_{role.upper()}", "") for role in Config._ASK_ROLES
     })
     default_effort: str = os.getenv("ANTHROPIC_EFFORT", "high")
 
@@ -72,9 +66,6 @@ class Config:
     # Куда публикует Публикатор. Числовой id канала (-100…) или @имя.
     # Пусто — публикация выключена, и он об этом говорит вслух.
     publish_channel: str = os.getenv("PUBLISH_CHANNEL", "")
-
-    miniapp_secret: str = os.getenv("MINIAPP_SECRET", "change-me")
-    miniapp_url: str = os.getenv("MINIAPP_URL", "")
 
     brands_path: Path = ROOT / os.getenv("BRANDS_PATH", "./Brands")
     db_path: Path = ROOT / os.getenv("DB_PATH", "./factory.db")

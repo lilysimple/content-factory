@@ -422,6 +422,12 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             return
 
         if route.role == "montage":
+            # Замена словами под готовой карточкой — правка субтитров:
+            # тот же ролик, тот же дубль, другие слова.
+            if montage.wants_relex(chat_id, raw):
+                await montage.revise(registry, chat_id, raw,
+                                     topic=tkey or "reels")
+                return
             # Одна запись на несколько роликов — отдельная работа: там
             # зовётся Редактор Reels, а монтаж режет по его списку.
             if montage.wants_split(raw):

@@ -49,7 +49,22 @@ export const Cover: React.FC<{
   font: string;
   weight: number;
   titleSize: number;
-}> = ({lines, title, titleColor, brandName, font, weight, titleSize}) => {
+  // Куда лёг блок и на сколько отступил от своего края. Считает питон по
+  // рамке лица (`montage.place_cover`): на портретном кадре низ занят
+  // лицом, и текст уходит наверх. Здесь только рисование.
+  anchor: 'top' | 'bottom';
+  inset: number;
+}> = ({
+  lines,
+  title,
+  titleColor,
+  brandName,
+  font,
+  weight,
+  titleSize,
+  anchor,
+  inset,
+}) => {
   const fontFamily = FONTS[font] ?? FONTS.Manrope;
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
@@ -57,9 +72,10 @@ export const Cover: React.FC<{
   return (
     <AbsoluteFill
       style={{
-        justifyContent: 'flex-end',
+        justifyContent: anchor === 'top' ? 'flex-start' : 'flex-end',
         alignItems: 'center',
-        padding: '0 7% 11%',
+        padding:
+          anchor === 'top' ? `${inset}px 7% 0` : `0 7% ${inset}px`,
         fontFamily,
       }}
     >

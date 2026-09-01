@@ -231,9 +231,30 @@ def timeline(duration: float, quiet: list[tuple[float, float]]) -> Timeline:
 GRID_W, GRID_H = 48, 32
 SAMPLE_FPS = 5
 NOISE = 14               # ниже — шум кодека, а не движение
-QUIET_FRAME = 40         # суммарный вес тише — считаем, что ничего не было
-SMOOTH = 0.22            # инерция кадра: рывок за курсором тошнотворен
-DEADZONE = 0.02          # мельче — дрожание, а не движение
+
+# Центр изменившегося скачет сам по себе. Замер на настоящем материале
+# (запись экрана и съёмка с камеры, по сорок секунд): между соседними
+# отсчётами он прыгает в среднем на 0,09 кадра, а в каждом десятом — на
+# треть кадра и больше. Ехать за таким центром напрямую значит трясти
+# картинку там, где на экране ничего не происходит.
+#
+# Поэтому цель считается не по одному отсчёту, а по окну в две секунды, и
+# кадр идёт к ней с ограниченной скоростью. Три правила подряд:
+#
+# 1. окно усредняет случайные всплески (WINDOW);
+# 2. мёртвая зона не даёт трогаться с места ради мелочи (DEADZONE);
+# 3. потолок скорости не даёт догонять цель рывком (MAX_STEP).
+#
+# Плюс финальное сглаживание уже готового трека: между отсчётами
+# композиция интерполирует линейно, и без него на каждом отсчёте виден
+# излом.
+WINDOW = 20              # четыре секунды
+QUIET_SAMPLE = 200       # отсчёт легче — это шум, в окно его не берём
+LIVE_SAMPLES = 6         # столько живых отсчётов нужно, чтобы цель считалась
+START_ZONE = 0.15        # трогаемся, только если действие ушло далеко
+STOP_ZONE = 0.05         # и едем, пока не подойдём вплотную
+MAX_STEP = 0.004         # доля кадра за отсчёт: две сотых в секунду
+SMOOTH_SPAN = 5          # ±секунда на сглаживание готового трека
 
 
 @dataclass
@@ -273,9 +294,46 @@ def _scan(prev: bytes, cur: bytes) -> tuple[float, float, int]:
         sx += d * (i % GRID_W)
         sy += d * (i // GRID_W)
 
-    if total < QUIET_FRAME:
-        return (-1.0, -1.0, total)
+    if total <= 0:
+        return (-1.0, -1.0, 0)
     return (sx / total / (GRID_W - 1), sy / total / (GRID_H - 1), total)
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _target(window: list[tuple[float, float, int]]) -> tuple[float, float] | None:
+    """Куда смотрит активность за последние четыре секунды.
+
+    Медиана, а не среднее со взвешиванием: одна вспышка на пол-кадра
+    (переключили окно, махнули рукой перед камерой) утаскивает среднее к
+    себе, а медиану — нет. На настоящем материале среднее давало треть
+    кадра блуждания там, где на экране ничего не менялось.
+    """
+    live = [(x, y) for x, y, w in window if w >= QUIET_SAMPLE]
+    if len(live) < LIVE_SAMPLES:
+        return None
+    return (_median([x for x, _ in live]), _median([y for _, y in live]))
+
+
+def _smooth(track: list[Focus], span: int = SMOOTH_SPAN) -> list[Focus]:
+    """Скользящее среднее по готовому треку: убирает изломы на отсчётах."""
+    if span < 1 or len(track) < 3:
+        return track
+    out: list[Focus] = []
+    for i, f in enumerate(track):
+        lo, hi = max(0, i - span), min(len(track), i + span + 1)
+        part = track[lo:hi]
+        out.append(Focus(f.t,
+                         round(sum(p.x for p in part) / len(part), 4),
+                         round(sum(p.y for p in part) / len(part), 4),
+                         f.w))
+    return out
 
 
 async def pan(video: Path) -> list[Focus]:
@@ -287,15 +345,56 @@ async def pan(video: Path) -> list[Focus]:
         return []
 
     track: list[Focus] = []
-    fx, fy = 0.5, 0.5
+    window: list[tuple[float, float, int]] = []
+    # Первую цель занимаем сразу, а не едем к ней от середины холста:
+    # эта поездка ничего не показывает, а на видео читается как отъезд
+    # кадра в первые секунды.
+    fx = fy = None
+    first: tuple[float, float] | None = None
+    moving = False
+
     for n in range(1, len(frames)):
         cx, cy, weight = _scan(frames[n - 1], frames[n])
-        if cx >= 0 and (abs(cx - fx) > DEADZONE or abs(cy - fy) > DEADZONE):
-            fx += (cx - fx) * SMOOTH
-            fy += (cy - fy) * SMOOTH
-        track.append(Focus(n / SAMPLE_FPS, round(fx, 4), round(fy, 4),
+        if cx >= 0:
+            window.append((cx, cy, weight))
+        else:
+            window.append((0.5, 0.5, 0))
+        if len(window) > WINDOW:
+            window.pop(0)
+
+        # Гистерезис: тронуться дорого, поэтому порог на старт большой, а
+        # на остановку маленький. Без него кадр «дышит» вокруг цели —
+        # шагнул, попал в зону, замер, цель чуть уползла, шагнул снова.
+        goal = _target(window)
+        if goal is not None and fx is None:
+            fx, fy = goal
+            first = goal
+        elif goal is not None:
+            dx, dy = goal[0] - fx, goal[1] - fy
+            far = max(abs(dx), abs(dy))
+            if not moving and far > START_ZONE:
+                moving = True
+            elif moving and far < STOP_ZONE:
+                moving = False
+            if moving:
+                fx += max(-MAX_STEP, min(MAX_STEP, dx))
+                fy += max(-MAX_STEP, min(MAX_STEP, dy))
+
+        track.append(Focus(n / SAMPLE_FPS,
+                           round(0.5 if fx is None else fx, 4),
+                           round(0.5 if fy is None else fy, 4),
                            float(weight)))
-    return track
+
+    # Пока цель не нашлась, трек стоял в середине холста — это не выбор,
+    # а отсутствие данных. Задним числом ставим туда же, где кадр
+    # оказался в первый раз: иначе ролик открывается рывком из центра.
+    if first is not None:
+        for f in track:
+            if f.x == 0.5 and f.y == 0.5:
+                f.x, f.y = round(first[0], 4), round(first[1], 4)
+            else:
+                break
+    return _smooth(track)
 
 
 # ── кадр на обложку ───────────────────────────────────────────────────
@@ -478,3 +577,338 @@ def cut_track(track: list[Focus], tl: Timeline) -> list[dict[str, float]]:
             continue
         out.append({"t": round(t, 3), "x": f.x, "y": f.y})
     return out
+
+
+# ── лицо в кадре ──────────────────────────────────────────────────────
+#
+# Обложка рилса должна быть кадром с человеком, а не случайной секундой
+# записи: плитку в сетке профиля листают по лицу, а не по интерфейсу. И
+# заголовок не должен ложиться человеку на лицо — это первое, что видно,
+# и испорчено оно бывает молча.
+#
+# «На глаз» такой кадр не находится. Признаки, которые пробовали и
+# померили на настоящем материале, не разделяют съёмку и запись экрана
+# (разбор — в ТЗ обложки бренда). Поэтому спрашиваем детектор лиц macOS:
+# framework Vision уже стоит в системе, новой библиотеки в venv не
+# заводит и модели на диск не кладёт. Скрипт — `tools/facebox.swift`,
+# один запуск на все кадры сразу: swift компилирует его при каждом
+# вызове, и три секунды на кадр вместо трёх на пачку — плохая сделка.
+#
+# Детектора нет (нет Xcode CLT, не тот Mac) — это **не** поломка монтажа:
+# обложка собирается по-старому, самым спокойным кадром, и человеку об
+# этом говорится строкой. Молчаливая подмена хуже неполной обложки.
+
+FACE_SCRIPT = ROOT / "tools" / "facebox.swift"
+FACE_TIMEOUT = 180
+FACE_MIN_CONF = 0.4
+FACE_MIN_SIDE = 0.05      # доля высоты кадра: меньше — человек в толпе,
+                          # а не в кадре, и обложку на нём не строят
+FACE_SHOTS = 8            # столько кадров-кандидатов снимаем на пробу
+
+
+class NoVision(RuntimeError):
+    """Детектор лиц не отозвался."""
+
+
+@dataclass
+class Face:
+    x: float                # доли кадра, начало в левом верхнем углу
+    y: float
+    w: float
+    h: float
+    conf: float = 0.0
+
+    @property
+    def cx(self) -> float:
+        return self.x + self.w / 2
+
+    @property
+    def cy(self) -> float:
+        return self.y + self.h / 2
+
+
+def _face_of(raw: dict) -> list[Face]:
+    out = []
+    for f in raw.get("faces") or []:
+        face = Face(float(f.get("x") or 0), float(f.get("y") or 0),
+                    float(f.get("w") or 0), float(f.get("h") or 0),
+                    float(f.get("conf") or 0))
+        if face.conf >= FACE_MIN_CONF and face.h >= FACE_MIN_SIDE:
+            out.append(face)
+    return out
+
+
+async def faces(shots: list[Path]) -> list[list[Face]]:
+    """Лица на каждом кадре, в том же порядке. Пусто — лиц нет."""
+    if not shots:
+        return []
+    if not FACE_SCRIPT.exists():
+        raise NoVision(f"нет {FACE_SCRIPT.name}")
+    proc = await asyncio.create_subprocess_exec(
+        "swift", str(FACE_SCRIPT), *[str(p) for p in shots],
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(),
+                                          timeout=FACE_TIMEOUT)
+    except asyncio.TimeoutError as e:
+        proc.kill()
+        await proc.wait()
+        raise NoVision(f"детектор лиц не уложился в {FACE_TIMEOUT} с") from e
+    if proc.returncode != 0:
+        tail = err.decode(errors="replace").strip().splitlines()[-2:]
+        raise NoVision("детектор лиц не запустился: " + " | ".join(tail))
+
+    found: dict[str, list[Face]] = {}
+    for line in out.decode(errors="replace").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            raw = json.loads(line)
+        except ValueError:
+            continue
+        found[str(raw.get("path") or "")] = _face_of(raw)
+    return [found.get(str(p), []) for p in shots]
+
+
+def _spread(track: list[Focus], duration: float, n: int,
+            window: tuple[float, float] | None = None) -> list[float]:
+    """По самому спокойному кадру из каждого куска дубля.
+
+    Кандидаты берутся со всей записи, а не из первых секунд: человек
+    входит в кадр когда угодно, и требование «на обложке лицо» иначе не
+    выполнить. Спокойный кадр внутри куска — по той же причине, что и у
+    `calm_at`: середина взмаха рукой смазана.
+
+    `window` сужает поиск до куска нарезки: обложка куска должна быть
+    кадром этого куска, а не соседнего.
+    """
+    start, end = window or (STILL_SKIP, duration)
+    start = max(start, STILL_SKIP if not window else start)
+    if end <= start:
+        return []
+    n = max(1, n)
+    step = (end - start) / n
+    out: list[float] = []
+    for i in range(n):
+        lo = start + i * step
+        hi = lo + step
+        chunk = [f for f in track if lo <= f.t < hi]
+        out.append(min(chunk, key=lambda f: f.w).t if chunk
+                   else round(lo + step / 2, 2))
+    return out
+
+
+SUB_EDGE = 0.25           # отступ от краёв паузы: титр гаснет не мгновенно
+
+
+def speech_gaps(words: list["Word"], duration: float) -> list[tuple[float, float]]:
+    """Куски, где не звучит ни одного слова, — по пословному транскрипту.
+
+    Точнее пауз из `silences`: тишиной там считается уровень звука, а
+    вшитый субтитр держится ровно по словам. Хвост после последней
+    реплики тишиной обычно не признаётся вовсе (дыхание, комната), а
+    субтитра там уже нет — и это лучший кадр под обложку.
+    """
+    out: list[tuple[float, float]] = []
+    cursor = 0.0
+    for w in sorted(words, key=lambda w: w.start):
+        if w.start > cursor:
+            out.append((cursor, w.start))
+        cursor = max(cursor, w.end)
+    if duration > cursor:
+        out.append((cursor, duration))
+    return out
+
+
+def quiet_times(quiet: list[tuple[float, float]],
+                window: tuple[float, float] | None = None,
+                min_len: float | None = None) -> list[float]:
+    """Середины пауз — секунды, где на записи никто не говорит.
+
+    Нужны обложке. Записи, снятые не в этом заводе, часто приходят с
+    вшитыми субтитрами, и кадр посреди реплики уносит на обложку чужую
+    строку поверх лица. Где человек молчит, титра нет — это факт
+    записи, а не догадка по пикселям, и считается он бесплатно: паузы
+    монтаж уже нашёл, чтобы их вырезать.
+    """
+    out: list[float] = []
+    for a, b in quiet:
+        # Отступаем от краёв паузы: титр гаснет не в ту же миллисекунду,
+        # в которую человек замолчал.
+        lo, hi = a + SUB_EDGE, b - SUB_EDGE
+        if b - a < (SILENCE_MIN + 2 * SUB_EDGE if min_len is None else min_len):
+            continue
+        t = min(max((a + b) / 2, lo, STILL_SKIP), hi)
+        if t < STILL_SKIP or (window and not (window[0] <= t <= window[1])):
+            continue
+        out.append(round(t, 2))
+    return out
+
+
+@dataclass
+class Shot:
+    """Кадр, который встанет на обложку."""
+    at: float
+    path: Path | None = None
+    face: Face | None = None
+    note: str | None = None      # что не сошлось, человеку строкой
+
+
+async def cover_shot(video: Path, track: list[Focus], duration: float,
+                     out: Path, *,
+                     window: tuple[float, float] | None = None,
+                     quiet: list[tuple[float, float]] | None = None,
+                     words: list["Word"] | None = None) -> Shot:
+    """Кадр под обложку: с лицом, в паузе, иначе самый спокойный.
+
+    Возвращает и рамку лица — по ней монтаж уводит текст так, чтобы он не
+    лёг человеку на лицо. `window` сужает поиск до куска нарезки,
+    `quiet` — паузы дубля: кадр из паузы предпочтительнее, потому что на
+    записи с вшитыми субтитрами там нет чужой строки.
+    """
+    if window:
+        inside = [f for f in track if window[0] <= f.t <= window[1]] or track
+        calm = calm_at(inside, window=window[1])
+    else:
+        calm = calm_at(track)
+    # Транскрипт точнее тишины: субтитр держится по словам, а не по
+    # уровню звука. Есть он — считаем по нему, нет — по паузам.
+    if words:
+        silent = quiet_times(speech_gaps(words, duration), window,
+                             min_len=2 * SUB_EDGE)[:FACE_SHOTS]
+    else:
+        silent = quiet_times(quiet or [], window)[:FACE_SHOTS]
+    times = _spread(track, duration, FACE_SHOTS, window)
+    times = silent + [t for t in sorted({calm, *times}) if t not in silent]
+
+    probes: list[Path] = []
+    try:
+        for i, t in enumerate(times):
+            probes.append(await still(video, t, out.parent / f".probe-{i}.png"))
+        found = await faces(probes)
+    except NoFfmpeg:
+        for p in probes:
+            p.unlink(missing_ok=True)
+        raise
+    except NoVision as e:
+        for p in probes:
+            p.unlink(missing_ok=True)
+        return Shot(calm, await still(video, calm, out), None,
+                    f"лицо в кадре не искали ({e}) — на обложку взят самый "
+                    f"спокойный кадр ({calm:.1f} с)")
+
+    # Порядок предпочтения: сначала кадры из пауз (там нет вшитого
+    # субтитра), внутри них — тот, где лицо крупнее. Обложка с человеком
+    # в полный рост на плитке 1080×1920 читается хуже, чем портрет.
+    def pick(among: list[float]) -> tuple[float, Face] | None:
+        best: tuple[float, Face] | None = None
+        for t, fs in zip(times, found):
+            if t not in among or not fs:
+                continue
+            face = max(fs, key=lambda f: f.w * f.h)
+            if best is None or face.w * face.h > best[1].w * best[1].h:
+                best = (t, face)
+        return best
+
+    for p in probes:
+        p.unlink(missing_ok=True)
+
+    note = None
+    best = pick(silent)
+    if best is None:
+        best = pick(times)
+        if best is not None and silent:
+            note = ("в паузах дубля лица не нашлось — кадр взят из речи, "
+                    "и если на записи вшиты субтитры, строка попадёт "
+                    "на обложку")
+    if best is None:
+        return Shot(calm, await still(video, calm, out), None,
+                    f"лица в дубле не нашлось — на обложку взят самый "
+                    f"спокойный кадр ({calm:.1f} с)")
+    at, face = best
+    return Shot(at, await still(video, at, out), face, note)
+
+
+# ── словарь исправлений: что слышно → что сказано ─────────────────────
+#
+# Whisper слышит русскую речь, а бренд говорит именами: Claude, Remotion,
+# Anthropic, названия своих продуктов. В словаре модели их нет, и в
+# караоке приезжает «клод», «ремоушен», «антропик» — ошибка не случайная,
+# а одна и та же на каждом дубле. Значит лечится она таблицей бренда, а
+# не переслушиванием: модель здесь не зовут вовсе.
+#
+# Замена идёт по нормализованной форме (регистр, «ё», знаки препинания не
+# считаются) и по фразе целиком, а не по одному слову: «клод код» это два
+# слова транскрипта и одно имя. Тайминги фразы раскладываются поровну на
+# слова замены, хвостовой знак препинания остаётся от исходного слова —
+# иначе запятая в караоке пропадёт вместе с ошибкой.
+
+_WORD_RX = re.compile(r"\w+", re.U)
+_TAIL_RX = re.compile(r"[^\w]+$", re.U)
+MIN_WORD = 0.12           # столько держится слово, если тайминги схлопнулись
+
+
+def norm(text: str) -> str:
+    """Форма для сравнения: без регистра, «ё» и знаков препинания."""
+    return " ".join(_WORD_RX.findall(text.lower().replace("ё", "е")))
+
+
+def _respan(run: list[dict], dst: str) -> list[dict]:
+    """Слова замены на таймингах исходной фразы."""
+    parts = dst.split()
+    if not parts:
+        return []                       # пустая замена — слово выброшено
+    first = str(run[0]["text"])
+    if first[:1].isupper() and parts[0][:1].islower():
+        parts[0] = parts[0][0].upper() + parts[0][1:]
+    tail = _TAIL_RX.search(str(run[-1]["text"]))
+    if tail:
+        parts[-1] += tail.group()
+
+    start, end = float(run[0]["start"]), float(run[-1]["end"])
+    step = (end - start) / len(parts)
+    if step <= 0:
+        step = MIN_WORD
+    return [{"text": p, "start": round(start + i * step, 3),
+             "end": round(start + (i + 1) * step, 3)}
+            for i, p in enumerate(parts)]
+
+
+def relex(words: list[dict],
+          rules: list[tuple[str, str]]) -> tuple[list[dict], int]:
+    """Пословный транскрипт → он же с исправлениями словаря.
+
+    Вторым — сколько слов транскрипта поправлено: человеку это строка в
+    карточке, а не тихая правка у него за спиной.
+    """
+    table: dict[str, str] = {}
+    for src, dst in rules:
+        key = norm(src)
+        if key:
+            table[key] = dst.strip()
+    if not table or not words:
+        return list(words), 0
+
+    span = max(len(k.split()) for k in table)
+    out: list[dict] = []
+    fixed = 0
+    i = 0
+    while i < len(words):
+        hit = None
+        # Длинная фраза важнее короткой: «клод код» не должен разбираться
+        # правилом про «клод», иначе второе слово останется как слышно.
+        for n in range(min(span, len(words) - i), 0, -1):
+            key = norm(" ".join(str(w["text"]) for w in words[i:i + n]))
+            if key in table:
+                hit = (n, table[key])
+                break
+        if hit is None:
+            out.append(words[i])
+            i += 1
+            continue
+        n, dst = hit
+        out.extend(_respan(words[i:i + n], dst))
+        fixed += n
+        i += n
+    return out, fixed
