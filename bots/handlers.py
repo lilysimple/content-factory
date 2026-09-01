@@ -165,7 +165,13 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
                            f"Задача <code>{task_id}</code>, это займёт "
                            "несколько минут.", topic=tkey)
 
-        res = await bridge.run(task_id)
+        # Одной фразы на пять минут мало: человек не отличает «идёт работа»
+        # от «зависло». Мост зовёт это на каждый вход и выход субагента.
+        async def step(text: str) -> None:
+            await registry.say("assistant", chat_id, text, topic=tkey,
+                               with_label=False)
+
+        res = await bridge.run(task_id, on_step=step)
 
         if not res.ok:
             await registry.say("assistant", chat_id,

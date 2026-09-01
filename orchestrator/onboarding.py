@@ -143,7 +143,7 @@ async def _save_upload(reg, chat_id: int, doc) -> files.Extracted | None:
     blob = buf.read()
     (folder / name).write_bytes(blob)
 
-    item = files.extract(blob, name)
+    item = await files.aextract(blob, name)
     log.info("файл %s → %s", name, item.summary())
     return item
 
@@ -162,7 +162,9 @@ def _stored_uploads(chat_id: int, names: list[str]) -> list[files.Extracted]:
 async def _unpack_task(reg, chat_id: int, urls: list[str], text: str,
                        upload_names: list[str] | None = None) -> None:
     """Читает источники и собирает черновик. Идёт параллельно с O3."""
-    uploads = _stored_uploads(chat_id, upload_names or [])
+    # Разбор пачки файлов уводим в поток целиком: внутри pypdf и docx.
+    uploads = await asyncio.to_thread(
+        _stored_uploads, chat_id, upload_names or [])
     try:
         draft = await unpack.run(chat_id, urls, text, uploads)
     except agent.BudgetExceeded as e:
@@ -275,10 +277,11 @@ async def _finish(reg, chat_id: int) -> None:
         core += "\n\n## Уточнено на онбординге\n\n" + \
                 "\n".join(f"- **{q}** {a}" for q, a in ans)
 
-    version = b.write("core", core, reason="подтверждено ЯДРО на онбординге")
+    version = await b.awrite("core", core,
+                             reason="подтверждено ЯДРО на онбординге")
     moved, samples = materials.adopt(chat_id, b)
     if moved or samples:
-        b.write("core", core, reason="исходники перенесены в бренд")
+        await b.awrite("core", core, reason="исходники перенесены в бренд")
     _save(chat_id, st, "O9")
     # Без этого тенант навсегда остаётся в онбординге: каждое следующее
     # сообщение уходит в анкету, а маршрутизация по ролям не включается.

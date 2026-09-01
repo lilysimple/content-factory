@@ -245,7 +245,7 @@ async def on_edit_callback(reg, chat_id: int, action: str) -> None:
     b = _brand(chat_id)
     if b is None:
         return
-    version = b.write("core", text, reason="правка профиля из чата")
+    version = await b.awrite("core", text, reason="правка профиля из чата")
     await reg.say("assistant", chat_id,
                   f"Записал. Версия <code>{version}</code>. "
                   "Посмотреть: «покажи ядро».")
@@ -270,7 +270,8 @@ async def on_callback(reg, chat_id: int, action: str) -> None:
     # и отображаемое имя внутри файла.
     name = draft.brand_name() or b.name()
     core = draft.to_core_md(name, owner=b.owner())
-    version = b.write("core", core, reason="профиль уточнён по новым материалам")
+    version = await b.awrite("core", core,
+                             reason="профиль уточнён по новым материалам")
     moved, samples = materials.adopt(chat_id, b)
     db.set_tenant(chat_id, brand_name=name)
 

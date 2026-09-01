@@ -34,7 +34,53 @@ from validators import check_script, check_voice
 log = logging.getLogger("reels")
 
 MAX_ROUNDS = 2
-MAX_TOKENS = 8000
+# См. editor.MAX_TOKENS: мышление считается вместе с ответом.
+MAX_TOKENS = 16000
+
+# Схема ответа. Форму гарантирует API, а не просьба в промпте: до этого
+# сорвавшийся ответ («вот текст поста:» перед скобкой) стоил круга, а их
+# всего два. Схема закрытая — все поля обязательны, лишних нет, — иначе
+# структурированный вывод её не примет. Держать в согласии с секцией
+# «Формат выдачи» в roles/reels.md: расходятся — модель выполнит схему,
+# а промпт соврёт человеку.
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "idea": {"type": "string"},
+        "seconds": {"type": "integer"},
+        "blocks": {
+            "type": "object",
+            "properties": {
+                "hook": {"type": "string"},
+                "recognition": {"type": "string"},
+                "reason": {"type": "string"},
+                "shift": {"type": "string"},
+                "step": {"type": "string"},
+                "cta": {"type": "string"},
+            },
+            "required": ["hook", "recognition", "reason", "shift", "step",
+                         "cta"],
+            "additionalProperties": False,
+        },
+        "spare_hooks": {"type": "array", "items": {"type": "string"}},
+        "checks": {
+            "type": "object",
+            "properties": {
+                "hook": {"type": "integer"},
+                "recognition": {"type": "integer"},
+                "step": {"type": "integer"},
+                "voice": {"type": "integer"},
+                "speech": {"type": "integer"},
+            },
+            "required": ["hook", "recognition", "step", "voice", "speech"],
+            "additionalProperties": False,
+        },
+        "notes": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["idea", "seconds", "blocks", "spare_hooks", "checks",
+                 "notes"],
+    "additionalProperties": False,
+}
 VOICE_FLOOR = 3              # балл voice ниже — автоматический отказ
 
 # Форматы, которые снимают, а не пишут. Набор один на завод, см. strategy.
@@ -217,7 +263,7 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
 
         answer = await agent.ask("reels", chat_id, prompt,
                                  brand_name=b.name(), profile=profile,
-                                 max_tokens=MAX_TOKENS)
+                                 max_tokens=MAX_TOKENS, schema=SCHEMA)
         data = agent.parse_json(answer, who="редактор reels")
         reel.idea = str(data.get("idea") or "").strip()
         reel.blocks = {k: str(v or "").strip()
@@ -268,6 +314,33 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
 FRAG_MIN, FRAG_MAX = 20.0, 60.0
 FRAG_WANT = 5                # больше пяти на одну запись человек не смотрит
 FRAG_TOKENS = 4000
+
+# Нарезка отвечает другой формой, чем сценарий, — своя схема. Числа тут
+# именно number: время приходит дробным. Разбор в `_fit` остаётся строгим
+# и без схемы: он ловит и «0:20» строкой, и куски за границей записи.
+FRAG_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "fragments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "number"},
+                    "end": {"type": "number"},
+                    "hook": {"type": "string"},
+                    "title": {"type": "string"},
+                    "why": {"type": "string"},
+                },
+                "required": ["start", "end", "hook", "title", "why"],
+                "additionalProperties": False,
+            },
+        },
+        "notes": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["fragments", "notes"],
+    "additionalProperties": False,
+}
 TRANSCRIPT_LINE = 12         # слов в строке расшифровки
 
 
@@ -375,7 +448,7 @@ async def fragments(chat_id: int, words: list[Any], duration: float, *,
 
     answer = await agent.ask("reels", chat_id, prompt, brand_name=b.name(),
                              profile=desk.profile(b, SECTIONS),
-                             max_tokens=FRAG_TOKENS)
+                             max_tokens=FRAG_TOKENS, schema=FRAG_SCHEMA)
     data = agent.parse_json(answer, who="редактор reels")
 
     good, lost = _fit(list(data.get("fragments") or []), duration)

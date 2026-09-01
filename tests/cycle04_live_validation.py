@@ -28,15 +28,22 @@ async def main() -> None:
 
     await strategy.run(reg, CHAT, "план на неделю")
 
-    rows = db.q("SELECT id, date, goal, title FROM themes WHERE chat_id = ?", CHAT)
+    rows = db.q("SELECT id, date, plat, goal, title FROM themes "
+                "WHERE chat_id = ?", CHAT)
     check("план собрался", len(rows) >= 5, f"тем {len(rows)}")
     check("все даты внутри окна", {r["date"] for r in rows} <= win,
           str(sorted({r["date"] for r in rows} - win)))
-    check("на день не больше одной темы",
-          len({r["date"] for r in rows}) == len(rows),
-          "две темы в один день")
+    # Слот это пара «дата плюс площадка», а не день: в один день выходят и
+    # пост в Telegram, и карусель в Instagram — так написано в профиле и в
+    # NOTES.md. Проверка «одна тема в день» пришла из августа, когда
+    # площадка была одна; после того как 31.08 завели `platforms.md` с
+    # Instagram, она стала запрещать ровно то поведение, которого профиль
+    # требует.
+    check("слот не задвоен",
+          len({(r["date"], r["plat"]) for r in rows}) == len(rows),
+          "две темы в один слот")
     check("id собрались правильно",
-          all(r["id"] == f"{r['date']}-telegram-01" for r in rows),
+          all(r["id"] == f"{r['date']}-{r['plat']}-01" for r in rows),
           str([r["id"] for r in rows][:3]))
 
     card = reg.last()

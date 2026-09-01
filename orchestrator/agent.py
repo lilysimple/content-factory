@@ -152,8 +152,12 @@ def _log_usage(role: str, resp: Any) -> None:
     fresh = getattr(u, "input_tokens", 0) or 0
     total = read + write + fresh
     share = f"{read * 100 // total}%" if total else "—"
-    log.info("%s: вход %s (из кеша %s, %s), выход %s",
-             role, total, read, share, getattr(u, "output_tokens", 0))
+    # Запись показываем рядом с чтением: без неё не видно, сколько стоит
+    # холодный старт, и не на чем решать вопрос про часовой TTL. Час стоит
+    # 2× за запись против 1.25× за пять минут и окупается с третьего
+    # чтения — значит решает не догадка, а вот эти две цифры за неделю.
+    log.info("%s: вход %s (из кеша %s, %s; записано %s), выход %s",
+             role, total, read, share, write, getattr(u, "output_tokens", 0))
 
 
 JSON_BLOCK = re.compile(r"\{.*\}", re.S)
@@ -205,6 +209,7 @@ async def ask(
     extra_system: str = "",
     max_tokens: int = 8000,
     effort: str = "",
+    schema: dict[str, Any] | None = None,
 ) -> str:
     """Спросить модель от лица роли. Возвращает текст.
 
@@ -214,6 +219,17 @@ async def ask(
 
     Параметра temperature нет намеренно: на Opus 5 он снят и возвращает 400.
     Тон задаётся промптом, а не сэмплингом.
+
+    `schema` — JSON Schema ответа. Передана — API **гарантирует** форму, и
+    `parse_json` разбирает ответ первой же строкой, без вылавливания
+    регуляркой. Без неё роль просят про JSON только словами промпта, и
+    любой сорвавшийся ответ стоит круга: у Редактора и Reels круг всего
+    два, и один из них уходил на то, чтобы модель написала то же самое,
+    но без пояснения вокруг.
+
+    Схема должна быть закрытой: все поля в `required`, никаких
+    дополнительных ключей. Открытый словарь (слоты Дизайнера) так не
+    описывается — там схемы нет, и это не забывчивость.
     """
     used = db.bump_llm(chat_id, date.today().isoformat())
     if used > cfg.llm_budget_day:
@@ -224,6 +240,12 @@ async def ask(
                           profile=profile, stable=stable, extra=extra_system)
     model = cfg.model_for(role)
 
+    # Усилие и формат живут в одном объекте: перезаписать его схемой
+    # значило бы молча вернуть роль на дефолтное усилие.
+    output_config: dict[str, Any] = {"effort": effort or cfg.effort_for(role)}
+    if schema:
+        output_config["format"] = {"type": "json_schema", "schema": schema}
+
     delay = 2.0
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -231,7 +253,7 @@ async def ask(
                 model=model,
                 max_tokens=max_tokens,
                 system=system,
-                output_config={"effort": effort or cfg.effort_for(role)},
+                output_config=output_config,
                 messages=[{"role": "user", "content": prompt}],
             )
             _log_usage(role, resp)

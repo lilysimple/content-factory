@@ -29,7 +29,42 @@ from validators import check_voice
 log = logging.getLogger("editor")
 
 MAX_ROUNDS = 2
-MAX_TOKENS = 8000
+# Мышление на Opus 5 считается в тот же потолок, что и ответ. На 8000
+# длинный пост с рассуждением обрывался на середине — а обрыв это битый
+# JSON, то есть второй круг и удвоенное время на ровном месте.
+MAX_TOKENS = 16000
+
+# Схема ответа. Форму гарантирует API, а не просьба в промпте: до этого
+# сорвавшийся ответ («вот текст поста:» перед скобкой) стоил круга, а их
+# всего два. Схема закрытая — все поля обязательны, лишних нет, — иначе
+# структурированный вывод её не примет. Держать в согласии с секцией
+# «Формат выдачи» в roles/editor.md: расходятся — модель выполнит схему,
+# а промпт соврёт человеку.
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "theme_id": {"type": "string"},
+        "text": {"type": "string"},
+        "checks": {
+            "type": "object",
+            "properties": {
+                "hook": {"type": "integer"},
+                "recognition": {"type": "integer"},
+                "pass_on": {"type": "integer"},
+                "voice": {"type": "integer"},
+                "freshness": {"type": "integer"},
+            },
+            "required": ["hook", "recognition", "pass_on", "voice",
+                         "freshness"],
+            "additionalProperties": False,
+        },
+        "hold": {"type": "string"},
+        "breaks": {"type": "string"},
+        "notes": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["theme_id", "text", "checks", "hold", "breaks", "notes"],
+    "additionalProperties": False,
+}
 VOICE_FLOOR = 3              # балл voice ниже — автоматический отказ
 
 # Профиль Редактору нужен весь про голос: он им и пишет.
@@ -146,7 +181,7 @@ async def build(chat_id: int, ask: str, *, say=None) -> Draft:
 
         answer = await agent.ask("editor", chat_id, prompt,
                                  brand_name=b.name(), profile=profile,
-                                 max_tokens=MAX_TOKENS)
+                                 max_tokens=MAX_TOKENS, schema=SCHEMA)
         data = agent.parse_json(answer, who="редактор")
         draft.text = str(data.get("text") or "").strip()
         draft.checks = {k: int(v) for k, v in (data.get("checks") or {}).items()

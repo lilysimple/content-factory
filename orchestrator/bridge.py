@@ -34,6 +34,7 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from config import ROOT
@@ -678,16 +679,157 @@ def _prompt(task_id: str) -> str:
             f"tasks/{task_id}/final.md.")
 
 
-async def run(task_id: str) -> Result:
-    """Запустить Claude Code на задаче и дождаться результата."""
+# Одно событие — одна строка stdout. Строка бывает длинной: `init` со
+# списком инструментов уже около пяти килобайт.
+EVENT_LIMIT = 8 * 1024 * 1024
+
+# Как зовут субагентов человеку. Ключ — имя из `.claude/agents/`.
+# Незнакомое имя показывается как есть: новый субагент лучше появится в
+# чате безымянным, чем пропадёт из отчёта совсем.
+AGENT_NAMES = {
+    "researcher": "Ресёрчер",
+    "strategist": "Стратег",
+    "ideator": "Идеатор",
+    "writer": "Редактор",
+    "reels": "Редактор Reels",
+    "designer": "Дизайнер",
+}
+
+# Куда сообщать о ходе прогона. Возвращать ничего не надо, упасть — нельзя:
+# прогресс это удобство, а не работа, и ронять из-за него задачу незачем.
+StepCb = Callable[[str], Awaitable[None]]
+
+
+def _agent_of(block: dict[str, Any]) -> tuple[str, str]:
+    """Из блока `tool_use` — (id вызова, имя субагента). Не субагент — («», «»).
+
+    Имя ведём по id, а не по порядку: субагентов можно звать несколькими
+    в одном ходу, и тогда «закончил» без id приписывается не тому.
+    """
+    if block.get("type") != "tool_use":
+        return "", ""
+    if block.get("name") not in ("Task", "Agent"):
+        return "", ""
+    raw = str((block.get("input") or {}).get("subagent_type") or "").strip()
+    if not raw:
+        return "", ""
+    return str(block.get("id") or ""), AGENT_NAMES.get(raw, raw)
+
+
+async def _stream(stdout: asyncio.StreamReader, res: Result,
+                  on_step: StepCb | None) -> str:
+    """Прочитать поток событий CLI. Возвращает сырой stdout для диагностики.
+
+    Раньше мост ждал процесс молча до получаса и брал из него один JSON в
+    конце. Человек в чате видел «займёт до минуты» и тишину, а мы —
+    единственную цифру, длительность всего прогона: на вопрос «где ушли
+    четыре минуты из пяти» ответить было нечем.
+
+    Здесь разбирается три вида событий и игнорируется всё остальное:
+
+      assistant  → вызовы субагентов, из них строится прогресс и тайминги
+      result     → итог: цена, сессия, последняя реплика Director
+      прочее     → системная инициализация, лимиты, результаты инструментов
+
+    Разбор ничего не решает: `final.md` по-прежнему единственный контракт.
+    Событие, которое не разобралось, — строка в логе, а не провал задачи.
+    """
+    raw: list[str] = []
+    started: dict[str, tuple[str, float]] = {}    # id вызова → (имя, когда)
+
+    async def tell(text: str) -> None:
+        if on_step is None:
+            return
+        try:
+            await on_step(text)
+        except Exception as e:                    # noqa: BLE001
+            # Не дошло сообщение о ходе работы — сама работа не при чём.
+            log.warning("%s: прогресс не ушёл: %s", res.task_id, e)
+
+    while True:
+        try:
+            line = await stdout.readline()
+        except (ValueError, asyncio.LimitOverrunError):
+            # Строка длиннее буфера. Событие потеряно, прогон — нет.
+            log.warning("%s: событие длиннее %s байт, пропущено",
+                        res.task_id, EVENT_LIMIT)
+            continue
+        if not line:
+            break
+
+        text = line.decode("utf-8", "replace").rstrip()
+        if not text:
+            continue
+        raw.append(text)
+
+        try:
+            ev = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+
+        kind = ev.get("type")
+
+        if kind == "assistant":
+            for blk in (ev.get("message") or {}).get("content") or []:
+                if not isinstance(blk, dict):
+                    continue
+                call_id, name = _agent_of(blk)
+                if name:
+                    started[call_id] = (name, time.monotonic())
+                    log.info("%s: пошёл %s", res.task_id, name)
+                    await tell(f"{name} взялся за работу.")
+
+        elif kind == "user":
+            for call_id in _results_in(ev):
+                if call_id not in started:
+                    continue                      # обычный инструмент, не роль
+                name, at = started.pop(call_id)
+                secs = round(time.monotonic() - at)
+                log.info("%s: %s закончил за %s с", res.task_id, name, secs)
+                await tell(f"{name} закончил, {secs} с.")
+
+        elif kind == "result":
+            res.cost = ev.get("total_cost_usd")
+            res.session_id = str(ev.get("session_id") or "")
+            res.said = str(ev.get("result") or "").strip()
+            if stats := ev.get("subagent_stats"):
+                log.info("%s: субагентов запущено %s, завершилось %s",
+                         res.task_id, stats.get("spawned"),
+                         stats.get("completed"))
+
+    return "\n".join(raw)
+
+
+def _results_in(ev: dict[str, Any]) -> list[str]:
+    """Id вызовов, чьи результаты приехали этим событием `user`."""
+    out = []
+    for blk in (ev.get("message") or {}).get("content") or []:
+        if isinstance(blk, dict) and blk.get("type") == "tool_result":
+            if call_id := str(blk.get("tool_use_id") or ""):
+                out.append(call_id)
+    return out
+
+
+async def run(task_id: str, on_step: StepCb | None = None) -> Result:
+    """Запустить Claude Code на задаче и дождаться результата.
+
+    `on_step` зовётся по ходу прогона: «пошёл Ресёрчер», «Ресёрчер
+    закончил». Не передан — мост работает ровно как раньше, молча.
+    """
     res = Result(task_id=task_id)
     binary = which_claude()
     if not binary:
         return _fail(res, "бинарь claude не найден: ни в PATH, ни в "
                           + ", ".join(FALLBACK_BINS))
 
+    # `--verbose` тут не про болтливость: без него CLI отказывается отдавать
+    # поток событий вместе с `-p`. Формат `stream-json` — тот же результат,
+    # что и `json`, но строкой на событие, и последняя строка это `result`.
     argv = [binary, "-p", _prompt(task_id), "--allowedTools", TOOLS,
-            "--permission-mode", "acceptEdits", "--output-format", "json"]
+            "--permission-mode", "acceptEdits",
+            "--output-format", "stream-json", "--verbose"]
 
     # Цифры снимаются до старта: три с половиной секунды сети здесь дешевле
     # восьми ходов модели на разведку там.
@@ -697,34 +839,49 @@ async def run(task_id: str) -> Result:
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=str(ROOT), env=clean_env(),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            # Без DEVNULL CLI три секунды ждёт данных на stdin и говорит об
+            # этом предупреждением. Ждать нечего: задача уже лежит в argv.
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            # Одно событие это одна строка, и строка бывает длинной: init со
+            # списком инструментов уже пять килобайт, ответ роли — сотни.
+            # Дефолтные 64 КБ рвут разбор ровно на самой интересной задаче.
+            limit=EVENT_LIMIT)
+
+        # stdout читаем построчно, stderr — целиком и параллельно. Иначе
+        # полный буфер stderr остановит процесс, а мы будем ждать его stdout.
+        events = asyncio.create_task(_stream(proc.stdout, res, on_step))
+        errors = asyncio.create_task(proc.stderr.read())
         try:
-            out, err = await asyncio.wait_for(proc.communicate(),
-                                              timeout=TIMEOUT)
+            await asyncio.wait_for(
+                asyncio.gather(events, errors, proc.wait()), timeout=TIMEOUT)
         except asyncio.TimeoutError:
+            events.cancel()
+            errors.cancel()
             proc.kill()
             await proc.wait()
             res.secs = round(time.monotonic() - started, 1)
             await harvest(res)
             return _fail(res, f"не уложился в {TIMEOUT} с", status="timeout")
+        except Exception as e:                    # noqa: BLE001
+            # Разбор потока не должен уносить задачу трейсбеком в чат:
+            # работа могла удаться и лежать на диске. Гасим процесс,
+            # собираем что есть и говорим человеку словами.
+            events.cancel()
+            errors.cancel()
+            proc.kill()
+            await proc.wait()
+            res.secs = round(time.monotonic() - started, 1)
+            await harvest(res)
+            log.exception("%s: разбор потока сорвался", task_id)
+            return _fail(res, f"поток событий не разобрался: {e}")
     except OSError as e:
         return _fail(res, f"не удалось запустить процесс: {e}")
 
     res.secs = round(time.monotonic() - started, 1)
     await harvest(res)
-    stdout = out.decode("utf-8", "replace").strip()
-    stderr = err.decode("utf-8", "replace").strip()
-
-    # Диагностика из JSON-вывода. Её отсутствие не делает задачу проваленной:
-    # результат лежит в файле, а не в stdout.
-    if stdout:
-        try:
-            data = json.loads(stdout)
-            res.cost = data.get("total_cost_usd")
-            res.session_id = str(data.get("session_id") or "")
-            res.said = str(data.get("result") or "").strip()
-        except json.JSONDecodeError:
-            log.warning("%s: stdout не разобрался как JSON", task_id)
+    stdout = events.result()
+    stderr = errors.result().decode("utf-8", "replace").strip()
 
     if proc.returncode != 0:
         return _fail(res, _reason(stdout, stderr, proc.returncode, res.said))

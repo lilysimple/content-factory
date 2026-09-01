@@ -46,7 +46,12 @@ TODAY = "2026-08-29"
 
 
 def fake_claude(body: str) -> None:
-    """Подменить `claude` скриптом. Тело пишется на shell."""
+    """Подменить `claude` скриптом. Тело пишется на shell.
+
+    Настоящий CLI зовётся с `--output-format stream-json`: строка на
+    событие, последняя — `{"type":"result", ...}`. Подделка отдаёт то же
+    самое, иначе стенд проверял бы формат, которого больше нет.
+    """
     p = BIN / "claude"
     p.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
     p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
@@ -281,7 +286,7 @@ async def main() -> None:
     fake_claude(
         f'printf "%s" "План недели готов." > "{d}/final.md"\n'
         f'printf "%s" "скелет" > "{d}/strategy.md"\n'
-        'echo \'{"total_cost_usd": 0.42, "session_id": "abc", "is_error": false}\'')
+        'echo \'{"type":"result","total_cost_usd": 0.42, "session_id": "abc", "is_error": false}\'')
 
     res = await bridge.run(tid)
     check("прогон успешен", res.ok, res.error)
@@ -314,6 +319,72 @@ async def main() -> None:
           str(r and r["estimated_api_cost"]))
     check("finished_at проставлен", r and r["finished_at"])
 
+    # ── прогресс по ходу прогона ──────────────────────────────────────
+    # Пять минут молчания человек читает как поломку. Мост разбирает поток
+    # событий CLI и говорит, кто взялся и кто закончил. Привязка идёт по id
+    # вызова: субагентов зовут и по двое в одном ходу, и без id «закончил»
+    # приписывается не тому.
+    reset()
+    tid = bridge.create_task(CHAT, "план", workflow="plan", today=TODAY)
+    d = bridge.TASKS_DIR / tid
+
+    # Событие собирается сериализатором, а не руками: JSON со скобками
+    # внутри f-строки уже терял закрывающую, и разбор молча пропускал
+    # строку — проверка падала не там, где сломано.
+    import json as _j
+
+    def call(cid: str, kind: str) -> str:
+        return _j.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": cid, "name": "Task",
+             "input": {"subagent_type": kind}}]}})
+
+    def done(cid: str) -> str:
+        return _j.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": cid}]}})
+
+    RESULT = '{"type":"result","total_cost_usd":0.5}'
+    fake_claude(
+        f"echo '{call('t1', 'researcher')}'\n"
+        f"echo '{done('t1')}'\n"
+        f"echo '{call('t2', 'strategist')}'\n"
+        f"echo '{done('t2')}'\n"
+        f'printf "%s" "Готово." > "{d}/final.md"\n'
+        f"echo '{RESULT}'")
+
+    steps: list[str] = []
+
+    async def step(text: str) -> None:
+        steps.append(text)
+
+    res = await bridge.run(tid, on_step=step)
+    check("прогон с потоком успешен", res.ok, res.error)
+    check("стоимость снята из события result", res.cost == 0.5, str(res.cost))
+    check("роли названы по-русски",
+          any("Ресёрчер" in t for t in steps)
+          and any("Стратег" in t for t in steps), str(steps))
+    check("сказано и про начало, и про конец",
+          sum("взялся" in t for t in steps) == 2
+          and sum("закончил" in t for t in steps) == 2, str(steps))
+    check("порядок не перепутан",
+          len(steps) == 4 and steps[0].startswith("Ресёрчер")
+          and steps[2].startswith("Стратег"), str(steps))
+
+    # Прогресс это удобство, а не работа. Отправка в чат может не пройти —
+    # сеть, слетевший топик, — и задача из-за этого падать не должна.
+    reset()
+    tid = bridge.create_task(CHAT, "план", workflow="plan", today=TODAY)
+    d = bridge.TASKS_DIR / tid
+    fake_claude(
+        f"echo '{call('t1', 'writer')}'\n"
+        f'printf "%s" "Готово." > "{d}/final.md"\n'
+        f"echo '{RESULT}'")
+
+    async def broken(text: str) -> None:
+        raise RuntimeError("сеть отвалилась")
+
+    res = await bridge.run(tid, on_step=broken)
+    check("упавший прогресс не роняет задачу", res.ok, res.error)
+
     # ── грязный final.md доходит целиком ──────────────────────────────
     reset()
     tid = bridge.create_task(CHAT, "план", workflow="plan", today=TODAY)
@@ -331,7 +402,7 @@ async def main() -> None:
     # ── отработал, но final.md нет ────────────────────────────────────
     reset()
     tid = bridge.create_task(CHAT, "план", workflow="plan", today=TODAY)
-    fake_claude('echo \'{"total_cost_usd": 0.1}\'')
+    fake_claude('echo \'{"type":"result","total_cost_usd": 0.1}\'')
     res = await bridge.run(tid)
     check("без final.md это провал", not res.ok)
     check("причина названа прямо", "final.md" in res.error, res.error)
@@ -347,7 +418,7 @@ async def main() -> None:
     reset()
     tid = bridge.create_task(CHAT, "план", workflow="plan", today=TODAY)
     fake_claude(
-        'echo \'{"total_cost_usd": 0.93, "result": '
+        'echo \'{"type":"result","total_cost_usd": 0.93, "result": '
         '"Ресёрчер работает в фоне, подхвачу когда закончит."}\'')
     res = await bridge.run(tid)
     check("провал без final.md", not res.ok)

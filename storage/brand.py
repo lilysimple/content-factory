@@ -10,6 +10,7 @@ sources.md) и артефакты (тексты, макеты, фото). Гор
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import re
@@ -133,6 +134,22 @@ class Brand:
         path.write_text(content.rstrip() + "\n", encoding="utf-8")
         _commit(self.root, f"{self.slug}: {reason}")
         return self.version()
+
+    async def awrite(self, key: str, content: str, *, reason: str) -> str:
+        """То же, что `write`, но не морозит event loop.
+
+        Внутри `write` живёт `git add -A` плюс `git commit` — два
+        подпроцесса с потолком в десять секунд каждый. Синхронный вызов
+        из корутины останавливает поллинг **всех** ботов на это время:
+        Telegram отдаёт обновления другому инстансу, и мы получаем
+        `Conflict` на ровном месте. Ровно этого мост избегает белым
+        списком и асинхронным подпроцессом — здесь та же граната лежала
+        без чеки.
+
+        Синхронный `write` остаётся: им пользуется стенд и код, который
+        и так работает в потоке.
+        """
+        return await asyncio.to_thread(self.write, key, content, reason=reason)
 
     def append(self, rel: str, content: str) -> Path:
         path = self.root / rel

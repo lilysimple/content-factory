@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -73,6 +74,16 @@ def _telegram_export(data: dict) -> tuple[list[str], str]:
 
 
 # ── разбор по типам ───────────────────────────────────────────────────
+
+async def aextract(blob: bytes, filename: str) -> Extracted:
+    """То же, что `extract`, но в отдельном потоке.
+
+    Разбор PDF и docx это чистый CPU: pypdf на сотне страниц держит
+    процесс секунды. Из корутины это останавливает поллинг всех ботов —
+    та же беда, что была у git в `storage/brand.py`.
+    """
+    return await asyncio.to_thread(extract, blob, filename)
+
 
 def extract(blob: bytes, filename: str) -> Extracted:
     name = filename or "файл"

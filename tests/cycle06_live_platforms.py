@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 import harness
 from harness import CHAT, FakeRegistry, check, report
@@ -10,11 +11,33 @@ from harness import CHAT, FakeRegistry, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
-from orchestrator import strategy                                 # noqa: E402
+from orchestrator import desk, strategy                           # noqa: E402
 from storage import db                                            # noqa: E402
 
 db.init(cfg.db_path)
 logging.basicConfig(level=logging.WARNING, format="%(name)s %(message)s")
+
+
+def manual_norm() -> int:
+    """Сколько единиц в неделю человек выкладывает руками, по `platforms.md`.
+
+    Читается таблица «Регулярность»: строка площадки, колонка «В неделю».
+    Профиля нет или строка не разобралась — берём мягкий потолок, чтобы
+    цикл падал на поведении модели, а не на разборе таблицы.
+    """
+    b = desk.brand(CHAT)
+    text = b.section("platforms", "Регулярность") if b else ""
+    total = 0
+    for line in (text or "").splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        plat = cells[0].lower()
+        if plat in strategy.AUTO_PUBLISH or plat not in strategy.PLATFORMS:
+            continue
+        if m := re.match(r"(\d+)", cells[1]):
+            total += int(m.group(1))
+    return total or 5
 
 
 async def main() -> None:
@@ -41,9 +64,16 @@ async def main() -> None:
           len({(r["date"], r["plat"]) for r in rows}) == len(rows),
           "две темы в один слот")
 
+    # Потолок ручной нагрузки берётся из профиля бренда, а не из головы.
+    # Раньше здесь стояла четвёрка, написанная 15.08 — когда `platforms.md`
+    # ещё не существовало. Профиль завели 31.08 с нормой «Instagram 5 в
+    # неделю», и тест стал непроходимым при любом поведении модели: пять
+    # больше четырёх. Проверка, которая не может пройти, не держит границу,
+    # а прячет её. Теперь норма читается оттуда же, откуда её читает роль.
     manual = [r for r in rows if r["plat"] not in strategy.AUTO_PUBLISH]
-    check("ручной нагрузки не больше четырёх за неделю", len(manual) <= 4,
-          f"вне Telegram слотов: {len(manual)}")
+    cap = manual_norm()
+    check("ручная нагрузка в пределах нормы профиля", len(manual) <= cap,
+          f"вне Telegram слотов {len(manual)}, норма профиля {cap}")
 
     card = reg.last()
     rejected = [u for u in card.text.split("Не сошлось:")[-1].split(";")
