@@ -327,14 +327,21 @@ def _slots(chat_id: int) -> list[str]:
 
 
 def _themes(chat_id: int) -> list[str]:
-    """Незакрытые темы фактом: id, слот, формат, статус, заголовок.
+    """Незакрытые темы фактом: id, слот, формат, рубрика, статус, заголовок.
 
     Тому же служит, что и `_slots` у плана: Редактор, Редактор Reels и
     Дизайнер работают «по теме», и без списка Director пойдёт спрашивать
     базу сам. Формат отдаётся колонкой, а не выводом — какая тема чья,
     решает Director по своим правилам, а не Python по формату строки.
+
+    Рубрика едет тем же фактом. Старый путь её отдаёт (`design._brief`),
+    мост не отдавал — и Дизайнер в задаче `2026-09-01-design-01` написал,
+    что списка рубрик нет, и поставил её по смыслу поста. Совпало почти
+    дословно («ИНСТРУМЕНТ» против «Инструмент недели»), но это везение:
+    рубрика лежала в базе и её просто не показали.
     """
-    rows = db.q("SELECT id, date, plat, format, status, title FROM themes "
+    rows = db.q("SELECT id, date, plat, format, rubric, status, title "
+                "FROM themes "
                 "WHERE chat_id = ? AND status IN ('idea', 'draft', 'ready') "
                 "ORDER BY date, id", chat_id)
     if not rows:
@@ -343,12 +350,14 @@ def _themes(chat_id: int) -> list[str]:
                 "скажи об этом в final.md, а не выдумывай её."]
 
     out = ["", "## Незакрытые темы", "",
-           "| id | дата | площадка | формат | статус | заголовок |",
-           "|---|---|---|---|---|---|"]
+           "| id | дата | площадка | формат | рубрика | статус | заголовок |",
+           "|---|---|---|---|---|---|---|"]
     for r in rows[:MAX_THEMES]:
         title = (r["title"] or "").replace("|", "/")[:60]
+        rubric = (r["rubric"] or "").replace("|", "/")[:40]
         out.append(f"| `{r['id']}` | {r['date'] or ''} | {r['plat'] or ''} "
-                   f"| {r['format'] or ''} | {r['status']} | {title} |")
+                   f"| {r['format'] or ''} | {rubric} | {r['status']} "
+                   f"| {title} |")
     if len(rows) > MAX_THEMES:
         out.append("")
         out.append(f"Показаны первые {MAX_THEMES} из {len(rows)}.")

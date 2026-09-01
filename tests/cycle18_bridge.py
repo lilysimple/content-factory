@@ -553,6 +553,35 @@ async def main() -> None:
     check("описание задачи взято из WORKFLOWS",
           bridge.WORKFLOWS["post"] in post_txt)
 
+    # Рубрика едет фактом, а не догадкой роли.
+    #
+    # Старый путь её отдаёт (`design._brief`), мост не отдавал — и в
+    # задаче `2026-09-01-design-01` Дизайнер написал, что списка рубрик
+    # нет, и поставил её по смыслу поста. Совпало почти дословно, и это
+    # везение: рубрика лежала в базе, её просто не показали.
+    #
+    # Тему сеем свою: к этому месту прогона база по темам пуста, и
+    # проверка на чужом севе молча меряла бы пустую таблицу.
+    reset()
+    tid_rub = "2026-09-30-telegram-99"
+    with db.tx() as c:
+        c.execute("DELETE FROM themes WHERE id = ?", (tid_rub,))
+        c.execute("INSERT INTO themes (id, chat_id, date, plat, format, "
+                  "rubric, status, title) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                  (tid_rub, CHAT, "2026-09-30", "telegram", "пост",
+                   "Инструмент недели", "ready", "Тема с рубрикой"))
+    tid_r = bridge.create_task(CHAT, f"свёрстай макет по теме {tid_rub}",
+                               workflow="design", today=OTHER_DAY)
+    rub_txt = (bridge.TASKS_DIR / tid_r / "input.md").read_text(encoding="utf-8")
+    check("в шапке таблицы тем есть колонка рубрики",
+          "| рубрика |" in rub_txt,
+          "иначе роль назначает рубрику сама, имея её в базе")
+    check("рубрика темы доехала в контракт",
+          "Инструмент недели" in rub_txt,
+          "Дизайнер придумает свою, имея эту в базе")
+    with db.tx() as c:
+        c.execute("DELETE FROM themes WHERE id = ?", (tid_rub,))
+
     reset()
     tid_res = bridge.create_task(CHAT, "что зашло", workflow="research",
                                  today=OTHER_DAY)
