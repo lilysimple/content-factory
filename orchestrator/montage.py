@@ -131,12 +131,29 @@ class Reel:
 # ── вход: тема и видео ──────────────────────────────────────────────
 
 def _pick(chat_id: int, ask: str) -> dict[str, Any]:
+    """Тема под монтаж.
+
+    Названная по id берётся любая reels-тема, в том числе без
+    утверждённого сценария: человек снял дубль и хочет ролик, а хук и CTA
+    это украшение первого и последнего кадра, которого может не быть.
+    Караоке, нарезка пауз и панорама считаются по записи, а не по
+    сценарию, и без него работают целиком.
+
+    Молча, без id, берём по-прежнему только тему с принятым сценарием.
+    Угадывать, какой из черновиков человек держал в голове, монтажу
+    нельзя: рендер стоит минут, и ошибка выясняется в конце.
+    """
+    named = bool(desk.ID_RX.search(ask or ""))
     return desk.pick(
-        chat_id, ask, statuses=("ready",), fresh="ready",
-        suits=lambda r: (r["format"] or "").lower() in FORMATS and bool(r["asset"]),
-        wrong="у темы {id} нет утверждённого сценария reels",
-        none="темы {id} нет среди готовых сценариев",
-        empty="нет ни одного утверждённого сценария reels")
+        chat_id, ask,
+        statuses=("idea", "draft", "ready") if named else ("ready",),
+        fresh="ready",
+        suits=lambda r: ((r["format"] or "").lower() in FORMATS
+                         and (named or bool(r["asset"]))),
+        wrong="у темы {id} формат «{format}», а не ролик",
+        none="темы {id} нет",
+        empty="нет ни одного утверждённого сценария reels. Назовите тему "
+              "по id — смонтирую и без сценария")
 
 
 def incoming_dir(b) -> Path:
@@ -938,6 +955,10 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
 
     reel = Reel(theme=theme, video=video, color=color, accent=accent,
                 hook=beats.get(HOOK_TITLE, ""), cta=beats.get(CTA_TITLE, ""))
+
+    if not theme.get("asset"):
+        reel.findings.append("сценария нет, монтирую по записи: хук и CTA "
+                             "брать неоткуда, на первом кадре заголовок темы")
 
     if not reel.hook and not reel.title:
         reel.findings.append("нет ни хука из сценария, ни заголовка темы — "

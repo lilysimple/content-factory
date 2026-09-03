@@ -18,7 +18,7 @@ from harness import CHAT, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
-from orchestrator import footage, grab, montage                   # noqa: E402
+from orchestrator import desk, footage, grab, montage                   # noqa: E402
 from storage import db                                            # noqa: E402
 from storage.brand import Brand                                   # noqa: E402
 
@@ -498,6 +498,49 @@ def main() -> None:
     check("«смонтируй» правкой не считается",
           not montage.wants_relex(CHAT, "смонтируй ролик"))
     montage.table.clear(CHAT)
+
+    # ── 30. тема под монтаж ───────────────────────────────────────────
+    # Дубль снят, сценария нет — это рабочий случай, а не ошибка: хук и
+    # CTA украшают первый и последний кадр, а караоке и нарезка считаются
+    # по записи. Но берём такую тему только по явному id: угадывать между
+    # черновиками монтаж не должен, рендер стоит минут.
+    print("\n30. Тема под монтаж")
+    with db.tx() as c:
+        c.execute("DELETE FROM themes WHERE chat_id = ?", (CHAT,))
+        c.execute("INSERT INTO themes (id, chat_id, date, plat, format, "
+                  "status, title) VALUES ('2026-09-05-instagram-01',?,"
+                  "'2026-09-05','instagram','reels','idea','Сырой дубль')",
+                  (CHAT,))
+        c.execute("INSERT INTO themes (id, chat_id, date, plat, format, "
+                  "status, title) VALUES ('2026-09-06-telegram-01',?,"
+                  "'2026-09-06','telegram','пост','idea','Не ролик')",
+                  (CHAT,))
+
+    got = montage._pick(CHAT, "смонтируй по теме 2026-09-05-instagram-01")
+    check("тема без сценария берётся по id",
+          got["id"] == "2026-09-05-instagram-01", got["id"])
+
+    try:
+        montage._pick(CHAT, "смонтируй")
+        check("без id сценарий обязателен", False, "взял черновик молча")
+    except desk.NoWork as e:
+        check("без id сценарий обязателен", True)
+        check("сказано, как смонтировать без сценария",
+              "по id" in str(e), str(e))
+
+    try:
+        montage._pick(CHAT, "смонтируй по теме 2026-09-06-telegram-01")
+        check("чужой формат не берётся", False, "смонтировал пост")
+    except desk.NoWork as e:
+        check("чужой формат не берётся", "не ролик" in str(e), str(e))
+
+    with db.tx() as c:
+        c.execute("UPDATE themes SET status = 'ready', asset = "
+                  "'posts/2026-09-05-instagram-01-script.md' "
+                  "WHERE id = '2026-09-05-instagram-01'")
+    got = montage._pick(CHAT, "смонтируй")
+    check("утверждённый сценарий берётся молча",
+          got["id"] == "2026-09-05-instagram-01", got["id"])
 
 
 main()

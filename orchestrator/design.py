@@ -76,8 +76,8 @@ TEMPLATES = {
     ("telegram", None): ["telegram-post.html"],
 }
 
-# Что модель кладёт в слот. Потолок знаков — не каприз: заголовок длиннее
-# вылезет за холст, и поймает это уже человек глазами на PNG.
+# Слоты и потолки знаков. Потолок — не каприз: заголовок длиннее вылезет
+# за холст, и поймает это уже человек глазами на PNG.
 #
 # `photo` особый: значение проверяется по списку файлов бренда, а не по
 # длине. `headline_size` в этот словарь не входит вовсе — его считает код
@@ -90,6 +90,65 @@ SLOTS: dict[str, tuple[str, int]] = {
     "subtitle":        ("подзаголовок одной фразой", 120),
     "photo":           ("имя файла из списка доступных фото", 0),
 }
+
+# Кто какой слот заполняет. Модели остаётся то, что кодом не решается:
+# какие слова из поста попадут на обложку и где акцент.
+#
+# `rubric` её работой не была никогда: рубрику назначил Стратег, она
+# лежит в теме, и модель дважды из двух вернула ровно её же капсом.
+# `photo` выбирается правилом бренда (`design/photos.md`) плюс ротацией
+# по последним обложкам — а истории прошлых макетов модель не видит и
+# повтор фото через день заметить не может в принципе.
+MODEL_SLOTS = ("headline", "headline_accent", "subtitle")
+
+# На правке фото возвращается модели: «поставь другое фото» — просьба
+# человека, и отвечать на неё ротацией нельзя.
+PATCH_SLOTS = MODEL_SLOTS + ("photo",)
+
+# Правило выбора фото. Лежит у бренда, а не в коде продукта: `cover-red`
+# и `speaking` — имена файлов одного клиента, у следующего их нет.
+PHOTO_RULES = "design/photos.md"
+RULE_RX = re.compile(r"^\|([^|]+)\|([^|]+)\|\s*$", re.M)
+
+# Хвост ТЗ, который модели не едет. Ниже этой строки в ТЗ живёт описание
+# слоёв и пикселей: на переехавшей площадке разметку собирает код, и
+# модели этот раздел только предлагает рассуждать о том, чего она не
+# решает. Площадка без шаблона маркер не ставит — там ТЗ нужно целиком.
+FOR_HUMAN = "<!-- дальше не для модели -->"
+
+
+def _schema(keys: tuple[str, ...]) -> dict[str, Any]:
+    """Форма ответа для шаблонного пути.
+
+    Раньше схемы тут не было намеренно: слоты были открытым словарём, и
+    закрыть его было нечем. Теперь набор слотов известен коду до вызова,
+    поэтому форма гарантируется, а не выпрашивается словами промпта.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "theme_id": {"type": "string"},
+            "cards": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "slots": {
+                        "type": "object",
+                        "properties": {k: {"type": "string"} for k in keys},
+                        "required": list(keys),
+                        "additionalProperties": False,
+                    },
+                },
+                "required": ["name", "slots"],
+                "additionalProperties": False,
+            }},
+            "accent": {"type": "string"},
+            "notes": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["theme_id", "cards", "accent", "notes"],
+        "additionalProperties": False,
+    }
+
 
 TEMPLATE_DIR = ROOT / "design-pack" / "templates"
 SLOT_RX = re.compile(r"\{\{([a-z_]+)\}\}")
@@ -166,11 +225,72 @@ def _photos(b) -> list[str]:
                   if f.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"})
 
 
+def _photo_rules(b) -> dict[str, list[str]]:
+    """Какое фото под какую цель поста. Таблица бренда, а не константа.
+
+    Файла нет — правила нет, и фото идёт ротацией по всей папке. Это
+    хуже подбора по смыслу, но предсказуемо и не выдумывает: у нового
+    клиента в папке может лежать что угодно.
+    """
+    text = b.read(PHOTO_RULES)
+    out: dict[str, list[str]] = {}
+    for goal, files in RULE_RX.findall(text or ""):
+        key = goal.strip().lower()
+        if key in ("цель", "---", ":---", "---:"):
+            continue
+        names = [f.strip() for f in files.split(",") if f.strip()]
+        if key and names:
+            out[key] = names
+    return out
+
+
+def _recent_photos(b, keep: int) -> list[str]:
+    """Фото последних обложек, свежие первыми. Против повтора через день."""
+    if keep <= 0:
+        return []
+    folder = b.path("posts")
+    if not folder.is_dir():
+        return []
+    seen: list[str] = []
+    for f in sorted(folder.glob("*.slots.json"),
+                    key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            name = str(_json.loads(f.read_text(encoding="utf-8")).get("photo"))
+        except (ValueError, OSError):
+            continue
+        if name and name not in seen:
+            seen.append(name)
+        if len(seen) >= keep:
+            break
+    return seen
+
+
+def _pick_photo(b, theme: dict[str, Any], photos: list[str]) -> str:
+    """Фото под тему: правило бренда плюс ротация."""
+    if not photos:
+        raise NoWork("в папке бренда нет ни одного фото")
+    rules = _photo_rules(b)
+    goal = str(theme.get("goal") or "").strip().lower()
+    order = [p for p in (rules.get(goal) or rules.get("*") or []) if p in photos]
+    if not order:
+        order = photos
+    recent = _recent_photos(b, len(order) - 1)
+    return next((p for p in order if p not in recent), order[0])
+
+
+def _derive(b, theme: dict[str, Any], photos: list[str]) -> dict[str, str]:
+    """Слоты, которые заполняет код. Модель о них не знает."""
+    rubric = str(theme.get("rubric") or "").strip()
+    if not rubric:
+        raise NoWork(f"у темы {theme['id']} нет рубрики: её ставит Стратег")
+    return {"rubric": rubric.upper(), "photo": _pick_photo(b, theme, photos)}
+
+
 def _spec(b, plat: str) -> str:
     text = b.read(f"design/platforms/{plat}.md")
     if not text.strip():
         raise NoSpec(plat)
-    return text
+    return text.split(FOR_HUMAN)[0].strip()
 
 
 def _reference(plat: str, fmt: str) -> list[tuple[str, str]]:
@@ -262,11 +382,15 @@ def _fill(tpl: str, slots: dict[str, str], photos: list[str]) -> str:
 
 
 def _cards_from_slots(data: dict[str, Any], tpls: list[tuple[str, str]],
-                      photos: list[str]) -> list[dict[str, str]]:
+                      photos: list[str],
+                      fixed: dict[str, str] | None = None) -> list[dict[str, str]]:
     """Ответ модели со слотами → карточки с готовым HTML.
 
     Шаблон берётся по порядку, а не по имени из ответа: имён шаблонов
     модель не знает и знать не должна, иначе она сможет выбрать не тот.
+
+    `fixed` — слоты от кода. Они кладутся поверх ответа: если модель по
+    старой памяти вернула рубрику или фото, побеждает код, а не она.
     """
     out: list[dict[str, str]] = []
     got = [c for c in (data.get("cards") or []) if isinstance(c, dict)]
@@ -279,32 +403,34 @@ def _cards_from_slots(data: dict[str, Any], tpls: list[tuple[str, str]],
                          "здесь пишет код")
         name = re.sub(r"[^a-z0-9-]", "",
                       str(got[i].get("name") or "").lower()) or stem
-        clean = {k: str(v) for k, v in slots.items()}
+        clean = {k: str(v) for k, v in slots.items()
+                 if k not in (fixed or {})}
+        clean.update(fixed or {})
         out.append({"name": name, "slots": clean,
                     "html": _fill(tpl, clean, photos)})
     return out
 
 
-def _slots_stable(spec: str, tpls: list[tuple[str, str]]) -> str:
+def _slots_stable(spec: str, names: tuple[str, ...]) -> str:
     """Кешируемый блок для шаблонного пути: ТЗ плюс описание слотов.
 
     Сам шаблон модели не показывается. Она его не пишет и не правит, а
     лишние двадцать строк разметки в контексте только приглашают вернуть
     HTML вместо значений.
     """
-    return "\n".join(["## ТЗ площадки", "", spec, "", _slot_brief()])
+    return "\n".join(["## ТЗ площадки", "", spec, "", _slot_brief(names)])
 
 
-def _slot_brief() -> str:
+def _slot_brief(names: tuple[str, ...]) -> str:
     """Описание слотов для модели. Едет в кешируемый блок вместе с ТЗ."""
     lines = ["## Слоты, которые ты заполняешь", "",
              "Разметку собирает код. Ты возвращаешь только значения.", ""]
-    for name, (what, limit) in SLOTS.items():
+    for name in names:
+        what, limit = SLOTS[name]
         cap = f", не длиннее {limit} знаков" if limit else ""
         lines.append(f"- `{name}` — {what}{cap}")
-    lines += ["", "Кегль заголовка не твоя забота: его считает код по длине "
-              "строки. Размер холста, цвета и путь к фото тоже — их в "
-              "ответе быть не должно."]
+    lines += ["", "Больше в ответе нет ничего. Холст, цвета, кегль, рубрику "
+              "и путь к фото ставит код."]
     return "\n".join(lines)
 
 
@@ -433,7 +559,13 @@ def _stable(spec: str, refs: list[tuple[str, str]]) -> str:
 
 
 def _brief(theme: dict[str, Any], copy: str, photos: list[str],
-           size: tuple[int, int], cards: int) -> str:
+           size: tuple[int, int], cards: int, *, markup: bool) -> str:
+    """Тело запроса. `markup` — модель пишет разметку сама.
+
+    На шаблонном пути холст и список фото из брифа выкинуты: холст она не
+    задаёт, фото не выбирает, а лишний раздел в запросе это приглашение
+    вернуть то, чего не просили.
+    """
     w, h = size
     lines = [
         "## Тема", "",
@@ -442,19 +574,20 @@ def _brief(theme: dict[str, Any], copy: str, photos: list[str],
         f"- формат: {theme.get('format')}",
         f"- рубрика: {theme.get('rubric') or '[не задана]'}",
         "",
-        f"## Холст", "",
-        f"{w}×{h} пикселей. Ровно этот размер, `overflow:hidden`.",
-        f"Карточек нужно: {cards}.",
-        "",
-        "## Утверждённый текст Редактора", "",
-        "Слова на макет берёшь только отсюда.", "",
-        copy,
-        "",
-        "## Доступные фото", "",
-        "Путь вида `../design/assets/images/<файл>`. Чего нет в списке, "
-        "того не существует:", "",
     ]
-    lines += [f"- {p}" for p in photos] or ["- фото нет"]
+    if markup:
+        lines += [f"## Холст", "",
+                  f"{w}×{h} пикселей. Ровно этот размер, `overflow:hidden`.",
+                  f"Карточек нужно: {cards}.", ""]
+    else:
+        lines += [f"Карточек нужно: {cards}.", ""]
+    lines += ["## Утверждённый текст Редактора", "",
+              "Слова на макет берёшь только отсюда.", "", copy, ""]
+    if markup:
+        lines += ["## Доступные фото", "",
+                  "Путь вида `../design/assets/images/<файл>`. Чего нет в "
+                  "списке, того не существует:", ""]
+        lines += [f"- {p}" for p in photos] or ["- фото нет"]
     return "\n".join(lines)
 
 
@@ -485,18 +618,18 @@ async def build(chat_id: int, ask: str, *, say=None) -> Layout:
                   "Сборка и рендер займут до минуты.")
 
     if tpls:
+        fixed = _derive(b, theme, photos)
         answer = await agent.ask(
             "design", chat_id,
-            _brief(theme, copy, photos, size, len(tpls)) +
-            "\n\nЗаполни слоты. Ответь одним JSON-объектом: "
-            '`{"cards": [{"name": "…", "slots": {…}}], "accent": "…", '
-            '"notes": []}`. Разметку не пиши — её соберёт код.',
-            brand_name=b.name(), stable=_slots_stable(spec, tpls),
-            max_tokens=MAX_TOKENS)
+            _brief(theme, copy, photos, size, len(tpls), markup=False) +
+            "\n\nЗаполни слоты.",
+            brand_name=b.name(),
+            stable=_slots_stable(spec, MODEL_SLOTS),
+            max_tokens=MAX_TOKENS, schema=_schema(MODEL_SLOTS))
     else:
         answer = await agent.ask(
             "design", chat_id,
-            _brief(theme, copy, photos, size, len(refs)) +
+            _brief(theme, copy, photos, size, len(refs), markup=True) +
             "\n\nСобери макет. Ответь одним JSON-объектом в формате из твоей "
             "секции «Формат выдачи».",
             brand_name=b.name(), stable=_stable(spec, refs),
@@ -504,7 +637,7 @@ async def build(chat_id: int, ask: str, *, say=None) -> Layout:
 
     data = agent.parse_json(answer, who="дизайнер")
     if tpls:
-        cards = _cards_from_slots(data, tpls, photos)
+        cards = _cards_from_slots(data, tpls, photos, fixed)
     else:
         cards = [c for c in (data.get("cards") or [])
                  if isinstance(c, dict) and str(c.get("html") or "").strip()]
@@ -604,7 +737,7 @@ async def land(chat_id: int, data: dict[str, Any]) -> Layout:
     copy = _copy(b, theme)
 
     if tpls:
-        cards = _cards_from_slots(data, tpls, photos)
+        cards = _cards_from_slots(data, tpls, photos, _derive(b, theme, photos))
     else:
         cards = [c for c in (data.get("cards") or [])
                  if isinstance(c, dict) and str(c.get("html") or "").strip()]
@@ -776,9 +909,14 @@ async def _patch_slots(reg, chat_id: int, lay: Layout, htmls: list[Path],
                        instruction: str, topic: str) -> None:
     """Правка шаблонной карточки: меняются слоты, а не разметка.
 
-    Самый дешёвый круг из всех. Модель получает пять коротких значений и
-    просьбу человека, возвращает такие же пять — двести байт вместо двух
-    килобайт HTML. Разметку заново собирает `_fill`, поэтому промахнуться
+    Самый дешёвый круг из всех. Модель получает короткие значения и
+    просьбу человека, возвращает такие же — двести байт вместо двух
+    килобайт HTML.
+
+    Фото здесь модели возвращается, в отличие от сборки: «поставь другое
+    фото» это просьба человека, и отвечать на неё ротацией нельзя.
+    Рубрика не возвращается — её ставит Стратег, и код её вернёт на
+    место, что бы ни пришло в ответе. Разметку заново собирает `_fill`, поэтому промахнуться
     мимо холста, токенов или пути к фото она по-прежнему не может.
 
     Слоты лежат рядом с макетом (`*.slots.json`). Их нет — значит макет
@@ -815,13 +953,14 @@ async def _patch_slots(reg, chat_id: int, lay: Layout, htmls: list[Path],
             "## Текущие слоты", "",
             "```json", _json.dumps(current, ensure_ascii=False, indent=2),
             "```", "",
-            "Верни те же карточки с поправленными слотами и **ничего "
-            'больше**: `{"cards": [{"name": "…", "slots": {…}}], '
-            '"accent": "…", "notes": []}`. Слоты, которых правка не '
-            "касается, оставь как есть.",
+            "Верни те же карточки с поправленными слотами. Слоты, "
+            "которых правка не касается, оставь как есть. Рубрику здесь "
+            "не поменять — её ставит Стратег; просят её — скажи строкой "
+            "в `notes`.",
         ]),
-        brand_name=b.name(), stable=_slot_brief(),
-        max_tokens=MAX_TOKENS, effort=PATCH_EFFORT)
+        brand_name=b.name(), stable=_slot_brief(PATCH_SLOTS),
+        max_tokens=MAX_TOKENS, effort=PATCH_EFFORT,
+        schema=_schema(PATCH_SLOTS))
 
     data = agent.parse_json(answer, who="дизайнер")
     got = {re.sub(r"[^a-z0-9-]", "", str(c.get("name") or "").lower()): c
@@ -838,8 +977,13 @@ async def _patch_slots(reg, chat_id: int, lay: Layout, htmls: list[Path],
 
     for path in htmls:
         name = path.stem[len(theme["id"]) + 1:] or path.stem
-        slots = {k: str(v) for k, v in
-                 ((got.get(name) or {}).get("slots") or {}).items()}
+        # Пришедшее кладётся поверх того, что было: модель возвращает
+        # то, что правила, и не обязана переписывать остальное. Рубрика
+        # из ответа выбрасывается — её ставит Стратег.
+        got_slots = {k: str(v) for k, v in
+                     ((got.get(name) or {}).get("slots") or {}).items()
+                     if k != "rubric"}
+        slots = dict(current[name], **got_slots) if got_slots else {}
         if not slots or slots == current[name]:
             # Не изменилась — не перерисовываем. PNG на диске валиден.
             out.files.append(path)

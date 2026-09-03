@@ -44,12 +44,17 @@ def card(body: str, w=1080, h=1350, photo="author.jpg") -> str:
 
 
 def slots(headline="Кода не писала", accent_tail=" ни строчки",
-          rubric="ПУТЬ В AI", subtitle="Навык нужен тот же самый",
-          photo="author.jpg") -> dict:
-    """Слоты вместо HTML: на переехавших площадках разметку собирает код."""
-    return {"rubric": rubric, "headline": headline,
-            "headline_accent": accent_tail, "subtitle": subtitle,
-            "photo": photo}
+          subtitle="Навык нужен тот же самый", photo=None) -> dict:
+    """Слоты вместо HTML: на переехавших площадках разметку собирает код.
+
+    Рубрики и фото здесь нет намеренно: на сборке их ставит код. `photo`
+    появляется только на правке, когда человек просит другое фото.
+    """
+    out = {"headline": headline, "headline_accent": accent_tail,
+           "subtitle": subtitle}
+    if photo is not None:
+        out["photo"] = photo
+    return out
 
 
 def answer(cards, accent="терракота на слове", notes=None) -> str:
@@ -81,8 +86,8 @@ def seed(plat="telegram", fmt="пост", status="ready"):
     with db.tx() as c:
         c.execute("DELETE FROM themes WHERE chat_id = ?", (CHAT,))
         c.execute("INSERT INTO themes (id, chat_id, date, plat, format, "
-                  "rubric, status, title, asset) VALUES "
-                  "(?,?,'2026-08-15',?,?,'Путь',?,'Путь в AI',?)",
+                  "rubric, goal, status, title, asset) VALUES "
+                  "(?,?,'2026-08-15',?,?,'Путь','warm',?,'Путь в AI',?)",
                   (tid, CHAT, plat, fmt, status, f"posts/{tid}.md"))
     return tid
 
@@ -123,13 +128,19 @@ async def main() -> None:
     p = CALLS["prompts"][-1]
     st = CALLS["stable"][-1]
     check("текст Редактора передан", "Кода не писала" in p)
-    check("список фото передан", "author.jpg" in p)
-    check("холст задан", "1080×1350" in p)
+    check("списка фото в запросе нет: фото выбирает код",
+          "author.jpg" not in p, p[-300:])
+    check("холста в запросе нет: разметку собирает код",
+          "1080×1350" not in p, p[:200])
     check("ТЗ площадки передано в кешируемом блоке",
           "Рецепт" in st or "обложка" in st.lower())
     check("ТЗ не дублируется в теле запроса",
           "Рецепт" not in p and "## ТЗ площадки" not in p)
-    check("слоты описаны модели", "`headline`" in st and "`photo`" in st, st[:200])
+    check("слоты описаны модели", "`headline`" in st, st[:200])
+    check("рубрика и фото модели не предлагаются",
+          "`rubric`" not in st and "`photo`" not in st, st[-300:])
+    check("хвост ТЗ для человека не поехал",
+          "документация шаблона" not in st.lower(), st[-300:])
     check("разметку у модели не просят",
           "html" not in p.lower().split("## текущие")[0], p[:200])
     check("шаблон модели не показывают", "{{" not in st and "{{" not in p)
@@ -141,6 +152,14 @@ async def main() -> None:
     check("путь к фото собрал код",
           "../design/assets/images/author.jpg" in made)
     check("значение слота попало в макет", "Кода не писала" in made)
+    check("рубрику поставил код из темы", ">ПУТЬ<" in made,
+          made[made.find('class="rubric"'):][:80])
+    check("фото выбрал код по правилу бренда",
+          "images/author.jpg" in made, made[:400])
+    check("код положил свои слоты рядом с макетом",
+          {"rubric", "photo"} <=
+          set(json.loads(b.path(f"posts/{tid}-cover.slots.json")
+                         .read_text(encoding="utf-8"))))
     check("кегль посчитан кодом",
           f"font-size:{design._fit('Кода не писала ни строчки')}px" in made,
           made[made.find(".head"):made.find(".head") + 200])
@@ -151,7 +170,7 @@ async def main() -> None:
     # невозможны по устройству. Пятая — чужие слова — осталась: её решает
     # модель, и код её по-прежнему стережёт.
     check("собранный кодом макет чист для inspect",
-          design.inspect(made, COPY + " ПУТЬ В AI Навык нужен тот же самый",
+          design.inspect(made, COPY + " ПУТЬ Навык нужен тот же самый",
                          (1080, 1350), design._photos(b)) == [],
           str(design.inspect(made, COPY, (1080, 1350), design._photos(b))))
 
@@ -214,13 +233,17 @@ async def main() -> None:
     # путь собирает код, и подставить в него небылицу нечему. Раньше такой
     # макет уходил человеку с ⚠️ и открывался у него пустым прямоугольником.
     tid = seed()
+    install(answer([{"name": "cover", "slots": slots()}]))
+    reg.clear()
+    await design.run(reg, CHAT, "сделай обложку")
+    await design.on_callback(reg, CHAT, "fix")
     reg.clear()
     install(answer([{"name": "cover", "slots": slots(photo="призрак.jpg")}]))
-    await design.run(reg, CHAT, "сделай обложку")
+    await design.revise(reg, CHAT, "поставь другое фото")
     check("несуществующее фото отклонено, а не помечено",
-          "Верстать нечего" in reg.texts(), reg.texts()[:160])
+          "Точечно поправить не вышло" in reg.texts(), reg.texts()[:200])
     check("названо, чего не хватает", "призрак.jpg" in reg.texts(),
-          reg.texts()[:160])
+          reg.texts()[:200])
 
     # Слишком длинный слот тоже отказ: заголовок вылез бы за холст, а
     # заметил бы это человек глазами на PNG.
