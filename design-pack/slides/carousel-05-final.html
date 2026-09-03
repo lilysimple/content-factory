@@ -1,16 +1,56 @@
-<!-- @dsCard group="Slides" viewport="1080x1350" name="Carousel · Final + CTA" subtitle="Dark close with takeaway + save CTA" -->
-<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css"><style>
+<!-- @dsCard group="Slides" viewport="1080x1350" name="Carousel · Final + CTA" subtitle="Photo above, dark panel below — card 6 of 6"
+     Карточка 6: вывод и один зов. Тёмная панель против светлых панелей
+     середины — конец карусели должен читаться концом, а не ещё одним
+     пунктом.
+
+     Текст на неоновой плашке — `--accent-ink` (графит), а не белый:
+     после смены акцента 03.09 белым по неону не читается ничего.
+
+     Подпись `lily_.space` — это Instagram, с подчёркиванием перед
+     точкой (`design/mark.md` в папке бренда). -->
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../design/tokens.css"><style>
   *{box-sizing:border-box;margin:0;padding:0;}
-  body{background:var(--bg-section-alt);font-family:var(--font-body);}
-  .slide{width:1080px;height:1350px;position:relative;overflow:hidden;background:var(--graphite);}
+  body{font-family:var(--font-body);}
+  .slide{width:1080px;height:1350px;position:relative;overflow:hidden;
+         background:var(--graphite);}
   img{display:block;}
-</style></head><body><div class="slide"><img src="../assets/images/author.jpg" style="position:absolute;right:0;top:0;width:52%;height:100%;object-fit:cover;">
- <div style="position:absolute;inset:0;background:linear-gradient(90deg,#1F1F1F 42%,rgba(31,31,31,0.72) 58%,rgba(31,31,31,0.1) 100%);"></div>
- <div style="position:absolute;left:84px;right:84px;top:100px;color:var(--milk);">
-   <div style="font-family:var(--font-display);font-size:30px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--terracotta);">Главный вывод</div>
-   <div style="font-family:var(--font-display);font-weight:700;font-size:80px;line-height:1.12;letter-spacing:-0.02em;margin-top:56px;max-width:660px;">AI не заменит бизнес. Его заменит бизнес с AI.</div>
- </div>
- <div style="position:absolute;left:84px;bottom:84px;right:84px;">
-   <span style="display:inline-block;padding:30px 54px;border-radius:100px;background:var(--terracotta);color:#fff;font-family:var(--font-display);font-weight:600;font-size:38px;">Сохрани этот пост ↗</span>
-   <div style="font-size:36px;color:rgba(248,245,241,0.75);margin-top:38px;">Больше разборов → Telegram <span style="color:var(--terracotta-soft);font-weight:600;">@lily_.space</span></div>
- </div></div></body></html>
+  .mark{position:absolute;left:72px;top:60px;display:flex;
+        align-items:center;gap:16px;font-size:28px;font-weight:500;
+        color:rgba(248,245,241,0.9);}
+  .dot{width:14px;height:14px;border-radius:50%;background:var(--accent);}
+  .panel{position:absolute;left:0;right:0;bottom:0;height:64%;
+         background:var(--graphite);border-radius:44px 44px 0 0;
+         padding:76px 76px 72px;color:var(--milk);}
+  .pill{display:inline-block;padding:18px 38px;
+        border-radius:var(--radius-pill);background:var(--accent);
+        font-family:var(--font-display);font-size:28px;font-weight:700;
+        letter-spacing:0.08em;text-transform:uppercase;
+        color:var(--accent-ink);}
+  .head{font-family:var(--font-display);font-weight:800;font-size:70px;
+        line-height:1.14;letter-spacing:-0.025em;margin-top:40px;}
+  .rule{width:96px;height:6px;border-radius:3px;background:var(--accent);
+        margin-top:40px;}
+  .fact{font-family:var(--font-display);font-weight:800;font-size:64px;
+        letter-spacing:-0.02em;margin-top:36px;color:var(--accent-on-dark);}
+  .body{font-size:38px;line-height:1.5;color:rgba(248,245,241,0.75);
+        margin-top:32px;max-width:860px;}
+  .cta{position:absolute;left:76px;right:76px;bottom:72px;text-align:right;
+       font-family:var(--font-display);font-weight:700;font-size:38px;
+       color:var(--accent-on-dark);}
+</style></head><body>
+<div class="slide">
+  <img src="../design/assets/images/speaking.jpg"
+       style="position:absolute;left:0;top:0;width:100%;height:40%;
+              object-fit:cover;object-position:50% 18%;">
+  <div class="mark"><span class="dot"></span>lily_.space</div>
+  <div class="panel">
+    <div class="pill">Прямой эфир · бесплатно</div>
+    <div class="head">Как работать с AI, чтобы был результат</div>
+    <div class="rule"></div>
+    <div class="fact">20 июля · 18:30 мск</div>
+    <div class="body">Соберём эти правила в систему, с готовыми
+      формулировками, которые можно забрать и применять.</div>
+    <div class="cta">Регистрация в профиле ↗</div>
+  </div>
+</div></body></html>

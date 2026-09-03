@@ -101,7 +101,7 @@ async def main() -> None:
     tid = seed()
     SENT_FILES.clear()
     install(answer([{"name": "cover", "slots": slots()}]))
-    await design.run(reg, CHAT, "сделай обложку")
+    await design.run(reg, CHAT, "сделай обложку", pick_bg=False)
 
     html = b.path(f"posts/{tid}-cover.html")
     png = b.path(f"posts/{tid}-cover.png")
@@ -179,8 +179,8 @@ async def main() -> None:
     seed(plat="youtube", fmt="видео")
     reg.clear()
     install(answer([{"name": "cover", "html": card("что угодно", 1280, 720)}]))
-    await design.run(reg, CHAT, "сделай превью")
-    check("сказал, что ТЗ нет", "ТЗ площадки нет" in reg.texts(),
+    await design.run(reg, CHAT, "сделай превью", pick_bg=False)
+    check("сказал, что ТЗ нет", "ТЗ нет:" in reg.texts(),
           reg.texts()[:150])
     check("предложил завести ТЗ", "design/platforms" in reg.texts())
     check("модель не звалась", CALLS["n"] == 0, f"вызовов {CALLS['n']}")
@@ -191,7 +191,7 @@ async def main() -> None:
         c.execute("UPDATE themes SET status = 'draft' WHERE chat_id = ?", (CHAT,))
     reg.clear()
     install(answer([{"name": "cover", "html": card("х")}]))
-    await design.run(reg, CHAT, "сделай обложку")
+    await design.run(reg, CHAT, "сделай обложку", pick_bg=False)
     check("отказался верстать черновик", "Верстать нечего" in reg.texts(),
           reg.texts()[:120])
     check("модель не звалась", CALLS["n"] == 0, f"вызовов {CALLS['n']}")
@@ -235,7 +235,7 @@ async def main() -> None:
     tid = seed()
     install(answer([{"name": "cover", "slots": slots()}]))
     reg.clear()
-    await design.run(reg, CHAT, "сделай обложку")
+    await design.run(reg, CHAT, "сделай обложку", pick_bg=False)
     await design.on_callback(reg, CHAT, "fix")
     reg.clear()
     install(answer([{"name": "cover", "slots": slots(photo="призрак.jpg")}]))
@@ -249,7 +249,7 @@ async def main() -> None:
     # заметил бы это человек глазами на PNG.
     reg.clear()
     install(answer([{"name": "cover", "slots": slots(headline="о" * 80)}]))
-    await design.run(reg, CHAT, "сделай обложку")
+    await design.run(reg, CHAT, "сделай обложку", pick_bg=False)
     check("переполненный слот отклонён", "Верстать нечего" in reg.texts(),
           reg.texts()[:160])
 
@@ -261,7 +261,7 @@ async def main() -> None:
                      "html": card("Кода не писала", 1080, 1350,
                                   photo="призрак.jpg" if i == 1 else "author.jpg")}
                     for i in range(1, 6)]))
-    await design.run(reg, CHAT, "собери карусель")
+    await design.run(reg, CHAT, "собери карусель", pick_bg=False)
     check("на HTML-пути замечание показано", "⚠️" in reg.texts(),
           "замечание проглочено")
     check("макет всё равно отдан",
@@ -276,7 +276,7 @@ async def main() -> None:
     tid = seed()
     install(answer([{"name": "cover", "slots": slots()}]))
     reg.clear()
-    await design.run(reg, CHAT, "сделай обложку")
+    await design.run(reg, CHAT, "сделай обложку", pick_bg=False)
     await design.on_callback(reg, CHAT, "fix")
     install(answer([{"name": "cover",
                      "slots": slots(subtitle="Навык нужен тот же")}]))
@@ -300,7 +300,7 @@ async def main() -> None:
     seed()
     install(answer([{"name": "cover", "slots": slots()}]))
     reg.clear()
-    await design.run(reg, CHAT, "сделай обложку")
+    await design.run(reg, CHAT, "сделай обложку", pick_bg=False)
     reg.clear()
     await design.on_callback(reg, CHAT, "queue")
     check("очередь передана Публикатору", "Публикатору" in reg.texts(),
@@ -318,10 +318,76 @@ async def main() -> None:
     print("\n8. Карусель")
     refs = design._reference("instagram", "карусель")
     check("эталонов карусели пять", len(refs) == 5, f"{len(refs)}")
-    check("эталон telegram один",
-          len(design._reference("telegram", "пост")) == 1)
+    # У Telegram эталона нет и быть не должно: он переехал на шаблон со
+    # слотами, а эталон приглашал бы модель переизобрести разметку,
+    # которой она не видит.
+    check("у telegram эталона нет, есть шаблон",
+          not design._reference("telegram", "пост")
+          and len(design._templates("telegram", "пост")) == 1)
     check("холст reels вертикальный",
           design.CANVAS[("instagram", "reels")] == (1080, 1920))
+
+    # ── 8b. фон выбирает человек, а не код ────────────────────────────
+    # Раньше код выбирал фото сам и сразу верстал: не то фото стоило
+    # круга вёрстки и рендера. Теперь три варианта до дизайна.
+    print("\n8b. Три фона до вёрстки")
+    tid = seed()
+    # Макет этой темы уже собирали выше: убираем, иначе «макета ещё нет»
+    # проверяет чужой файл.
+    for f in b.path("posts").glob(f"{tid}-cover.*"):
+        f.unlink()
+    reg.clear()
+    SENT_FILES.clear()
+    install(answer([{"name": "cover", "slots": slots()}]))
+    await design.run(reg, CHAT, "сделай обложку")
+
+    check("показаны три фона", len(SENT_FILES) == 3, str(SENT_FILES))
+    check("фоны ушли картинками", all(p for _, _, p in SENT_FILES),
+          str(SENT_FILES))
+    check("кнопки выбора",
+          [":".join(x.split(":")[:2]) for x in reg.last().buttons] ==
+          ["art:bg", "art:bg", "art:bg", "art:bgmore", "art:bgauto"],
+          str(reg.last().buttons))
+    check("макета ещё нет", not b.path(f"posts/{tid}-cover.png").exists())
+    check("модель не звалась до выбора", CALLS["n"] == 0, f"вызовов {CALLS['n']}")
+    check("кандидаты записаны рядом с макетом",
+          b.path(f"posts/{tid}.bg.json").exists())
+
+    # Фотобанк бренда полный, поэтому все три варианта свои: сток
+    # добирает только нехватку, и слова для него у модели не просят.
+    saved = json.loads(b.path(f"posts/{tid}.bg.json").read_text(encoding="utf-8"))
+    check("варианты из фотобанка бренда",
+          [o["kind"] for o in saved["options"]] == ["own"] * 3,
+          str(saved["options"]))
+    check("сток не подмешан молча", not saved["query"], saved["query"])
+
+    picked = saved["options"][1]["name"]
+    reg.clear()
+    SENT_FILES.clear()
+    await design.on_callback(reg, CHAT, f"bg:{tid}:2")
+
+    check("после выбора макет собран", b.path(f"posts/{tid}-cover.png").exists())
+    check("на макете выбранный фон",
+          picked in b.path(f"posts/{tid}-cover.html").read_text(encoding="utf-8"),
+          picked)
+    check("кнопки макета вернулись",
+          [":".join(x.split(":")[:2]) for x in reg.last().buttons] ==
+          ["art:ok", "art:fix", "art:queue"], str(reg.last().buttons))
+
+    # «Реши сам» — старый путь: код ставит фото правилом бренда.
+    tid = seed()
+    reg.clear()
+    install(answer([{"name": "cover", "slots": slots()}]))
+    await design.run(reg, CHAT, "сделай обложку")
+    await design.on_callback(reg, CHAT, f"bgauto:{tid}")
+    check("«реши сам» верстает без выбора",
+          b.path(f"posts/{tid}-cover.png").exists())
+
+    # Формат без фона не спрашивает о нём вовсе: в шаблоне опроса фото
+    # нет, и выбирать там нечего.
+    check("у опроса фона не спрашивают",
+          not design._needs_bg("telegram", "опрос"))
+    check("у поста спрашивают", design._needs_bg("telegram", "пост"))
 
     # ── 9. правка это правка, а не пересборка ─────────────────────────
     # Раньше `revise` звал `run`: модель переписывала весь HTML, Chrome
@@ -331,7 +397,7 @@ async def main() -> None:
     tid = seed(plat="instagram", fmt="карусель")
     install(answer([{"name": f"{i:02d}", "html": card(f"Карточка {i}", 1080, 1350)}
                     for i in range(1, 6)]))
-    await design.run(reg, CHAT, "собери карусель")
+    await design.run(reg, CHAT, "собери карусель", pick_bg=False)
     made = sorted(x.name for x in b.path("posts").glob(f"{tid}-*.png"))
     check("собрано пять карточек", len(made) == 5, str(made))
 
@@ -397,7 +463,7 @@ async def main() -> None:
     tid = seed()
     install(answer([{"name": "cover", "slots": slots()}]))
     reg.clear()
-    await design.run(reg, CHAT, "сделай обложку")
+    await design.run(reg, CHAT, "сделай обложку", pick_bg=False)
     png = b.path(f"posts/{tid}-cover.png")
     was = png.stat().st_mtime_ns
 
@@ -436,7 +502,7 @@ async def main() -> None:
     install(answer([{"name": "cover",
                      "slots": slots(headline='Кода "не" писала')}]))
     reg.clear()
-    await design.run(reg, CHAT, "сделай обложку")
+    await design.run(reg, CHAT, "сделай обложку", pick_bg=False)
     made = b.path(f"posts/{tid}-cover.html").read_text(encoding="utf-8")
     check("кавычка в слоте экранирована", "&quot;" in made, made[:400])
     check("макет всё равно собрался", b.path(f"posts/{tid}-cover.png").exists())

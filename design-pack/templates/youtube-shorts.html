@@ -1,0 +1,39 @@
+<!-- @dsTemplate viewport="1080x1920" name="YouTube · shorts"
+     Слоты заполняет код, а не модель; набор — SLOTS в
+     orchestrator/design.py.
+
+     Отличие от рилса: снизу 400px закрывает интерфейс YouTube
+     (название, канал, кнопки), поэтому текстовый блок стоит выше и
+     хук набирается плотнее. Один и тот же макет на обе площадки
+     обрезался бы по-разному, и ловилось бы это уже на телефоне. -->
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../design/tokens.css"><style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:var(--font-body);}
+  .slide{width:1080px;height:1920px;position:relative;overflow:hidden;
+         background:var(--graphite);}
+  img{display:block;}
+  .pill{position:absolute;left:80px;top:220px;padding:18px 38px;
+        border-radius:100px;background:var(--accent);
+        font-family:var(--font-display);font-size:32px;font-weight:700;
+        letter-spacing:0.08em;text-transform:uppercase;color:#fff;}
+  .well{position:absolute;left:80px;right:80px;bottom:440px;}
+  .head{--accent-headline:var(--accent-on-dark);font-family:var(--font-display);font-weight:800;line-height:1.02;
+        letter-spacing:-0.03em;color:var(--milk);
+        font-size:calc({{headline_size}}px * 1.14);}
+  .sub{font-family:var(--font-body);font-size:44px;line-height:1.4;
+       color:rgba(248,245,241,0.85);margin-top:36px;max-width:860px;}
+</style></head><body>
+<div class="slide">
+  <img src="../design/assets/images/{{photo}}"
+       style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;">
+  <div style="position:absolute;inset:0;background:linear-gradient(180deg,
+       rgba(31,31,31,0.5) 0%,rgba(31,31,31,0.1) 30%,
+       rgba(31,31,31,0.9) 100%);"></div>
+  <div class="pill">{{rubric}}</div>
+  <div class="well">
+    <div class="head">{{headline}}<span
+         style="color:var(--accent-on-dark);">{{headline_accent}}</span></div>
+    <div class="sub">{{subtitle}}</div>
+  </div>
+</div></body></html>

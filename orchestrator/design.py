@@ -29,7 +29,7 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import ROOT, cfg
-from orchestrator import agent, desk, publisher
+from orchestrator import agent, desk, publisher, stock
 from orchestrator.desk import NoWork
 from storage import db
 
@@ -52,28 +52,73 @@ CHROME_CANDIDATES = (
 )
 
 # Холсты жёсткие, по спеке. Не спрашиваются и не обсуждаются.
+#
+# Матрица полная: у каждого формата из набора Стратега
+# (`strategy.PLATFORMS`) здесь своя строка. Это не педантизм — без своей
+# строки формат сваливался на `(площадка, None)` **молча**: сторис
+# уезжала в рендер 4:5, а shorts горизонталью. Ловил это человек глазами
+# на готовом PNG, то есть в самом конце.
+#
+# `(площадка, None)` остаётся запасной строкой для темы без формата.
 CANVAS = {
+    ("telegram", "пост"):      (1080, 1350),
+    ("telegram", "анонс"):     (1080, 1350),
+    ("telegram", "раздача"):   (1080, 1350),
+    ("telegram", "опрос"):     (1080, 1350),
     ("telegram", None):        (1080, 1350),
     ("instagram", "карусель"): (1080, 1350),
     ("instagram", "reels"):    (1080, 1920),
+    ("instagram", "сторис"):   (1080, 1920),
     ("instagram", None):       (1080, 1350),
+    ("youtube", "видео"):      (1280, 720),
+    ("youtube", "shorts"):     (1080, 1920),
     ("youtube", None):         (1280, 720),
 }
 
+# Латинское имя формата для путей. Имя формата в базе русское, а файлы
+# ТЗ и шаблонов уезжают клиенту в папке бренда и в шаблон-пак продукта,
+# где всё остальное латиницей.
+SLUG = {
+    "пост": "post", "анонс": "announce", "раздача": "giveaway",
+    "опрос": "poll", "карусель": "carousel", "reels": "reels",
+    "сторис": "stories", "видео": "video", "shorts": "shorts",
+}
+
 # Эталон под площадку и формат. Клонируется, а не верстается заново.
+#
+# Нужен только там, где разметку пишет модель. У формата с шаблоном
+# эталона нет и быть не должно: он приглашал бы переизобрести шаблон,
+# который модель всё равно не видит.
 REFERENCE = {
-    ("telegram", None):        ["carousel-01-cover.html"],
     ("instagram", "карусель"): ["carousel-01-cover.html", "carousel-02-context.html",
-                                "carousel-03-function.html", "carousel-04-accent.html",
+                                "carousel-03-point.html",
+                                "carousel-04-point-mirror.html",
                                 "carousel-05-final.html"],
-    ("instagram", "reels"):    ["reel-01-photo.html"],
+}
+
+# Сколько карточек в комплекте. Раньше это число было длиной списка
+# эталонов, и карусель собиралась пятью карточками. Считать карточки по
+# паттернам — ошибка: паттернов пять, а карточек шесть, потому что пункт
+# повторяется трижды, меняя сторону. Число снято с живой карусели бренда
+# (`design/assets/reference/ig/`), где в подвале стоит «03 / 06», а не с
+# головы: карусель длиннее шести карточек человек не долистывает.
+CARDS = {
+    ("instagram", "карусель"): 6,
 }
 
 # Шаблоны со слотами. Здесь разметку собирает код, а модель заполняет
 # дырки — см. `_fill`. Площадка без шаблона идёт старым путём, где модель
 # пишет HTML целиком: переезд делается по одной площадке за раз.
 TEMPLATES = {
-    ("telegram", None): ["telegram-post.html"],
+    ("telegram", "пост"):    ["telegram-post.html"],
+    ("telegram", "анонс"):   ["telegram-announce.html"],
+    ("telegram", "раздача"): ["telegram-giveaway.html"],
+    ("telegram", "опрос"):   ["telegram-poll.html"],
+    ("telegram", None):      ["telegram-post.html"],
+    ("instagram", "reels"):  ["instagram-reels.html"],
+    ("instagram", "сторис"): ["instagram-stories.html"],
+    ("youtube", "видео"):    ["youtube-video.html"],
+    ("youtube", "shorts"):   ["youtube-shorts.html"],
 }
 
 # Слоты и потолки знаков. Потолок — не каприз: заголовок длиннее вылезет
@@ -85,10 +130,14 @@ TEMPLATES = {
 # знаков, а не суждение: модель может только промахнуться мимо пикселей.
 SLOTS: dict[str, tuple[str, int]] = {
     "rubric":          ("рубрика над заголовком, капсом", 28),
-    "headline":        ("заголовок; слова только из текста Редактора", 52),
+    "headline":        ("заголовок; слова только из текста Редактора. Одно "
+                        "слово можно выделить акцентом, обернув в звёздочки: "
+                        "«Сайт в *Claude*: чат и форма». Звёздочки в потолок "
+                        "знаков не считаются", 52),
     "headline_accent": ("хвост заголовка акцентным цветом, можно пустым", 24),
     "subtitle":        ("подзаголовок одной фразой", 120),
     "photo":           ("имя файла из списка доступных фото", 0),
+    "handle":          ("подпись бренда на макете, ставит код", 32),
 }
 
 # Кто какой слот заполняет. Модели остаётся то, что кодом не решается:
@@ -108,6 +157,28 @@ PATCH_SLOTS = MODEL_SLOTS + ("photo",)
 # Правило выбора фото. Лежит у бренда, а не в коде продукта: `cover-red`
 # и `speaking` — имена файлов одного клиента, у следующего их нет.
 PHOTO_RULES = "design/photos.md"
+
+# Подпись бренда на макете. Лежит у бренда, а не в коде продукта, и не в
+# ТЗ: ТЗ читает модель, а подпись — работа кода. Ошибка в ней стоит
+# дорого: по подписи человек ищет аккаунт, и промах означает, что он его
+# не найдёт.
+MARK_FILE = "design/mark.md"
+MARK_RX = re.compile(r"^Подпись на макете:\s*(.+?)\s*$", re.M)
+STOCK = "stock-"      # префикс файлов со стока, см. orchestrator/stock.py
+
+# Сколько фонов показать человеку до вёрстки. Три — потому что выбор из
+# двух это «да/нет», а из пяти уже работа: человек листает вместо того,
+# чтобы решить.
+BG_CHOICES = 3
+
+# Выбор фона переживает перезапуск бота: кнопка несёт id темы, а сами
+# кандидаты лежат рядом с макетом. Стоковый вариант иначе не восстановить
+# — выдача Pexels на тот же запрос приходит другой.
+BG_FILE = "posts/{id}.bg.json"
+
+# Усилие на ключевые слова для стока. Это перевод темы в три-четыре
+# английских слова, а не суждение.
+KEYWORDS_EFFORT = "low"
 RULE_RX = re.compile(r"^\|([^|]+)\|([^|]+)\|\s*$", re.M)
 
 # Хвост ТЗ, который модели не едет. Ниже этой строки в ТЗ живёт описание
@@ -190,6 +261,33 @@ def _key(plat: str, fmt: str) -> tuple[str, str | None]:
         else (plat, None)
 
 
+def _known(plat: str, fmt: str) -> None:
+    """Формат вне набора площадки — отказ, а не тихий дефолт.
+
+    Стратег формат вне набора не выбрасывает: смысл в теме есть, и он
+    ставит её со строкой «проверь». Дизайнеру же сваливаться на холст
+    площадки нельзя — он молча отдаст 4:5 там, где нужна вертикаль, и
+    увидит это человек уже на PNG. Лучше сказать словами и не верстать.
+    """
+    if not fmt or (plat, fmt) in CANVAS:
+        return
+    known = sorted(f for pl, f in CANVAS if pl == plat and f)
+    raise NoWork(f"формат «{fmt}» не из набора {plat}, холста под него "
+                 f"нет. Набор площадки: {', '.join(known) or 'пуст'}")
+
+
+def _cards(plat: str, fmt: str, tpls: list, refs: list) -> int:
+    """Сколько карточек в комплекте.
+
+    На шаблонном пути это число шаблонов: карточка это шаблон. На
+    свободном — `CARDS`, а не длина списка эталонов: эталонов столько,
+    сколько паттернов, а карточек больше.
+    """
+    if tpls:
+        return len(tpls)
+    return CARDS.get(_key(plat, fmt)) or len(refs)
+
+
 def chrome() -> str:
     for path in CHROME_CANDIDATES:
         if Path(path).exists():
@@ -215,6 +313,12 @@ def _copy(b, theme: dict[str, Any]) -> str:
     if not raw.strip():
         raise NoWork(f"файл {theme['asset']} пуст")
     return raw.split("-->", 1)[-1].strip() if raw.startswith("<!--") else raw.strip()
+
+
+def _mark(b) -> str:
+    """Подпись бренда для макета. Нет файла — нет подписи, и это не сбой."""
+    found = MARK_RX.search(b.read(MARK_FILE) or "")
+    return found.group(1).strip() if found else ""
 
 
 def _photos(b) -> list[str]:
@@ -273,24 +377,55 @@ def _pick_photo(b, theme: dict[str, Any], photos: list[str]) -> str:
     goal = str(theme.get("goal") or "").strip().lower()
     order = [p for p in (rules.get(goal) or rules.get("*") or []) if p in photos]
     if not order:
-        order = photos
+        # Запасная ротация идёт только по своим фото. Сток
+        # (`tools/stock_pull.py`, префикс `stock-`) попадает на макет,
+        # если человек вписал имя файла в правило руками: безликая
+        # картинка со стока на обложке личного бренда читается как
+        # AI-контент, и выбрать её молча код не должен.
+        order = [p for p in photos if not p.startswith(STOCK)] or photos
     recent = _recent_photos(b, len(order) - 1)
     return next((p for p in order if p not in recent), order[0])
 
 
-def _derive(b, theme: dict[str, Any], photos: list[str]) -> dict[str, str]:
-    """Слоты, которые заполняет код. Модель о них не знает."""
+def _derive(b, theme: dict[str, Any], photos: list[str],
+            photo: str = "") -> dict[str, str]:
+    """Слоты, которые заполняет код. Модель о них не знает.
+
+    `photo` — фон, который человек утвердил кнопкой до вёрстки. Пусто —
+    выбирает код правилом бренда, как было до 03.09: так работают
+    пересборка правки и любой путь, где выбора не показывали.
+    """
     rubric = str(theme.get("rubric") or "").strip()
     if not rubric:
         raise NoWork(f"у темы {theme['id']} нет рубрики: её ставит Стратег")
-    return {"rubric": rubric.upper(), "photo": _pick_photo(b, theme, photos)}
+    if photo and photo not in photos:
+        raise NoWork(f"фото «{photo}» нет в папке бренда")
+    return {"rubric": rubric.upper(),
+            "photo": photo or _pick_photo(b, theme, photos),
+            "handle": _mark(b)}
 
 
-def _spec(b, plat: str) -> str:
-    text = b.read(f"design/platforms/{plat}.md")
-    if not text.strip():
-        raise NoSpec(plat)
-    return text.split(FOR_HUMAN)[0].strip()
+def _spec(b, plat: str, fmt: str = "") -> str:
+    """ТЗ формата, а нет его — ТЗ площадки.
+
+    Формат сюда приехал 03.09. До этого ТЗ читалось только по площадке,
+    и Дизайнер, верставший обложку рилса, получал в промпт рецепт
+    карусели: единственным файлом Instagram был `instagram.md`. Ошибка
+    тихая — ответ приходил нормальный, просто не по тому рецепту.
+
+    Имя файла собирается латиницей (`SLUG`), как у монтажа
+    (`montage._cover_spec`, `{площадка}-{формат}-cover.md`). Файлы
+    разные и путать их нельзя: у монтажа ТЗ обложки, которую код
+    собирает из кадра дубля, здесь — ТЗ макета, который верстает
+    Дизайнер.
+    """
+    tried = [f"design/platforms/{plat}-{SLUG[fmt]}.md"] if fmt in SLUG else []
+    tried.append(f"design/platforms/{plat}.md")
+    for rel in tried:
+        text = b.read(rel)
+        if text.strip():
+            return text.split(FOR_HUMAN)[0].strip()
+    raise NoSpec(" или ".join(tried))
 
 
 def _reference(plat: str, fmt: str) -> list[tuple[str, str]]:
@@ -340,6 +475,27 @@ def _fit(text: str) -> int:
     return 52
 
 
+# Акцент внутри заголовка: `*слово*`. Хвостом (`headline_accent`) он
+# ставится только в конце фразы, а на эталоне бренда подсвечено слово в
+# середине — «Сайт в *Claude*: чат, форма и аналитика». Разметка тут
+# минимальная нарочно: всё остальное в значении экранируется, и `<span>`
+# остаётся единственным тегом, который слот может принести.
+ACCENT_RX = re.compile(r"\*([^*\n]{1,40})\*")
+
+
+def _accented(value: str) -> str:
+    """Экранированный заголовок со звёздочками → заголовок с акцентом.
+
+    Цвет берётся из `--accent-headline`, который объявляет сам шаблон:
+    на тёмном холсте это чистый акцент, на светлом — тёмный его оттенок,
+    иначе слово пропадает. Запасной вариант — `--accent`, чтобы шаблон
+    без объявления не остался вовсе без цвета.
+    """
+    return ACCENT_RX.sub(
+        r'<span style="color:var(--accent-headline,var(--accent));">\1</span>',
+        _html.escape(value, quote=True)).replace("\n", "<br>")
+
+
 def _fill(tpl: str, slots: dict[str, str], photos: list[str]) -> str:
     """Собрать HTML из шаблона. Значения экранируются, а не доверяются.
 
@@ -363,9 +519,17 @@ def _fill(tpl: str, slots: dict[str, str], photos: list[str]) -> str:
     for name in need:
         val = (slots.get(name) or "").strip()
         limit = SLOTS.get(name, ("", 0))[1]
-        if limit and len(val) > limit:
-            raise NoWork(f"слот «{name}» длиннее {limit} знаков: {len(val)}")
-        if not val and name not in ("headline_accent",):
+        # Звёздочки акцента в потолок не считаются: они разметка, а
+        # человек на макете видит слово без них.
+        if name == "headline":
+            val_len = len(val.replace("*", ""))
+        else:
+            val_len = len(val)
+        if limit and val_len > limit:
+            raise NoWork(f"слот «{name}» длиннее {limit} знаков: {val_len}")
+        # Пустыми бывают двое: хвост акцента (его может не быть) и
+        # подпись бренда (её может не быть у бренда вовсе).
+        if not val and name not in ("headline_accent", "handle"):
             raise NoWork(f"слот «{name}» пустой")
 
     head = (slots.get("headline") or "") + (slots.get("headline_accent") or "")
@@ -376,7 +540,15 @@ def _fill(tpl: str, slots: dict[str, str], photos: list[str]) -> str:
         val = ready.get(name, "")
         # Кегль это число от кода, экранировать нечего; текст от модели —
         # всегда экранируется: одна кавычка в заголовке иначе рвёт стиль.
-        return val if name == "headline_size" else _html.escape(val, quote=True)
+        if name == "headline_size":
+            return val
+        if name == "headline":
+            return _accented(val)
+        # Перевод строки в значении — это разметка, но единственная,
+        # которую слот вправе принести: у анонса подзаголовок это «когда,
+        # где, сколько», и в одну строку они не встают. Экранирование
+        # идёт до подстановки `<br>`, поэтому тег остаётся единственным.
+        return _html.escape(val, quote=True).replace("\n", "<br>")
 
     return SLOT_RX.sub(sub, tpl)
 
@@ -403,9 +575,14 @@ def _cards_from_slots(data: dict[str, Any], tpls: list[tuple[str, str]],
                          "здесь пишет код")
         name = re.sub(r"[^a-z0-9-]", "",
                       str(got[i].get("name") or "").lower()) or stem
+        # Слоты этого шаблона. Карточка карусели без фото не должна
+        # падать от того, что `fixed` принёс фото для обложки, — но
+        # выбрасывается только слот, известный коду. Выдуманный доезжает
+        # до `_fill` и получает отказ, как и раньше.
+        need = set(SLOT_RX.findall(tpl)) - {"headline_size"}
         clean = {k: str(v) for k, v in slots.items()
-                 if k not in (fixed or {})}
-        clean.update(fixed or {})
+                 if k not in (fixed or {}) and (k in need or k not in SLOTS)}
+        clean.update({k: v for k, v in (fixed or {}).items() if k in need})
         out.append({"name": name, "slots": clean,
                     "html": _fill(tpl, clean, photos)})
     return out
@@ -591,7 +768,8 @@ def _brief(theme: dict[str, Any], copy: str, photos: list[str],
     return "\n".join(lines)
 
 
-async def build(chat_id: int, ask: str, *, say=None) -> Layout:
+async def build(chat_id: int, ask: str, *, say=None,
+                photo: str = "") -> Layout:
     b = desk.brand(chat_id)
     if b is None:
         raise NoWork("профиль бренда ещё не собран")
@@ -600,28 +778,29 @@ async def build(chat_id: int, ask: str, *, say=None) -> Layout:
     plat = theme.get("plat") or "telegram"
     fmt = theme.get("format") or ""
 
-    spec = _spec(b, plat)
-    size = CANVAS.get(_key(plat, fmt)) or CANVAS[(plat, None)]
+    _known(plat, fmt)
+    spec = _spec(b, plat, fmt)
+    size = size_of(theme)
     tpls = _templates(plat, fmt)
     refs = [] if tpls else _reference(plat, fmt)
     if not tpls and not refs:
         raise NoSpec(f"{plat}/{fmt}: эталона в шаблон-паке нет")
+    n = _cards(plat, fmt, tpls, refs)
 
     copy = _copy(b, theme)
     photos = _photos(b)
 
     if say:
-        n = len(tpls or refs)
         await say(f"Верстаю {'макет' if n == 1 else f'{n} карточки'} по теме "
                   f"<b>{theme.get('title') or theme['id']}</b> "
                   f"({plat} · {size[0]}×{size[1]}).\n"
                   "Сборка и рендер займут до минуты.")
 
     if tpls:
-        fixed = _derive(b, theme, photos)
+        fixed = _derive(b, theme, photos, photo)
         answer = await agent.ask(
             "design", chat_id,
-            _brief(theme, copy, photos, size, len(tpls), markup=False) +
+            _brief(theme, copy, photos, size, n, markup=False) +
             "\n\nЗаполни слоты.",
             brand_name=b.name(),
             stable=_slots_stable(spec, MODEL_SLOTS),
@@ -629,7 +808,7 @@ async def build(chat_id: int, ask: str, *, say=None) -> Layout:
     else:
         answer = await agent.ask(
             "design", chat_id,
-            _brief(theme, copy, photos, size, len(refs), markup=True) +
+            _brief(theme, copy, photos, size, n, markup=True) +
             "\n\nСобери макет. Ответь одним JSON-объектом в формате из твоей "
             "секции «Формат выдачи».",
             brand_name=b.name(), stable=_stable(spec, refs),
@@ -732,6 +911,7 @@ async def land(chat_id: int, data: dict[str, Any]) -> Layout:
 
     plat = theme.get("plat") or "telegram"
     fmt = theme.get("format") or ""
+    _known(plat, fmt)
     tpls = _templates(plat, fmt)
     photos = _photos(b)
     copy = _copy(b, theme)
@@ -748,6 +928,201 @@ async def land(chat_id: int, data: dict[str, Any]) -> Layout:
                  accent=str(data.get("accent") or ""),
                  notes=[str(n) for n in (data.get("notes") or [])])
     return await emit(b, lay, size_of(theme), copy, photos, slots=bool(tpls))
+
+
+# ── фон до вёрстки ────────────────────────────────────────────────────
+#
+# Раньше фон выбирал код и сразу верстал: человек видел готовый макет и,
+# если фото не то, шёл в правку — то есть платил вёрсткой и рендером за
+# решение, которое принимается взглядом за секунду. Теперь сначала три
+# фона на выбор, потом дизайн поверх выбранного.
+#
+# Код при этом не разжаловали: порядок кандидатов по-прежнему его —
+# правило бренда по цели темы плюс ротация против повтора через день.
+# Человеку остаётся то, что кодом не решается: какой из трёх кадров
+# сегодня про этот текст.
+
+
+def _bg_path(b, theme_id: str) -> Path:
+    return b.path(BG_FILE.format(id=theme_id))
+
+
+def _needs_bg(plat: str, fmt: str) -> bool:
+    """Есть ли у формата фон, который ставит код.
+
+    У раздачи и опроса фото в шаблоне нет вовсе, и предлагать выбор там
+    значит спрашивать о том, что никуда не встанет. На свободном пути
+    (карусель) фото ставит модель из списка — этот выбор пока не наш.
+    """
+    return any("photo" in set(SLOT_RX.findall(tpl))
+               for _, tpl in _templates(plat, fmt))
+
+
+def _own(b, theme: dict[str, Any], photos: list[str]) -> list[str]:
+    """Свои фото в порядке правила бренда: подходящие и не вчерашние."""
+    rules = _photo_rules(b)
+    goal = str(theme.get("goal") or "").strip().lower()
+    order = [p for p in (rules.get(goal) or rules.get("*") or []) if p in photos]
+    order += [p for p in photos
+              if p not in order and not p.startswith(STOCK)]
+    recent = _recent_photos(b, BG_CHOICES)
+    # Недавние не выбрасываются, а уезжают в конец: на маленьком
+    # фотобанке выбросить их значило бы остаться без вариантов вовсе.
+    return [p for p in order if p not in recent] + \
+           [p for p in order if p in recent]
+
+
+async def _keywords(chat_id: int, theme: dict[str, Any]) -> str:
+    """Тема поста → английские слова для стока.
+
+    Русский запрос Pexels переводит грубо: на «минимализм стол ноутбук»
+    приезжает инжир на тарелке. Слова просим у модели, потому что тема
+    русская, а теги стока английские, и словарём это не закрыть.
+
+    Не вышло — не беда: сток просто не подмешается, свои фото останутся.
+    """
+    title = str(theme.get("title") or "").strip()
+    if not title:
+        return ""
+    try:
+        answer = await agent.ask(
+            "design", chat_id,
+            "Тема поста: " + title +
+            f"\nРубрика: {theme.get('rubric') or '—'}."
+            "\n\nДай английский запрос для стокового фото-фона под этот "
+            "пост: три-четыре слова через пробел, без кавычек и пояснений. "
+            "Фон предметный или фактурный — стол, свет, текстура, "
+            "пространство. Людей в кадре не проси.",
+            max_tokens=200, effort=KEYWORDS_EFFORT)
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("ключевые слова для стока не вышли: %s", e)
+        return ""
+    words = re.findall(r"[a-z]+", answer.lower().splitlines()[0]
+                       if answer.strip() else "")
+    # Человек в кадре со стока — чужое лицо в узнаваемой постановке.
+    # Модель об этом просили словами, но просьба это не гарантия.
+    words = [w for w in words if w not in stock.PEOPLE][:4]
+    return " ".join(words)
+
+
+def _own_page(b, theme: dict[str, Any], photos: list[str],
+              page: int) -> list[str]:
+    start = page * BG_CHOICES
+    return _own(b, theme, photos)[start:start + BG_CHOICES]
+
+
+def _options(own: list[str], *, page: int, query: str) -> list[dict[str, Any]]:
+    """Три кандидата: свои сначала, сток добирает нехватку."""
+    out: list[dict[str, Any]] = [{"kind": "own", "name": n} for n in own]
+    if len(out) < BG_CHOICES and query and stock.ready():
+        try:
+            found = stock.search(query, BG_CHOICES - len(out), page=page + 1)
+        except stock.NoStock as e:
+            log.warning("сток не ответил: %s", e)
+            found = []
+        out += [{"kind": "stock", "photo": ph} for ph in found]
+    return out
+
+
+def _bg_kb(theme_id: str, n: int) -> InlineKeyboardMarkup:
+    row = [InlineKeyboardButton(text=str(i),
+                                callback_data=f"art:bg:{theme_id}:{i}")
+           for i in range(1, n + 1)]
+    return InlineKeyboardMarkup(inline_keyboard=[row, [
+        InlineKeyboardButton(text="🔄 Ещё три",
+                             callback_data=f"art:bgmore:{theme_id}"),
+        InlineKeyboardButton(text="🎲 Реши сам",
+                             callback_data=f"art:bgauto:{theme_id}"),
+    ]])
+
+
+async def offer(reg, chat_id: int, ask: str, *, topic: str = "design",
+                page: int = 0, say=None) -> bool:
+    """Показать три фона и ждать кнопку. False — выбирать нечего.
+
+    Возвращает False на форматах без фона, на пустом фотобанке и когда
+    вариант остался ровно один: спрашивать «выбери из одного» это не
+    выбор, а лишний круг.
+    """
+    b = desk.brand(chat_id)
+    if b is None:
+        raise NoWork("профиль бренда ещё не собран")
+
+    theme = _pick(chat_id, ask)
+    plat = theme.get("plat") or "telegram"
+    fmt = theme.get("format") or ""
+    _known(plat, fmt)
+    if not _needs_bg(plat, fmt):
+        return False
+    # ТЗ спрашиваем до показа: если его нет, вёрстки не будет всё равно,
+    # и человек зря выберет фон.
+    _spec(b, plat, fmt)
+
+    photos = _photos(b)
+    if not photos:
+        raise NoWork("в папке бренда нет ни одного фото")
+
+    own = _own_page(b, theme, photos, page)
+    saved = _bg_read(b, theme["id"])
+    query = str(saved.get("query") or "") if saved else ""
+    # Слова для стока спрашиваем у модели, только когда своих фото не
+    # хватило: у бренда с полным фотобанком это лишний вызов на каждом
+    # макете, а он стоит секунд.
+    if len(own) < BG_CHOICES and not query:
+        query = await _keywords(chat_id, theme)
+
+    options = _options(own, page=page, query=query)
+    if len(options) < 2:
+        return False
+
+    _bg_path(b, theme["id"]).parent.mkdir(parents=True, exist_ok=True)
+    _bg_path(b, theme["id"]).write_text(_json.dumps(
+        {"theme_id": theme["id"], "ask": ask, "query": query, "page": page,
+         "options": options}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if say:
+        await say(f"Сначала фон для темы <b>{theme.get('title') or theme['id']}</b>. "
+                  f"Три варианта, дизайн наложу на выбранный.")
+    for i, opt in enumerate(options, 1):
+        if opt["kind"] == "own":
+            blob = b.path(f"design/assets/images/{opt['name']}").read_bytes()
+            caption = f"{i}. {opt['name']}"
+        else:
+            ph = opt["photo"]
+            try:
+                blob = stock.preview(ph)
+            except stock.NoStock as e:
+                log.warning("превью со стока не пришло: %s", e)
+                continue
+            caption = (f"{i}. сток · {ph.get('photographer') or '—'} · "
+                       f"по запросу «{query}»")
+        await reg.send_file("design", chat_id, blob, f"bg-{i}.jpg",
+                            caption=caption, topic=topic, as_photo=True)
+    await reg.say("design", chat_id, "Какой берём?",
+                  kb=_bg_kb(theme["id"], len(options)), topic=topic)
+    return True
+
+
+def _bg_read(b, theme_id: str) -> dict[str, Any]:
+    path = _bg_path(b, theme_id)
+    if not path.is_file():
+        return {}
+    try:
+        return _json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {}
+
+
+def _current_photo(b, theme_id: str) -> str:
+    """Фон, который уже стоит на макете темы. Для пересборки на правке."""
+    for f in sorted(b.path("posts").glob(f"{theme_id}-*.slots.json")):
+        try:
+            name = _json.loads(f.read_text(encoding="utf-8")).get("photo")
+        except (ValueError, OSError):
+            continue
+        if name:
+            return str(name)
+    return ""
 
 
 # ── карточка и кнопки ─────────────────────────────────────────────────
@@ -823,19 +1198,29 @@ def caption(lay: Layout, size: tuple[int, int]) -> str:
     return "\n".join(out)
 
 
-async def run(reg, chat_id: int, ask: str, topic: str = "design") -> None:
+async def run(reg, chat_id: int, ask: str, topic: str = "design", *,
+              photo: str = "", pick_bg: bool = True) -> None:
+    """Собрать макет. По умолчанию сначала спрашивает фон.
+
+    `pick_bg=False` — верстать сразу: так идёт пересборка на правке (фон
+    там уже утверждён) и кнопка «Реши сам». `photo` — утверждённый
+    человеком фон, он же отменяет выбор правилом.
+    """
     table.clear(chat_id)
 
     async def say(text: str) -> None:
         await reg.say("design", chat_id, text, topic=topic)
 
     try:
-        lay = await build(chat_id, ask, say=say)
+        if pick_bg and not photo and await offer(reg, chat_id, ask,
+                                                 topic=topic, say=say):
+            return
+        lay = await build(chat_id, ask, say=say, photo=photo)
     except NoSpec as e:
-        await say(f"ТЗ площадки нет: {e}. Собирать на глаз не буду, "
-                  "иначе макет разъедется с брендом.\n\nЗаведи ТЗ в "
-                  "<code>design/platforms/</code> папки бренда — по нему "
-                  "и соберу.")
+        await say(f"ТЗ нет: {e}. Собирать на глаз не буду, иначе макет "
+                  "разъедется с брендом.\n\nЗаведи любой из этих файлов "
+                  "в папке бренда — сначала смотрю ТЗ формата, потом "
+                  "площадки целиком.")
         return
     except NoWork as e:
         await say(f"Верстать нечего: {e}. Сначала текст от Редактора.")
@@ -892,9 +1277,14 @@ async def revise(reg, chat_id: int, instruction: str,
                           "Пересобираю макет целиком, это дольше.",
                           topic=topic)
 
+    # Пересборка на правке идёт с тем же фоном и без выбора: человек
+    # просил поправить макет, а не начать сначала. Другое фото — это
+    # `_patch_slots`, у него `photo` в наборе слотов.
+    b = desk.brand(chat_id)
     await run(reg, chat_id,
               f"Правка к макету темы {lay.theme['id']}: {instruction}",
-              topic=topic)
+              topic=topic, pick_bg=False,
+              photo=_current_photo(b, lay.theme["id"]) if b else "")
 
 
 def _htmls_on_disk(chat_id: int, theme_id: str) -> list[Path]:
@@ -1115,6 +1505,10 @@ async def on_callback(reg, chat_id: int, action: str,
     async def say(text: str) -> None:
         await reg.say("design", chat_id, text, topic=topic)
 
+    if action in ("bg", "bgmore", "bgauto"):
+        await _on_bg(reg, chat_id, action, theme_id, topic)
+        return
+
     if action == "fix":
         lay = table.get(chat_id, theme_id)
         if lay is None:
@@ -1143,3 +1537,66 @@ async def on_callback(reg, chat_id: int, action: str,
     tid = lay.theme["id"]
     await say(f"Передаю комплект <code>{tid}</code> Публикатору.")
     await publisher.run(reg, chat_id, tid, topic="queue")
+
+
+async def _on_bg(reg, chat_id: int, action: str, arg: str,
+                 topic: str) -> None:
+    """Кнопки выбора фона: номер, «ещё три», «реши сам».
+
+    Кандидаты читаются с диска, а не из памяти процесса: бот
+    перезапускается, а стоковую выдачу на тот же запрос второй раз не
+    получить — Pexels отдаёт другое.
+    """
+    theme_id, _, index = arg.rpartition(":") if action == "bg" else (arg, "", "")
+
+    async def say(text: str) -> None:
+        await reg.say("design", chat_id, text, topic=topic)
+
+    b = desk.brand(chat_id)
+    if b is None:
+        await say("Профиль бренда ещё не собран.")
+        return
+
+    saved = _bg_read(b, theme_id)
+    if not saved:
+        await say("Этот выбор фона уже неактуален — попроси макет заново.")
+        return
+    ask = str(saved.get("ask") or f"свёрстай макет по теме {theme_id}")
+
+    if action == "bgauto":
+        await run(reg, chat_id, ask, topic, pick_bg=False)
+        return
+
+    if action == "bgmore":
+        try:
+            shown = await offer(reg, chat_id, ask, topic=topic,
+                                page=int(saved.get("page") or 0) + 1, say=say)
+        except (NoWork, NoSpec) as e:
+            await say(f"Больше вариантов нет: {e}")
+            return
+        if not shown:
+            await say("Больше вариантов нет — верстаю на том, что выбрал код.")
+            await run(reg, chat_id, ask, topic, pick_bg=False)
+        return
+
+    options = saved.get("options") or []
+    try:
+        opt = options[int(index) - 1]
+    except (ValueError, IndexError):
+        await say("Не понял, какой из вариантов.")
+        return
+
+    if opt.get("kind") == "own":
+        photo = str(opt.get("name") or "")
+    else:
+        # Скачивается только выбранное: папка бренда не должна обрастать
+        # тем, что человек отверг.
+        try:
+            photo = stock.take(b, opt["photo"], str(saved.get("query") or "фон"))
+        except (stock.NoStock, KeyError, OSError) as e:
+            await say(f"Стоковый фон не забрался: {e}. Выбери другой.")
+            return
+        await say(f"Забрал в фотобанк: <code>{photo}</code>. "
+                  "Автор записан в <code>design/assets/stock-credits.md</code>.")
+
+    await run(reg, chat_id, ask, topic, photo=photo, pick_bg=False)

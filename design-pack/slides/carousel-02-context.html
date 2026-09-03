@@ -1,15 +1,48 @@
-<!-- @dsCard group="Slides" viewport="1080x1350" name="Carousel · Context" subtitle="Milk intro — sets up the topic" -->
-<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css"><style>
+<!-- @dsCard group="Slides" viewport="1080x1350" name="Carousel · Context" subtitle="Photo above, panel below — card 2 of 6"
+     Карточка 2: что произошло. Фото сверху, светлая панель снизу со
+     скруглённым верхом — она наезжает на кадр, а не стыкуется с ним
+     встык: стык читается как две картинки, наезд как одна карточка. -->
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../design/tokens.css"><style>
   *{box-sizing:border-box;margin:0;padding:0;}
-  body{background:var(--bg-section-alt);font-family:var(--font-body);}
-  .slide{width:1080px;height:1350px;position:relative;overflow:hidden;background:var(--milk);}
+  body{font-family:var(--font-body);}
+  .slide{width:1080px;height:1350px;position:relative;overflow:hidden;
+         background:var(--graphite);}
   img{display:block;}
-</style></head><body><div class="slide"><div style="padding:96px 84px;">
-   <div style="font-family:var(--font-display);font-size:30px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--terracotta);">Контекст</div>
-   <div style="font-family:var(--font-display);font-weight:700;font-size:82px;line-height:1.12;letter-spacing:-0.025em;margin-top:220px;color:var(--text-primary);">В 2026 AI перестал быть экспериментом.</div>
-   <div style="font-family:var(--font-body);font-size:42px;line-height:1.55;color:var(--text-secondary);margin-top:48px;">Он стал операционным инструментом. Вопрос уже не «стоит ли внедрять», а «что внедрить первым».</div>
- </div>
- <div style="position:absolute;left:84px;bottom:84px;display:flex;align-items:center;gap:26px;">
-   <div style="width:74px;height:74px;border-radius:50%;overflow:hidden;"><img src="../assets/images/author.jpg" style="width:100%;height:100%;object-fit:cover;"></div>
-   <span style="font-size:34px;color:var(--text-secondary);font-weight:500;">@lily_.space</span>
- </div></div></body></html>
+  .mark{position:absolute;left:72px;top:60px;display:flex;
+        align-items:center;gap:16px;font-size:28px;font-weight:500;
+        color:rgba(248,245,241,0.9);}
+  .dot{width:14px;height:14px;border-radius:50%;background:var(--accent);}
+  .panel{position:absolute;left:0;right:0;bottom:0;height:62%;
+         background:var(--card);border-radius:44px 44px 0 0;
+         padding:84px 84px 72px;}
+  .eyebrow{font-family:var(--font-display);font-size:30px;font-weight:700;
+           letter-spacing:0.1em;text-transform:uppercase;
+           color:var(--text-secondary);}
+  .head{font-family:var(--font-display);font-weight:800;font-size:76px;
+        line-height:1.14;letter-spacing:-0.025em;margin-top:36px;
+        color:var(--text-primary);}
+  .hl{background:var(--accent-tint);border-radius:10px;padding:2px 14px;
+      box-decoration-break:clone;-webkit-box-decoration-break:clone;}
+  .body{font-size:42px;line-height:1.5;color:var(--text-secondary);
+        margin-top:40px;}
+  .foot{position:absolute;left:84px;right:84px;bottom:64px;display:flex;
+        justify-content:space-between;align-items:baseline;
+        font-family:var(--font-display);font-weight:700;font-size:30px;
+        letter-spacing:0.08em;text-transform:uppercase;
+        color:var(--text-secondary);}
+</style></head><body>
+<div class="slide">
+  <img src="../design/assets/images/author.jpg"
+       style="position:absolute;left:0;top:0;width:100%;height:46%;
+              object-fit:cover;object-position:50% 30%;">
+  <div class="mark"><span class="dot"></span>lily_.space</div>
+  <div class="panel">
+    <div class="eyebrow">Что произошло</div>
+    <div class="head">Много теории.<br><span class="hl">А бота нет</span></div>
+    <div class="body">Клиент просил «создай чат-бот по профориентации» и
+      утонул в методиках и ссылках. Два дня переписки, а продукта так и
+      нет. Знакомо?</div>
+    <div class="foot"><span>Знакомо?</span><span>02 / 06</span></div>
+  </div>
+</div></body></html>

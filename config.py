@@ -72,6 +72,11 @@ class Config:
     default_tz: str = os.getenv("DEFAULT_TZ", "Europe/Moscow")
     llm_budget_day: int = int(os.getenv("LLM_BUDGET_PER_TENANT_DAY", "200"))
 
+    # Ключ Pexels для `tools/stock_pull.py`. Завод его не зовёт: сток
+    # приезжает в фотобанк руками человека, а не по ходу вёрстки —
+    # Дизайнер не должен добирать картинку в момент сборки макета.
+    pexels_key: str = os.getenv("PEXELS_API_KEY", "")
+
     def missing_tokens(self) -> list[str]:
         return [role for role, token in self.tokens.items() if not token]
 

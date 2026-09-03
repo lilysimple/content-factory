@@ -1,14 +1,15 @@
-<!-- @dsTemplate viewport="1080x1350" name="Telegram · пост"
+<!-- @dsTemplate viewport="1080x1350" name="Telegram · анонс"
      Слоты заполняет код, а не модель. Каждый {{слот}} описан в SLOTS
      (orchestrator/design.py): что это, сколько знаков, обязателен ли.
-     Разметку править здесь; модель её не видит и переизобрести не может.
 
-     Собран по эталону бренда (design/assets/reference/tg/): рубрика в
-     плашке акцентом, подпись бренда справа сверху, хук с акцентным
-     хвостом, короткая черта, подзаголовок в две-три строки.
+     Одна система с постом (эталон бренда, design/assets/reference/tg):
+     плашка-рубрика акцентом, подпись бренда справа, хук с акцентным
+     словом, черта, подзаголовок. Отличие анонса — подзаголовок несёт
+     «когда и где», и потому идёт в две-три строки: перевод строки в
+     значении становится переносом на макете.
 
      Цвета — только семантические токены (`--accent`, а не `--neon`):
-     шаблон общий для всех тенантов, и конкретный цвет живёт у бренда. -->
+     шаблон общий для всех тенантов, конкретный цвет живёт у бренда. -->
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <link rel="stylesheet" href="../design/tokens.css"><style>
   *{box-sizing:border-box;margin:0;padding:0;}
@@ -21,12 +22,9 @@
         font-family:var(--font-display);font-size:30px;font-weight:700;
         letter-spacing:0.08em;text-transform:uppercase;
         color:var(--accent-ink);}
-  /* Подпись бренда: ровно по средней линии плашки, а не по её верху —
-     иначе на глаз она висит выше рубрики. */
   .mark{position:absolute;right:72px;top:66px;height:70px;
         display:flex;align-items:center;font-family:var(--font-body);
-        font-size:30px;font-weight:500;letter-spacing:0.01em;
-        color:rgba(248,245,241,0.72);}
+        font-size:30px;font-weight:500;color:rgba(248,245,241,0.72);}
   .well{position:absolute;left:72px;right:72px;bottom:72px;}
   .head{--accent-headline:var(--accent);font-family:var(--font-display);font-weight:800;line-height:1.02;
         letter-spacing:-0.03em;color:var(--milk);font-size:{{headline_size}}px;}
@@ -39,9 +37,6 @@
 <div class="slide">
   <img src="../design/assets/images/{{photo}}"
        style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;">
-  <!-- Защита читаемости: тёмный низ под текстом, лёгкая вуаль сверху
-       под плашкой и подписью. Середина кадра остаётся открытой — там
-       лицо, и затемнять его нечем. -->
   <div style="position:absolute;inset:0;background:linear-gradient(180deg,
        rgba(31,31,31,0.45) 0%,rgba(31,31,31,0.08) 24%,
        rgba(31,31,31,0.24) 46%,rgba(31,31,31,0.78) 72%,

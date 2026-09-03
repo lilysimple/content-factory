@@ -14,7 +14,7 @@ export function RubricPill({
     dark:       { background: 'var(--surface-inverse)', color: 'var(--text-on-dark)', border: '1px solid transparent' },
     outline:    { background: 'var(--surface-card)', color: 'var(--text-primary)', border: '1px solid var(--border-firm)' },
     sage:       { background: 'var(--sage-tint)', color: 'var(--sage-deep)', border: '1px solid transparent' },
-    terracotta: { background: 'var(--terracotta-tint)', color: 'var(--accent-hover)', border: '1px solid transparent' },
+    terracotta: { background: 'var(--accent-tint)', color: 'var(--accent-hover)', border: '1px solid transparent' },
   };
   return (
     <span

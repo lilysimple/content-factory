@@ -1,0 +1,38 @@
+<!-- @dsTemplate viewport="1280x720" name="YouTube · видео"
+     Превью ролика. Слоты заполняет код, а не модель; набор — SLOTS в
+     orchestrator/design.py.
+
+     Кегль хука здесь **не** от `_fit`: ступени 104→52px посчитаны на
+     холст шириной 1080 и высотой 1350, а тут высоты 720 и текст делит
+     кадр с портретом. Число зашито в шаблон, потолок хука держит
+     SLOTS. -->
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../design/tokens.css"><style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:var(--font-body);}
+  .slide{width:1280px;height:720px;position:relative;overflow:hidden;
+         background:var(--graphite);}
+  img{display:block;}
+  .eyebrow{font-family:var(--font-display);font-size:24px;font-weight:700;
+           letter-spacing:0.1em;text-transform:uppercase;
+           color:var(--accent-on-dark);}
+  .head{--accent-headline:var(--accent-on-dark);font-family:var(--font-display);font-weight:800;font-size:72px;
+        line-height:1.04;letter-spacing:-0.03em;color:var(--milk);
+        margin-top:28px;}
+  .sub{font-family:var(--font-body);font-size:26px;line-height:1.45;
+       color:rgba(248,245,241,0.8);margin-top:24px;}
+</style></head><body>
+<div class="slide">
+  <img src="../design/assets/images/{{photo}}"
+       style="position:absolute;right:0;top:0;width:46%;height:100%;
+              object-fit:cover;">
+  <div style="position:absolute;inset:0;background:linear-gradient(90deg,
+       #1F1F1F 48%,rgba(31,31,31,0.78) 62%,rgba(31,31,31,0.12) 100%);"></div>
+  <div style="position:absolute;left:64px;top:64px;bottom:64px;width:660px;
+              display:flex;flex-direction:column;justify-content:center;">
+    <div class="eyebrow">{{rubric}}</div>
+    <div class="head">{{headline}}<span
+         style="color:var(--accent-on-dark);">{{headline_accent}}</span></div>
+    <div class="sub">{{subtitle}}</div>
+  </div>
+</div></body></html>
