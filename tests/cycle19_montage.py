@@ -18,7 +18,7 @@ from harness import CHAT, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
-from orchestrator import desk, footage, grab, montage                   # noqa: E402
+from orchestrator import agent, cut, desk, footage, grab, montage                   # noqa: E402
 from storage import db                                            # noqa: E402
 from storage.brand import Brand                                   # noqa: E402
 
@@ -62,11 +62,11 @@ def main() -> None:
     print("\n5. Субтитры и панорама считаются одним пересчётом")
     words = [footage.Word("раз", 1.0, 1.4), footage.Word("тишина", 6.0, 6.4),
              footage.Word("два", 10.0, 10.5)]
-    cut = footage.cut_words(words, tl)
-    check("слово из паузы выброшено", len(cut) == 2,
-          " ".join(str(w["text"]) for w in cut))
+    said = footage.cut_words(words, tl)
+    check("слово из паузы выброшено", len(said) == 2,
+          " ".join(str(w["text"]) for w in said))
     check("слово после паузы сдвинуто",
-          abs(float(cut[1]["start"]) - 7.4) < 0.01, str(cut[1]))
+          abs(float(said[1]["start"]) - 7.4) < 0.01, str(said[1]))
 
     track = footage.cut_track(
         [footage.Focus(1.0, 0.2, 0.3), footage.Focus(6.5, 0.9, 0.9),
@@ -274,7 +274,7 @@ def main() -> None:
           not montage.wants_split("смонтируй ролик"))
 
     print("\n18. Тема под кусок заводится без даты")
-    frag = montage.reels.Fragment(0.0, 30.0, "хук куска", "заголовок", "зачем")
+    frag = montage.cut.Fragment(0.0, 30.0, "хук куска", "заголовок", "зачем")
     t1 = montage._theme(CHAT, frag, "instagram", "reels")
     t2 = montage._theme(CHAT, frag, "instagram", "reels")
     check("id не повторяется", t1["id"] != t2["id"], f"{t1['id']} {t2['id']}")
@@ -520,13 +520,17 @@ def main() -> None:
     check("тема без сценария берётся по id",
           got["id"] == "2026-09-05-instagram-01", got["id"])
 
+    # Без id и без утверждённого сценария темы нет — и это не отказ, а
+    # второй вход: человек снял дубль из головы. Черновик при этом всё
+    # равно не берётся молча, угадывать между ними нельзя.
+    check("без id черновик молча не берётся",
+          montage._pick(CHAT, "смонтируй") is None)
+
     try:
-        montage._pick(CHAT, "смонтируй")
-        check("без id сценарий обязателен", False, "взял черновик молча")
+        montage._pick(CHAT, "смонтируй по теме 2026-09-05-instagram-77")
+        check("названный id, которого нет, это отказ", False, "смолчал")
     except desk.NoWork as e:
-        check("без id сценарий обязателен", True)
-        check("сказано, как смонтировать без сценария",
-              "по id" in str(e), str(e))
+        check("названный id, которого нет, это отказ", "нет" in str(e), str(e))
 
     try:
         montage._pick(CHAT, "смонтируй по теме 2026-09-06-telegram-01")
@@ -541,6 +545,122 @@ def main() -> None:
     got = montage._pick(CHAT, "смонтируй")
     check("утверждённый сценарий берётся молча",
           got["id"] == "2026-09-05-instagram-01", got["id"])
+
+
+    # ── 31. границы кусков ────────────────────────────────────────────
+    # Работа Монтажёра: что он ответил — просьба, границы проверяет код.
+    print("\n31. Границы кусков проверяет код, не промпт")
+
+    class W:
+        def __init__(self, text, start):
+            self.text, self.start = text, start
+
+    words = [W(f"с{i}", i * 0.5) for i in range(30)]
+    text = cut.transcript(words, line=10)
+    check("расшифровка идёт строками с меткой времени",
+          text.startswith("[0] ") and "\n[5] " in text, text[:60])
+
+    raw = [
+        {"start": 0, "end": 30, "hook": "первый", "title": "т"},
+        {"start": 25, "end": 55, "hook": "внахлёст", "title": "т"},
+        {"start": 60, "end": 65, "hook": "короткий", "title": "т"},
+        {"start": 70, "end": 140, "hook": "длинный", "title": "т"},
+        {"start": 150, "end": 175, "hook": "", "title": "без хука"},
+        {"start": 100, "end": 300, "hook": "за краем", "title": "т"},
+        {"start": "ой", "end": 200, "hook": "не число", "title": "т"},
+    ]
+    good, lost = cut._fit(raw, 180)
+    check("взят только годный кусок", [f.hook for f in good] == ["первый"],
+          str([f.hook for f in good]))
+    check("наезд отброшен", any("наезжает" in x for x in lost), str(lost))
+    check("короткий отброшен", any("короче" in x for x in lost), str(lost))
+    check("длинный отброшен", any("длиннее" in x for x in lost), str(lost))
+    check("кусок без хука отброшен", any("без хука" in x for x in lost),
+          str(lost))
+    check("вышедший за длину записи отброшен",
+          any("не помещается" in x for x in lost), str(lost))
+    check("нечисловое время отброшено",
+          any("не число" in x for x in lost), str(lost))
+    check("каждое отбрасывание названо", len(lost) == 6, str(len(lost)))
+
+    ok = [{"start": 10, "end": 40, "hook": "х", "title": "", "why": "п"}]
+    good, _ = cut._fit(ok, 120)
+    check("без title берётся хук", good[0].title == "х", good[0].title)
+    check("длительность считается", good[0].seconds == 30, str(good[0].seconds))
+
+    # ── 32. короткий дубль: своя вилка ────────────────────────────────
+    # Вилка 20–60 придумана для выбора куска из длинной записи. Дубль на
+    # восемнадцать секунд человек снял целиком, и отказать ему в монтаже
+    # из-за чужой границы значит сломать работающий путь.
+    print("\n32. У короткого дубля своя вилка")
+    short = [{"start": 0.8, "end": 18.0, "hook": "х", "title": "т", "why": ""}]
+    kept, _ = cut._fit(short, 19.0, lo=cut.WHOLE_MIN, hi=None)
+    check("дубль короче двадцати секунд проходит", len(kept) == 1, str(kept))
+    dropped, why = cut._fit(short, 19.0)
+    check("в нарезке тот же кусок отбрасывается", not dropped, str(dropped))
+    check("и это названо", any("короче" in x for x in why), str(why))
+
+    long_one = [{"start": 0, "end": 95, "hook": "х", "title": "т", "why": ""}]
+    kept, _ = cut._fit(long_one, 100.0, lo=cut.WHOLE_MIN, hi=None)
+    check("длинный дубль монтируется целиком", len(kept) == 1, str(kept))
+
+    # ── 33. обрезка краёв ─────────────────────────────────────────────
+    print("\n33. Дубль обрезается по краям, а не по середине")
+    reel = montage.Reel(theme={"id": "t"}, video=harness.TMP / "нет.mp4")
+    reel.probe = footage.Probe(duration=60.0, width=1080, height=1920,
+                               fps=30.0, has_audio=True)
+    reel.cuts = footage.timeline(60.0, [(30.0, 33.0)])
+    reel.focus = [footage.Focus(t=float(i), x=0.5, y=0.5) for i in range(60)]
+    frag = cut.Fragment(4.0, 50.0, "хук", "заголовок", "")
+    montage._trim(reel, frag, _brand())
+    check("границы куска запомнены", reel.piece == (4.0, 50.0), str(reel.piece))
+    check("пауза внутри куска осталась вырезанной",
+          len(reel.cuts.keep) == 2, str(reel.cuts.keep))
+    check("кусок не вылезает за границы",
+          reel.cuts.keep[0][0] >= 4.0 and reel.cuts.keep[-1][1] <= 50.0,
+          str(reel.cuts.keep))
+    check("человеку сказано, сколько срезано",
+          any("обрезан по краям" in f for f in reel.findings),
+          str(reel.findings))
+
+    # ── 34. промпт Монтажёра ──────────────────────────────────────────
+    print("\n34. Монтажёр это отдельная роль")
+    sys_cut = agent.system_text("cut", brand_name="Lily Space")
+    check("подстановок не осталось", not agent.leftovers(sys_cut),
+          str(agent.leftovers(sys_cut)))
+    check("имя роли подставлено", "Ты Монтажёр" in sys_cut, sys_cut[:200])
+    check("Монтажёру правила письма не едут",
+          "Признаки машинного текста" not in sys_cut,
+          "он ничего не сочиняет")
+    check("хук берётся из сказанного", "из самого куска" in sys_cut)
+    check("обе работы описаны",
+          "## Длинная запись" in sys_cut and "## Короткий дубль" in sys_cut)
+
+    sys_reels = agent.system_text("reels", brand_name="Lily Space")
+    check("у Редактора Reels нарезки больше нет",
+          "нарезка длинной записи" not in sys_reels.lower(),
+          "секция осталась в промпте сценариста")
+    check("Редактор Reels стал короче",
+          len(sys_reels) < 12000, f"{len(sys_reels)} знаков")
+
+    # ── 35. неудачный монтаж не оставляет тему готовой ────────────────
+    # Тему под дубль из головы заводит монтаж. Упавший рендер оставил бы
+    # её в `ready` без файла, и Публикатор взял бы её в очередь.
+    print("\n35. Упавший монтаж не оставляет тему в очереди")
+    with db.tx() as c:
+        c.execute("DELETE FROM themes WHERE chat_id = ?", (CHAT,))
+    stub = cut.Fragment(0.0, 30.0, "хук", "Дубль из головы", "")
+    made = montage._theme(CHAT, stub, "instagram", "reels")
+    check("тема заведена готовой", made["status"] == "ready", made["status"])
+    check("дня в плане не занимает", not made["date"], str(made["date"]))
+    check("помечена как снятая, а не спланированная",
+          made["src"] == "adhoc", made["src"])
+    with db.tx() as c:
+        c.execute("UPDATE themes SET status = 'failed', skip_reason = 'рендер' "
+                  "WHERE id = ? AND chat_id = ?", (made["id"], CHAT))
+    row = db.one("SELECT status FROM themes WHERE id = ?", made["id"])
+    check("упавший монтаж уводит тему из очереди",
+          row["status"] == "failed", row["status"])
 
 
 main()

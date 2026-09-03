@@ -366,48 +366,7 @@ async def main() -> None:
           reg.texts()[-120:])
 
 
-def cuts() -> None:
-    """Нарезка длинной записи: границы кусков проверяет код, не промпт."""
-    print("\n15. Нарезка длинной записи")
-
-    class W:
-        def __init__(self, text, start):
-            self.text, self.start = text, start
-
-    words = [W(f"с{i}", i * 0.5) for i in range(30)]
-    text = reels.transcript(words, line=10)
-    check("расшифровка идёт строками с меткой времени",
-          text.startswith("[0] ") and "\n[5] " in text, text[:60])
-
-    raw = [
-        {"start": 0, "end": 30, "hook": "первый", "title": "т"},
-        {"start": 25, "end": 55, "hook": "внахлёст", "title": "т"},
-        {"start": 60, "end": 65, "hook": "короткий", "title": "т"},
-        {"start": 70, "end": 140, "hook": "длинный", "title": "т"},
-        {"start": 150, "end": 175, "hook": "", "title": "без хука"},
-        {"start": 100, "end": 300, "hook": "за краем", "title": "т"},
-        {"start": "ой", "end": 200, "hook": "не число", "title": "т"},
-    ]
-    good, lost = reels._fit(raw, 180)
-    check("взят только годный кусок", [f.hook for f in good] == ["первый"],
-          str([f.hook for f in good]))
-    check("наезд отброшен", any("наезжает" in x for x in lost), str(lost))
-    check("короткий отброшен", any("короче" in x for x in lost), str(lost))
-    check("длинный отброшен", any("длиннее" in x for x in lost), str(lost))
-    check("кусок без хука отброшен", any("без хука" in x for x in lost),
-          str(lost))
-    check("вышедший за длину записи отброшен",
-          any("не помещается" in x for x in lost), str(lost))
-    check("нечисловое время отброшено",
-          any("не число" in x for x in lost), str(lost))
-    check("каждое отбрасывание названо", len(lost) == 6, str(len(lost)))
-
-    ok = [{"start": 10, "end": 40, "hook": "х", "title": "", "why": "п"}]
-    good, _ = reels._fit(ok, 120)
-    check("без title берётся хук", good[0].title == "х", good[0].title)
-    check("длительность считается", good[0].seconds == 30, str(good[0].seconds))
-
-
+# Нарезка длинной записи уехала Монтажёру 03.09: её проверки живут в
+# `cycle19_montage.py`, вместе с остальным монтажом.
 asyncio.run(main())
-cuts()
 raise SystemExit(report())

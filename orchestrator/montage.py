@@ -1,16 +1,24 @@
 """Монтаж: из отснятого человеком видео в готовый рилс.
 
-Вход — тема со статусом `ready` (сценарий Редактора Reels утверждён) и
-видеофайл, который человек снял сам и прислал в топик Reels. Выход —
-`posts/{id}-reel.mp4`: интро (обложка Дизайнера или карточка бренда),
-отснятое видео кроп/паддингом под холст площадки, титул хука первые три
-секунды, аутро с CTA.
+Вход — видеофайл, который человек снял сам и прислал в топик Reels, или
+ссылка на свой эфир. Тема при этом может быть, а может и не быть: под
+дубль из головы её нет и в плане не было, и она заводится по факту
+съёмки. Выход — `posts/{id}-reel.mp4`: интро (обложка Дизайнера или
+карточка бренда), отснятое видео кроп/паддингом под холст площадки,
+титул хука первые три секунды, аутро с CTA.
 
-Как `publisher.py` и рендер PNG в `design.py`, это не AI-роль: модель не
-зовём, вся работа детерминированная — ffprobe посчитал длительность,
-Remotion собрал кадр. Разница с `design.py` в рендерере: тот правит
-HTML headless Chrome, здесь Chrome правит Remotion, а мы только готовим
-для него JSON и зовём `npx remotion render` подпроцессом.
+Сборка детерминирована, как `publisher.py` и рендер PNG в `design.py`:
+ffprobe посчитал длительность, Remotion собрал кадр. Разница с
+`design.py` в рендерере: тот правит HTML headless Chrome, здесь Chrome
+правит Remotion, а мы только готовим для него JSON и зовём
+`npx remotion render` подпроцессом.
+
+**Модель зовётся ровно один раз и не отсюда.** Границы кусков ставит
+Монтажёр (`orchestrator/cut.py`): где в длинной записи ролики и где
+начинается снятый дубль — это рассуждение, и оно вынесено в роль. Всё
+остальное здесь считается арифметикой и решать «где мысль закончилась»
+не умеет. Отсюда же мягкость: не пришли границы — монтируем целиком,
+а не отказываем в монтаже уже снятого.
 
 Разбор дубля живёт в `footage.py` и модель не зовёт тоже: паузы,
 активная зона кадра и пословный транскрипт — арифметика и локальный
@@ -43,7 +51,7 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import ROOT, cfg
-from orchestrator import desk, design, footage, grab, publisher, reels
+from orchestrator import cut, desk, design, footage, grab, publisher
 from orchestrator.desk import NoWork
 from storage import db
 
@@ -113,6 +121,10 @@ class Reel:
     still: Path | None = None
     still_at: float = 0.0
     quiet: list[tuple[float, float]] = field(default_factory=list)
+    # Услышанное до словаря и до нарезки. Нужно дважды: словарь
+    # применяется к нему заново на правке, а границы Монтажёра
+    # приходят уже после расшифровки и режут те же слова.
+    heard: list[Any] = field(default_factory=list)
     subs: list[dict[str, Any]] = field(default_factory=list)
     piece: tuple[float, float] | None = None
     face: footage.Face | None = None
@@ -130,8 +142,8 @@ class Reel:
 
 # ── вход: тема и видео ──────────────────────────────────────────────
 
-def _pick(chat_id: int, ask: str) -> dict[str, Any]:
-    """Тема под монтаж.
+def _pick(chat_id: int, ask: str) -> dict[str, Any] | None:
+    """Тема под монтаж. `None` — темы нет, и это нормальный вход.
 
     Названная по id берётся любая reels-тема, в том числе без
     утверждённого сценария: человек снял дубль и хочет ролик, а хук и CTA
@@ -142,18 +154,28 @@ def _pick(chat_id: int, ask: str) -> dict[str, Any]:
     Молча, без id, берём по-прежнему только тему с принятым сценарием.
     Угадывать, какой из черновиков человек держал в голове, монтажу
     нельзя: рендер стоит минут, и ошибка выясняется в конце.
+
+    Не нашлось ничего — это не отказ, а второй нормальный вход: человек
+    снял дубль из головы, и темы под него в плане нет и не было. Границы
+    и заголовок такому дублю даёт Монтажёр, тема заводится по факту
+    съёмки (`src = 'adhoc'`). Названный id, которого нет в базе, отказом
+    остаётся: молчать про опечатку в id значит смонтировать не то.
     """
     named = bool(desk.ID_RX.search(ask or ""))
-    return desk.pick(
-        chat_id, ask,
-        statuses=("idea", "draft", "ready") if named else ("ready",),
-        fresh="ready",
-        suits=lambda r: ((r["format"] or "").lower() in FORMATS
-                         and (named or bool(r["asset"]))),
-        wrong="у темы {id} формат «{format}», а не ролик",
-        none="темы {id} нет",
-        empty="нет ни одного утверждённого сценария reels. Назовите тему "
-              "по id — смонтирую и без сценария")
+    try:
+        return desk.pick(
+            chat_id, ask,
+            statuses=("idea", "draft", "ready") if named else ("ready",),
+            fresh="ready",
+            suits=lambda r: ((r["format"] or "").lower() in FORMATS
+                             and (named or bool(r["asset"]))),
+            wrong="у темы {id} формат «{format}», а не ролик",
+            none="темы {id} нет",
+            empty="нет ни одного утверждённого сценария reels")
+    except NoWork:
+        if named:
+            raise
+        return None
 
 
 def incoming_dir(b) -> Path:
@@ -792,9 +814,9 @@ async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
 # ── сборка ────────────────────────────────────────────────────────────
 
 # Бюджет сценария из `roles/reels.md`: дольше пятидесяти секунд ролик
-# уже не рилс. Дубль длиннее не режется по смыслу — выбор кусков это
-# работа для модели, а монтаж намеренно её не зовёт. Поэтому дубль едет
-# целиком, а человек читает строкой, насколько он вышел за бюджет.
+# уже не рилс. Дубль длиннее едет целиком: Монтажёр на нём обрезает
+# края, а резать середину по смыслу это «нарежь на рилсы» — другое
+# задание и другой вход. Человек читает строкой, насколько вышли.
 BUDGET_SECONDS = 50
 
 
@@ -852,6 +874,7 @@ async def analyse(reel: Reel, *, say=None,
     # На столе остаётся услышанное, а не исправленное: словарь может
     # пополниться правкой человека, и тогда он применяется к тому же
     # транскрипту заново, без второй расшифровки.
+    reel.heard = words
     reel.subs = footage.cut_words(words, reel.cuts)
     _relex(reel, rules or [])
 
@@ -863,8 +886,8 @@ async def _intro(reel: Reel, b, size: tuple[int, int]) -> None:
     холст, — лучшее, что может быть, её и берём. Обложка под соседний
     холст в рилсе теряет треть ширины вместе со своим заголовком, и её
     обрубки спорят с нашим текстом — такую не берём вовсе. Остаётся кадр
-    из самого дубля: монтаж модель не зовёт и нарисовать обложку ему
-    нечем, зато снятое человеком видео у него есть.
+    из самого дубля: нарисовать обложку монтажу нечем, зато снятое
+    человеком видео у него есть.
     """
     tid = reel.theme["id"]
     plat = reel.theme.get("plat") or "instagram"
@@ -891,9 +914,11 @@ async def _intro(reel: Reel, b, size: tuple[int, int]) -> None:
 
     dur = reel.probe.duration if reel.probe else 0.0
     try:
+        # Границы куска уже поставлены — кадр ищем внутри них. Обложка
+        # из отрезанного хвоста показывает то, чего в ролике нет.
         shot = await footage.cover_shot(
             reel.video, reel.focus, dur, TOOLS / f".still-{tid}.png",
-            quiet=reel.quiet)
+            window=reel.piece, quiet=reel.quiet)
     except footage.NoFfmpeg as e:
         reel.findings.append(f"кадр на обложку не снялся: {e}")
         return
@@ -943,49 +968,165 @@ def _place(reel: Reel, size: tuple[int, int]) -> None:
             "чтобы не лечь на него")
 
 
+# Меньше этого резать нечего: перекодирование куска стоит времени, а
+# четыре десятых секунды в начале дубля человек не заметит.
+TRIM_MIN = 0.4
+
+
+async def bounds(chat_id: int, reel: Reel, *, ask: str = "",
+                 say=None) -> "cut.Fragment | None":
+    """Границы дубля от Монтажёра. Не вышло — работаем на целом.
+
+    Мягко по делу: без сценария границы это украшение, а не условие. До
+    03.09 дубль без сценария монтировался целиком и человек читал строку
+    «первый кадр останется без слов» — если модель сейчас недоступна или
+    ответила мимо, мы возвращаемся ровно к этому, а не отказываем в
+    монтаже уже снятого.
+    """
+    if not reel.heard or reel.probe is None:
+        return None
+    if say:
+        await say("Слушаю, где дубль начинается и где кончается.")
+    try:
+        frags, lost = await cut.fragments(chat_id, reel.heard,
+                                          reel.probe.duration,
+                                          whole=True, ask=ask)
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("границы дубля не пришли: %s", e)
+        reel.findings.append(f"границы дубля не пришли ({desk.reason(e)}) — "
+                             "смонтирован целиком")
+        return None
+    if not frags:
+        reel.findings.append("границы дубля не сошлись"
+                             + (": " + "; ".join(lost[:2]) if lost else "")
+                             + " — смонтирован целиком")
+        return None
+    return frags[0]
+
+
+def _trim(reel: Reel, frag: "cut.Fragment", b) -> None:
+    """Сузить дубль до границ куска: паузы, панорама, субтитры, обложка.
+
+    Тишина по всей записи уже посчитана, и пересчитывать её внутри куска
+    нельзя: порог, снятый с двадцати секунд, разойдётся с порогом всей
+    записи на соседних секундах. Куску достаётся своя часть найденного,
+    ровно как в нарезке.
+    """
+    assert reel.cuts is not None and reel.probe is not None
+    cuts = footage.window(reel.cuts, frag.start, frag.end)
+    reel.cuts = cuts
+    reel.pan = footage.cut_track(reel.focus, cuts)
+    if reel.heard:
+        reel.subs = footage.cut_words(reel.heard, cuts)
+        _relex(reel, lexicon(b))
+    reel.piece = (frag.start, frag.end)
+    tail = reel.probe.duration - frag.end
+    reel.findings.append(
+        f"дубль обрезан по краям: {frag.start:.1f} с в начале, "
+        f"{max(tail, 0.0):.1f} с в конце, осталось {cuts.total:.0f} с")
+
+
 async def build(chat_id: int, ask: str, *, say=None) -> Reel:
     b = desk.brand(chat_id)
     if b is None:
-        raise NoWork("профиль бренда ещё не собран")
+        raise NoWork("профиля бренда ещё нет")
 
     theme = _pick(chat_id, ask)
     video = _footage(b)
-    beats = _beats(b, theme["id"])
+    beats = _beats(b, theme["id"]) if theme else {}
     color, accent = _colors(b)
 
-    reel = Reel(theme=theme, video=video, color=color, accent=accent,
-                hook=beats.get(HOOK_TITLE, ""), cta=beats.get(CTA_TITLE, ""))
-
-    if not theme.get("asset"):
-        reel.findings.append("сценария нет, монтирую по записи: хук и CTA "
-                             "брать неоткуда, на первом кадре заголовок темы")
-
-    if not reel.hook and not reel.title:
-        reel.findings.append("нет ни хука из сценария, ни заголовка темы — "
-                             "первый кадр останется без слов")
-
-    plat = theme.get("plat") or "instagram"
-    fmt = theme.get("format") or "reels"
+    plat = (theme or {}).get("plat") or "instagram"
+    fmt = (theme or {}).get("format") or "reels"
     size = design.CANVAS.get(design._key(plat, fmt)) \
         or design.CANVAS.get((plat, None)) or (1080, 1920)
 
+    # Тема заводится после Монтажёра, а не до: заголовок и хук у дубля из
+    # головы берутся из сказанного, а id темы попадает в имена всех
+    # файлов рендера. Заведённая заранее пустышка пережила бы неудачный
+    # монтаж строкой в базе без единого артефакта.
+    reel = Reel(theme=theme or {}, video=video, color=color, accent=accent,
+                hook=beats.get(HOOK_TITLE, ""), cta=beats.get(CTA_TITLE, ""))
+
     if say:
-        await say(f"Монтирую <b>{theme.get('title') or theme['id']}</b> "
-                  f"из <code>{video.name}</code> ({size[0]}×{size[1]}).\n"
+        name = (theme or {}).get("title") or (theme or {}).get("id") \
+            or "снятый дубль"
+        await say(f"Монтирую <b>{name}</b> из <code>{video.name}</code> "
+                  f"({size[0]}×{size[1]}).\n"
                   "Рендер идёт дольше макета, до нескольких минут.")
 
     await analyse(reel, say=say, rules=lexicon(b))
-    await _intro(reel, b, size)
 
-    reel.out = await render(reel, size)
-    log.info("%s: смонтировано, %s", theme["id"], reel.out)
+    # Сценарий есть — хук и CTA уже написаны, границы ставил суфлёр, и
+    # звать модель незачем. Сценария нет — дубль сняли из головы, и
+    # единственный, кто может сказать, где он начинается, это Монтажёр.
+    frag = None
+    if not beats:
+        if theme:
+            reel.findings.append("сценария нет, монтирую по записи: хук и "
+                                 "границы взяты из сказанного")
+        frag = await bounds(chat_id, reel, ask=ask, say=say)
+
+    if frag and not reel.hook:
+        reel.hook = frag.hook
+
+    if theme is None:
+        # Дубль из головы: темы в плане нет и не будет. День остаётся
+        # пустым — слот в плане ставит Стратег, а съёмка приходит от
+        # человека с камерой.
+        stub = frag or cut.Fragment(0.0, reel.probe.duration if reel.probe
+                                    else 0.0, "",
+                                    f"Дубль {desk.today(chat_id)}", "")
+        reel.theme = _theme(chat_id, stub, plat, fmt)
+        if say:
+            await say(f"Темы под этот дубль не было, завела "
+                      f"<code>{reel.theme['id']}</code>: "
+                      f"<b>{reel.theme.get('title')}</b>.")
+
+    if not reel.hook and not reel.title:
+        reel.findings.append("нет ни хука, ни заголовка темы — первый кадр "
+                             "останется без слов")
+
+    narrows = bool(frag and reel.probe
+                   and (frag.start > TRIM_MIN
+                        or frag.end < reel.probe.duration - TRIM_MIN))
+    if narrows:
+        _trim(reel, frag, b)
+
+    piece = None
+    try:
+        await _intro(reel, b, size)
+        if narrows:
+            # Кусок рендерится отдельным файлом: перемотка к середине
+            # записи на каждый кадр роняет браузер, и время внутри куска
+            # идёт с нуля.
+            piece = TOOLS / f".clip-{reel.theme['id']}.mp4"
+            await footage.clip(video, frag.start, frag.end, piece)
+            reel.video = piece
+            reel.cuts = reel.cuts.shift(frag.start)
+        reel.out = await render(reel, size)
+    except Exception as e:                                   # noqa: BLE001
+        # Тему завели мы — не оставлять её в `ready` без файла: такую
+        # Публикатор возьмёт в очередь как готовую к публикации.
+        if theme is None:
+            with db.tx() as c:
+                c.execute("UPDATE themes SET status = 'failed', "
+                          "skip_reason = ? WHERE id = ? AND chat_id = ?",
+                          (str(e)[:200], reel.theme["id"], chat_id))
+        raise
+    finally:
+        reel.video = video          # исходник для правки, не временный кусок
+        if piece:
+            piece.unlink(missing_ok=True)
+
+    log.info("%s: смонтировано, %s", reel.theme["id"], reel.out)
     return reel
 
 
 # ── нарезка длинной записи на несколько роликов ───────────────────────
 #
-# Одна запись — несколько рилсов. Где резать по смыслу, решает Редактор
-# Reels (`reels.fragments`): у него для этого есть роль и промпт. Монтаж
+# Одна запись — несколько рилсов. Где резать по смыслу, решает
+# Монтажёр (`cut.fragments`): у него для этого есть роль и промпт. Монтаж
 # получает готовый список кусков и делает свою детерминированную работу —
 # режет, ищет обложку, рендерит, заводит тему в базе.
 #
@@ -1102,7 +1243,8 @@ async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]
         await say(f"{'Субтитры' if subs else 'Расшифровала'}: {len(words)} "
                   "слов. Выбираю куски.")
 
-    frags, lost = await reels.fragments(chat_id, words, probe.duration, ask=ask)
+    frags, lost = await cut.fragments(chat_id, words, probe.duration,
+                                      ask=ask)
     if not frags:
         raise NoWork("подходящих кусков не нашлось"
                      + (": " + "; ".join(lost[:3]) if lost else ""))
@@ -1125,7 +1267,7 @@ async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]
         if cuts.dropped > 0.5:
             reel.findings.append(f"внутри куска вырезано {cuts.dropped:.0f} с "
                                  "тишины")
-        if cuts.total < reels.FRAG_MIN * 0.8:
+        if cuts.total < cut.FRAG_MIN * 0.8:
             reel.findings.append(
                 f"после вырезанных пауз кусок стал коротким: "
                 f"{cuts.total:.0f} с")
