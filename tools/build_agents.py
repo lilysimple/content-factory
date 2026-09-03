@@ -33,6 +33,13 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+# Разбор шапки роли и подстановка живут в `agent`: их читает и путь бота,
+# и этот сборщик. Две копии разошлись бы молча — субагент получал бы
+# заполненный каркас, а бот литеральные скобки, ровно как до 30.08.
+from orchestrator.agent import fill, header, leftovers   # noqa: E402
+
 ROLES = ROOT / "roles"
 ADAPTERS = ROLES / "adapters"
 OUT = ROOT / ".claude" / "agents"
@@ -46,7 +53,7 @@ BUILT = {
 
 BANNER = (
     "<!-- СОБРАНО КОДОМ, НЕ ПРАВИТЬ РУКАМИ.\n"
-    "     Источник: roles/adapters/{name}.md + roles/frame.md + roles/{role}\n"
+    "     Источник: roles/adapters/{name}.md + roles/frame*.md + roles/{role}\n"
     "     Пересобрать: ./.venv/bin/python tools/build_agents.py\n"
     "     Правка здесь исчезнет при следующей сборке. Правь источник. -->"
 )
@@ -60,48 +67,27 @@ def split_front(text: str) -> tuple[str, str]:
     return text[: end + 5].rstrip("\n"), text[end + 5:].lstrip("\n")
 
 
-# Подстановки, которых на этом пути нет в задаче, а не в шапке роли.
-# `brand_name` приходит в `input.md`, слои и секции профиля — тоже: на
-# старом пути их подставлял бы вызывающий, здесь их адрес называет
-# контракт.
+# Подстановки, которых на этом пути нет в шапке роли. `brand_name` и слои
+# приходят из задачи: на пути бота их подставляет `agent.BOT_FILLS`, здесь
+# их адрес называет контракт.
 TASK_FILLS = {
     "brand_name": "клиента, названного в `input.md`",
-    "sections": "индекс профиля `research/profile-digest.md`",
     "layers": ("Слои приходят разделами `input.md` и артефактами задачи в "
                "`tasks/{task-id}/`. Что где лежит, сказано в дельте выше."),
 }
 
 
-def header(text: str) -> dict[str, str]:
-    """Значения из шапки файла роли: `role_name:`, `upstream:` и так далее.
+def filled(text: str, values: dict[str, str]) -> str:
+    """Подставить и убедиться, что не осталось дырок.
 
-    Их никто не подставлял ни на одном пути: `frame.md` уезжает в модель
-    дословно (`agent.py:100`, никакого `.format()`), поэтому раздел «Кто
-    ты» всё это время сообщал роли буквально `{role_name}` и `{upstream}`.
-    Значения лежали рядом, в шапке `roles/*.md`, и не были ни с чем
-    связаны — поле без потребителя.
+    Сборщик строгий, в отличие от пути бота: адаптер пишется на диск и
+    живёт до следующей сборки, поэтому пустая подстановка тут не «видна
+    в логе», а вклеена в промпт субагента насовсем.
     """
-    out = {}
-    for ln in text.splitlines():
-        if ln.startswith("#") or ln.startswith("<!--"):
-            continue
-        if ":" in ln and not ln.startswith(("-", " ", "|", "*")):
-            key, _, val = ln.partition(":")
-            key = key.strip()
-            if key in ("role_name", "upstream", "downstream", "output",
-                       "anti_scope"):
-                out[key] = val.strip()
-    return out
-
-
-def fill(text: str, values: dict[str, str]) -> str:
-    """Подставить, что известно. Неизвестное оставить видимым, а не пустым."""
-    for key, val in values.items():
-        text = text.replace("{" + key + "}", val)
-    left = sorted(set(re.findall(r"\{([a-z_]+)\}", text)))
-    if left:
+    out = fill(text, values)
+    if left := leftovers(out):
         raise SystemExit("нечем заполнить подстановки: " + ", ".join(left))
-    return text
+    return out
 
 
 def body(path: Path) -> str:
@@ -132,7 +118,8 @@ def build(name: str, role_file: str) -> str:
         delta.rstrip(),
         "---",
         "# Общий каркас",
-        fill(body(ROLES / "frame.md"), values),
+        filled(body(ROLES / "frame.md"), values),
+        filled(body(ROLES / "frame-text.md"), values),
         "---",
         f"# Роль целиком (`roles/{role_file}`)",
         body(ROLES / role_file),

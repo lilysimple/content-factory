@@ -1,9 +1,10 @@
 """Вызов модели от лица роли.
 
-Системный промпт собирается из трёх слоёв:
-  roles/frame.md   общий каркас, одинаковый для всех
-  roles/{role}.md  специфика роли
-  маска            только для Ассистента, только на его реплики
+Системный промпт собирается из слоёв:
+  roles/frame.md       общий каркас, одинаковый для всех
+  roles/frame-text.md  правила письма — только пишущим ролям
+  roles/{role}.md      специфика роли
+  маска                только для Ассистента, только на его реплики
 
 Бюджет на тенанта в сутки — предохранитель. Круги переделки ограничены
 двумя, но цикл может закольцеваться иначе, и упереться лучше в счётчик,
@@ -45,6 +46,60 @@ log = logging.getLogger("agent")
 ROLES_DIR = ROOT / "roles"
 MAX_ATTEMPTS = 3
 
+# Роли, которым каркас пишущей роли не едет. Дизайнер текста не пишет
+# вовсе: на макет ему запрещено ставить слова, которых нет в тексте
+# Редактора, поэтому голос, анти-AI, признаки машинного текста и правила
+# достоверности применять ему не к чему — 3674 знака в каждом вызове,
+# из которых ни одно правило не про его работу.
+#
+# Список ролей, а не свойство роли: новая роль по умолчанию **получает**
+# правила письма. Забыть добавить сюда безобидно, забыть убрать — нет.
+TEXTLESS = frozenset({"design"})
+
+# Подстановки каркаса, которых нет в шапке роли. На пути бота слои
+# приезжают разделами запроса, а не файлами задачи, — этим он и
+# отличается от субагента (`tools/build_agents.py`, `TASK_FILLS`).
+BOT_FILLS = {
+    "layers": ("Слои приходят разделами запроса: тема, утверждённый текст "
+               "соседа, ТЗ площадки, списки файлов бренда."),
+}
+
+PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
+HEADER_KEYS = ("role_name", "upstream", "downstream", "output", "anti_scope")
+
+
+def header(text: str) -> dict[str, str]:
+    """Значения из шапки файла роли: `role_name:`, `upstream:` и так далее.
+
+    Их долго никто не подставлял ни на одном пути, и раздел «Кто ты»
+    сообщал роли буквально `{role_name}` и `{upstream}`. Для субагентов
+    это починили 30.08, для бота — 03.09; парсер с тех пор один на оба
+    пути, чтобы не разошлись.
+    """
+    out: dict[str, str] = {}
+    for ln in text.splitlines():
+        if ln.startswith("#") or ln.startswith("<!--"):
+            continue
+        if ":" in ln and not ln.startswith(("-", " ", "|", "*")):
+            key, _, val = ln.partition(":")
+            if (key := key.strip()) in HEADER_KEYS:
+                out[key] = val.strip()
+    return out
+
+
+def fill(text: str, values: dict[str, str]) -> str:
+    """Подставить, что известно. Неизвестное оставить видимым, а не пустым.
+
+    Пустая строка вместо подстановки читается как законченная фраза, и
+    поломка становится невидимой. Скобки видно и человеку, и тесту.
+    """
+    return PLACEHOLDER.sub(lambda m: values.get(m.group(1), m.group(0)), text)
+
+
+def leftovers(text: str) -> list[str]:
+    """Подстановки, которым не нашлось значения."""
+    return sorted(set(PLACEHOLDER.findall(text)))
+
 
 class BudgetExceeded(RuntimeError):
     """Тенант выбрал дневной лимит вызовов."""
@@ -79,6 +134,7 @@ def system_text(role: str, *, brand_name: str = "", persona_id: str = "",
     Поэтому части идут так и только так:
 
       1. frame + роль   одинаково у ВСЕХ тенантов → читается всеми
+         (пишущие роли получают между ними `frame-text.md`)
       2. маска + бренд  стабильно внутри тенанта
       3. stable         стабильно внутри задачи
       4. extra          меняется от вызова к вызову → всегда последним
@@ -97,8 +153,17 @@ def system_text(role: str, *, brand_name: str = "", persona_id: str = "",
     """
     parts: list[str] = []
 
-    core = "\n\n---\n\n".join(
-        p for p in (_read_role("frame"), _read_role(role)) if p.strip())
+    frame = _read_role("frame")
+    if role not in TEXTLESS:
+        frame = "\n\n".join(p for p in (frame, _read_role("frame-text"))
+                             if p.strip())
+    role_text = _read_role(role)
+    frame = fill(frame, {**BOT_FILLS, **header(role_text),
+                         "brand_name": brand_name or "клиента из профиля"})
+    if left := leftovers(frame):
+        log.error("каркас роли %s без подстановок: %s", role, ", ".join(left))
+
+    core = "\n\n---\n\n".join(p for p in (frame, role_text) if p.strip())
     if core:
         parts.append(core)
 
