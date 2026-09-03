@@ -33,8 +33,8 @@ class Config:
     # `MODEL_*`, там моделью распоряжается сам Claude Code.
     #
     # Роли здесь только те, что реально зовут модель. `publisher` не зовёт
-    # её вовсе, `ideator` живёт субагентом — их ключи сняты 01.09.
-    # Не путать с `tokens["ideator"]` ниже: тот живой, бот поднят.
+    # её вовсе, `ideator` живёт субагентом Claude Code — ключи сняты 01.09,
+    # бот и токен сняты 03.09: он поллился, не имея поведения.
     _ASK_ROLES = ("assistant", "research", "strategy", "editor", "reels", "design")
 
     role_models: dict[str, str] = field(default_factory=lambda: {
@@ -55,9 +55,6 @@ class Config:
         "assistant": os.getenv("BOT_ASSISTANT", ""),
         "research":  os.getenv("BOT_RESEARCH", ""),
         "strategy":  os.getenv("BOT_STRATEGY", ""),
-        # Бот поднят и поллится, но поведения у него нет: ни хендлера,
-        # ни топика, ни вызова модели. Роль живёт субагентом Claude Code.
-        "ideator":   os.getenv("BOT_IDEATOR", ""),
         "editor":    os.getenv("BOT_EDITOR", ""),
         "reels":     os.getenv("BOT_REELS", ""),
         "design":    os.getenv("BOT_DESIGN", ""),

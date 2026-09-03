@@ -20,7 +20,7 @@
 ```bash
 python3 -m venv .venv
 ./.venv/bin/pip install aiogram httpx python-dotenv pypdf python-docx
-cp .env.example .env      # заполнить токены восьми ботов
+cp .env.example .env      # заполнить токены семи ботов
 claude                    # один раз войти: /login, дальше Keychain
 ./run.sh
 ```
