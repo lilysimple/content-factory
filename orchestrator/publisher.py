@@ -205,20 +205,46 @@ def _kb(theme_id: str, ready: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
-def preview(pkg: Package) -> str:
-    """Пост ровно так, как он выйдет. Тут ловится оформление."""
+def _head(pkg: Package) -> str:
+    """Строка про слот: дата, площадка, длина, чем закрыт."""
     t = pkg.theme
-    head = (f"📤 <b>{t.get('date')} · {pkg.plat} · {t.get('format')}</b>\n"
-            f"<code>{t['id']}</code> · {len(pkg.text)} знаков"
-            + (f" · {len(pkg.images)} картинка" if pkg.images else " · без картинки"))
+    n = len(pkg.images)
+    tail = (" · без картинки" if not n else
+            " · картинка" if n == 1 else f" · {n} картинок, выйдет первая")
+    return (f"📤 <b>{t.get('date')} · {pkg.plat} · {t.get('format')}</b>\n"
+            f"<code>{t['id']}</code> · {len(pkg.text)} знаков" + tail)
 
-    out = [head, "", "— — — так выйдет — — —", "", pkg.text or "[текста нет]",
-           "", "— — — — — — — — — — —"]
+
+def _tail(pkg: Package) -> list[str]:
+    """Чего не хватает и почему может не уйти."""
+    out: list[str] = []
     if pkg.problems:
         out += ["", "⚠️ " + "; ".join(pkg.problems)]
     if not cfg.publish_channel:
         out += ["", "Канал не настроен: <code>PUBLISH_CHANNEL</code> пуст. "
                     "Опубликовать не смогу, комплект отдам файлами."]
+    return out
+
+
+def card(pkg: Package) -> str:
+    """Шапка комплекта без текста поста.
+
+    Текста тут нет намеренно: пост с картинкой выходит подписью под фото,
+    и вторая копия текста выше сломала бы главное обещание превью —
+    человек утверждает то, что увидит канал, а не пересказ.
+    """
+    return "\n".join([_head(pkg), *_tail(pkg)])
+
+
+def preview(pkg: Package) -> str:
+    """Пост ровно так, как он выйдет. Тут ловится оформление.
+
+    Форма для поста без картинки: текст в теле сообщения. Пост с
+    картинкой показывается фотографией — см. `_show`.
+    """
+    out = [_head(pkg), "", "— — — так выйдет — — —", "",
+           pkg.text or "[текста нет]", "", "— — — — — — — — — — —",
+           *_tail(pkg)]
     return "\n".join(out)
 
 
@@ -280,17 +306,32 @@ async def _show(reg, chat_id: int, theme: dict[str, Any], topic: str) -> None:
     blocking = [p for p in pkg.problems if "автоматом не публикуется" not in p]
     early = (theme.get("date") or "") > desk.today(chat_id)
 
-    text = preview(pkg)
+    note = ""
     if early:
-        text += (f"\n\nДата слота {theme.get('date')} ещё не наступила: "
-                 "показываю комплект, публиковать буду в свой день.")
+        note = (f"\n\nДата слота {theme.get('date')} ещё не наступила: "
+                "показываю комплект, публиковать буду в свой день.")
+    kb = _kb(theme["id"],
+             ready=pkg.auto and not blocking and not early
+             and bool(cfg.publish_channel))
 
-    await reg.say("publisher", chat_id, text,
-                  kb=_kb(theme["id"],
-                         ready=pkg.auto and not blocking and not early
-                         and bool(cfg.publish_channel)),
-                  topic=topic)
-    for img in pkg.images:
+    # Пост с картинкой выходит одним сообщением: фото и подпись под ним.
+    # Значит и превью такое же — то же фото, та же подпись, кнопки на нём
+    # же. Текст отдельно от картинки показывал пост, которого не будет.
+    # Подпись не вмещается — падаем в текстовую форму: собрать превью,
+    # которое врёт про потолок, хуже, чем показать некрасиво.
+    as_post = bool(pkg.images) and bool(pkg.text) and len(pkg.text) <= TG_CAPTION
+    if as_post:
+        await reg.say("publisher", chat_id, card(pkg) + note, topic=topic)
+        first = pkg.images[0]
+        await reg.send_file("publisher", chat_id, first.read_bytes(),
+                            first.name, caption=pkg.text, topic=topic,
+                            kb=kb, as_photo=True)
+    else:
+        await reg.say("publisher", chat_id, preview(pkg) + note, kb=kb,
+                      topic=topic)
+
+    # Остальные макеты идут следом справочно: в канал уходит первый.
+    for img in (pkg.images[1:] if as_post else pkg.images):
         await reg.send_file("publisher", chat_id, img.read_bytes(),
                             img.name, topic=topic, as_photo=True)
 

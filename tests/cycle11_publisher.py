@@ -48,11 +48,18 @@ class Reg(FakeRegistry):
     def __init__(self, bot=None):
         super().__init__()
         self._bot = bot or FakeBot()
+        self.files = []          # (имя, подпись, кнопки, фотографией ли)
 
     def bot(self, role): return self._bot
 
     async def send_file(self, role, chat_id, blob, name, **kw):
         SENT.append(name)
+        self.files.append((name, kw.get("caption") or "", kw.get("kb"),
+                           kw.get("as_photo", False)))
+
+    def clear(self):
+        super().clear()
+        self.files.clear()
 
 
 def seed(tid="2026-08-14-telegram-01", date="2026-08-14", status="ready",
@@ -130,6 +137,38 @@ async def main() -> None:
     await publisher.send(reg, CHAT, pkg)
     check("ушло фотографией", reg._bot.calls[0][0] == "photo")
     check("текст стал подписью", "caption" in reg._bot.calls[0][1])
+
+    # ── 5б. превью показывает пост фотографией ────────────────────────
+    # Пост с картинкой выходит одним сообщением: фото и подпись. Превью,
+    # где текст отдельно от картинки, показывало бы пост, которого не
+    # будет, и утверждать в нём нечего.
+    print("\n5б. Превью с картинкой")
+    tid = seed(png=True, text="Готовый текст поста.")
+    reg = Reg()
+    await publisher.run(reg, CHAT, f"комплект {tid}")
+    check("картинка ушла фотографией",
+          any(f[3] for f in reg.files), str(reg.files))
+    photo = next((f for f in reg.files if f[3]), None)
+    check("текст поста стал подписью",
+          bool(photo) and photo[1] == "Готовый текст поста.",
+          str(photo[1] if photo else None))
+    check("кнопки на фотографии, а не над ней",
+          bool(photo) and photo[2] is not None
+          and any(b.callback_data.startswith("pub:go:")
+                  for row in photo[2].inline_keyboard for b in row),
+          str(photo[2] if photo else None))
+    check("текста поста нет вторым разом",
+          "Готовый текст поста." not in reg.texts(), reg.texts()[:160])
+    check("шапка про слот осталась", tid in reg.texts(), reg.texts()[:160])
+
+    # Подпись не вмещается — возвращаемся к тексту, иначе превью соврёт.
+    tid = seed(png=True, text="я" * 1500)
+    reg = Reg()
+    await publisher.run(reg, CHAT, f"комплект {tid}")
+    check("длинный текст показан текстом, а не подписью",
+          "так выйдет" in reg.texts(), reg.texts()[:160])
+    check("про потолок сказано", "потолок 1024" in reg.texts(),
+          reg.texts()[:200])
 
     # ── 6. потолок подписи ────────────────────────────────────────────
     print("\n6. Потолки")
