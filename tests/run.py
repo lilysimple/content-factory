@@ -45,6 +45,9 @@ LIVE = [
     ("cycle10_live_designer",   "Живой макет"),
     ("cycle13_live_reels",      "Живой сценарий ролика"),
     ("cycle16_live_research",   "Живая сводка недели"),
+    # Модель тут не зовётся, но проход тяжёлый и чужими бинарниками:
+    # whisper и Remotion — минуты работы, в офлайн-стенде им не место.
+    ("cycle22_live_montage",    "Живой монтаж: whisper и Remotion"),
 ]
 
 PASSED = re.compile(r"Все (\d+) проверок прошли")
