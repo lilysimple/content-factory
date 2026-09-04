@@ -38,6 +38,10 @@ class FakeBot:
         self.calls.append(("photo", kw))
         return FakeMsg(1000 + len(self.calls))
 
+    async def send_video(self, **kw):
+        self.calls.append(("video", kw))
+        return FakeMsg(1000 + len(self.calls))
+
 
 class BrokenBot(FakeBot):
     async def send_message(self, **kw):
@@ -55,7 +59,8 @@ class Reg(FakeRegistry):
     async def send_file(self, role, chat_id, blob, name, **kw):
         SENT.append(name)
         self.files.append((name, kw.get("caption") or "", kw.get("kb"),
-                           kw.get("as_photo", False)))
+                           kw.get("as_photo", False),
+                           kw.get("as_video", False)))
 
     def clear(self):
         super().clear()
@@ -78,6 +83,29 @@ def seed(tid="2026-08-14-telegram-01", date="2026-08-14", status="ready",
         c.execute("INSERT INTO themes (id, chat_id, date, plat, format, "
                   "status, title, asset) VALUES (?,?,?,'telegram','пост',?,"
                   "'Тема',?)", (tid, CHAT, date, status, f"posts/{tid}.md"))
+    return tid
+
+
+def seed_reel(tid="2026-08-14-instagram-01", date="2026-08-14",
+              status="ready", text="", mb=1, asset=None):
+    """Тема, закрытая смонтированным роликом.
+
+    `asset` пустой — это норма второй цепи: дубль сняли из головы, темы в
+    плане не было, подписи никто не писал. Ролик при этом готов.
+    """
+    b = desk.brand(CHAT)
+    for old in b.path("posts").glob(f"{tid}-*"):
+        old.unlink()
+    b.artifact(f"posts/{tid}-reel.mp4",
+               b"\x00\x00\x00\x18ftypmp42" + b"\xff\xfe" * (mb * 524_288))
+    if text:
+        b.artifact(f"posts/{tid}.md", f"<!-- {tid} -->\n\n{text}")
+    with db.tx() as c:
+        c.execute("DELETE FROM themes WHERE chat_id = ?", (CHAT,))
+        c.execute("DELETE FROM posts WHERE chat_id = ?", (CHAT,))
+        c.execute("INSERT INTO themes (id, chat_id, date, plat, format, "
+                  "status, title, asset) VALUES (?,?,?,'telegram','reels',?,"
+                  "'Дубль',?)", (tid, CHAT, date, status, asset))
     return tid
 
 
@@ -298,6 +326,113 @@ async def main() -> None:
           not any(b.startswith("pub:go:") for b in btns), str(btns))
     check("сказано, что дата не наступила",
           "не наступила" in reg.texts(), reg.texts()[-200:])
+
+    # ── 14. комплект с видео ──────────────────────────────────────────
+    #
+    # Вторая цепь завода — от снятого, а не от плана — упиралась ровно
+    # сюда. `collect` собирал только PNG, поля под ролик не было, а текст
+    # был обязателен: «В очередь» на рилсе отвечало «текста нет». Хуже
+    # того, монтаж клал путь к mp4 в `themes.asset`, и `b.read()` падал
+    # `UnicodeDecodeError` внутри необёрнутого колбэка — человек нажимал
+    # кнопку и не получал вообще ничего.
+    print("\n14. Комплект с видео")
+    tid = seed_reel()
+    theme = dict(db.one("SELECT * FROM themes WHERE id = ?", tid))
+    pkg = publisher.collect(CHAT, theme)
+    check("ролик найден", pkg.video is not None and pkg.video.exists(),
+          str(pkg.video))
+    check("макеты к ролику не подмешаны", not pkg.images, str(pkg.images))
+    check("без подписи это не проблема", not pkg.problems, str(pkg.problems))
+    check("в шапке видно, что без подписи",
+          "без подписи" in publisher.card(pkg), publisher.card(pkg))
+
+    reg = Reg()
+    await publisher.send(reg, CHAT, pkg)
+    check("ушло видео, а не документ", reg._bot.calls[0][0] == "video",
+          str(reg._bot.calls[0][0]))
+    check("подписи нет, а не пустая строка",
+          reg._bot.calls[0][1]["caption"] is None,
+          str(reg._bot.calls[0][1]["caption"]))
+    check("тема в pub",
+          db.one("SELECT status FROM themes WHERE id = ?", tid)["status"] == "pub")
+
+    # ── 14б. подпись под роликом ──────────────────────────────────────
+    print("\n14б. Подпись под роликом")
+    tid = seed_reel(text="Подпись под видео.", asset=None)
+    b = desk.brand(CHAT)
+    with db.tx() as c:
+        c.execute("UPDATE themes SET asset = ? WHERE id = ?",
+                  (f"posts/{tid}.md", tid))
+    pkg = publisher.collect(CHAT, dict(
+        db.one("SELECT * FROM themes WHERE id = ?", tid)))
+    check("подпись подобрана", pkg.text == "Подпись под видео.", pkg.text)
+    reg = Reg()
+    await publisher.send(reg, CHAT, pkg)
+    check("подпись уехала под видео",
+          reg._bot.calls[0][1]["caption"] == "Подпись под видео.")
+
+    # Потолок у подписи 1024, а не 4096: под видео это подпись.
+    tid = seed_reel(text="я" * 1100)
+    with db.tx() as c:
+        c.execute("UPDATE themes SET asset = ? WHERE id = ?",
+                  (f"posts/{tid}.md", tid))
+    pkg = publisher.collect(CHAT, dict(
+        db.one("SELECT * FROM themes WHERE id = ?", tid)))
+    check("длинная подпись поймана до отправки",
+          any("потолок 1024" in p for p in pkg.problems), str(pkg.problems))
+    check("названа причина потолка",
+          any("из-за видео" in p for p in pkg.problems), str(pkg.problems))
+
+    # ── 14в. mp4 в asset не роняет сборку ─────────────────────────────
+    #
+    # Так писал монтаж до починки. Живые базы это переживут: комплект
+    # должен сказать словами, а не упасть на первом нетекстовом байте.
+    print("\n14в. mp4 в asset")
+    tid = seed_reel()
+    with db.tx() as c:
+        c.execute("UPDATE themes SET asset = ? WHERE id = ?",
+                  (f"posts/{tid}-reel.mp4", tid))
+    pkg = publisher.collect(CHAT, dict(
+        db.one("SELECT * FROM themes WHERE id = ?", tid)))
+    check("сборка не упала", pkg.video is not None)
+    check("сказано словами, а не исключением",
+          any("вместо текста" in p for p in pkg.problems), str(pkg.problems))
+
+    # ── 14г. потолок загрузки ─────────────────────────────────────────
+    print("\n14г. Потолок Bot API")
+    tid = seed_reel(mb=publisher.TG_VIDEO_MB + 2)
+    pkg = publisher.collect(CHAT, dict(
+        db.one("SELECT * FROM themes WHERE id = ?", tid)))
+    check("тяжёлый ролик пойман до кнопки",
+          any("потолок Bot API" in p for p in pkg.problems), str(pkg.problems))
+
+    reg = Reg()
+    await publisher.run(reg, CHAT, f"комплект {tid}")
+    btns = [b for s in reg.sent for b in s.buttons]
+    check("кнопки публикации у него нет",
+          not any(b.startswith("pub:go:") for b in btns), str(btns))
+
+    # ── 14д. ролик без текста доходит до очереди ──────────────────────
+    #
+    # `due()` фильтровал по `asset IS NOT NULL`, и тема, заведённая по
+    # факту съёмки, в очередь не попадала вовсе.
+    print("\n14д. Очередь видит ролик")
+    tid = seed_reel(date="2026-08-14")
+    check("ролик без текста в очереди",
+          any(t["id"] == tid for t in publisher.due(CHAT)),
+          str([t["id"] for t in publisher.due(CHAT)]))
+
+    reg = Reg()
+    await publisher.run(reg, CHAT, "что в очереди")
+    check("превью показано видео",
+          any(f[4] for f in reg.files), str(reg.files))
+    # Кнопки едут на самом видео, а не отдельным сообщением: человек
+    # утверждает то, что смотрит.
+    kbs = [f[2] for f in reg.files if f[2] is not None]
+    data = [btn.callback_data for kb in kbs for row in kb.inline_keyboard
+            for btn in row]
+    check("кнопка публикации на ролике",
+          any(d.startswith("pub:go:") for d in data), str(data))
 
 
 asyncio.run(main())

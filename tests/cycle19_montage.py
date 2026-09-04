@@ -662,6 +662,107 @@ def main() -> None:
     check("упавший монтаж уводит тему из очереди",
           row["status"] == "failed", row["status"])
 
+    # ── 36. готовый ролик не затирает сценарий ────────────────────────
+    #
+    # `_save` писал путь к mp4 в `themes.asset`. Поле читается как текст
+    # тремя местами (`publisher.collect`, `editor.revise`, `design.build`)
+    # — все три делают `read_text(utf-8)` и падают на первом нетекстовом
+    # байте, а колбэки ничем не обёрнуты: человек нажимал «В очередь» и
+    # не получал ничего. Заодно терялась ссылка на суфлёр темы из плана.
+    print("\n36. Готовый ролик не затирает сценарий")
+    b = _brand()
+    tid = "2026-09-05-instagram-01"
+    script = f"posts/{tid}-script.md"
+    b.artifact(script, "<!-- суфлёр -->\n\nПривет.")
+    with db.tx() as c:
+        c.execute("INSERT OR IGNORE INTO themes (id, chat_id, plat, format) "
+                  "VALUES (?,?,'instagram','reels')", (tid, CHAT))
+        c.execute("UPDATE themes SET status = 'ready', asset = ? "
+                  "WHERE id = ? AND chat_id = ?", (script, tid, CHAT))
+
+    out = harness.TMP / "reel-out.mp4"
+    out.write_bytes(b"\x00\x00\x00\x18ftypmp42\xff\xfe")
+    reel = montage.Reel(theme={"id": tid, "chat_id": CHAT},
+                        video=harness.TMP / "src.mp4", out=out)
+    path = montage._save(b, reel)
+
+    check("ролик лёг в папку бренда",
+          path.name == f"{tid}-reel.mp4" and path.exists(), str(path))
+    check("сценарий в базе остался на месте",
+          db.one("SELECT asset FROM themes WHERE id = ?", tid)["asset"] == script,
+          str(db.one("SELECT asset FROM themes WHERE id = ?", tid)["asset"]))
+    check("статус не понижен до черновика",
+          db.one("SELECT status FROM themes WHERE id = ?", tid)["status"] == "ready")
+
+    # ── 37. видео из папки берётся с любым именем ─────────────────────
+    #
+    # `_footage` искал только `pending.*` — имя, которое даёт бот. Файл,
+    # положенный в папку руками, назывался как назывался на камере и не
+    # находился вовсе: отказ «видео ещё не пришло» на видео, которое
+    # лежит в папке.
+    print("\n37. Видео из папки берётся с любым именем")
+    d = montage.incoming_dir(b)
+    for f in d.iterdir():
+        f.unlink()
+    own = d / "IMG_4471.MOV"
+    own.write_bytes(b"\x00" * 64)
+    check("своё имя найдено", montage._footage(b) == own,
+          str(montage._footage(b)))
+
+    (d / "заметка.txt").write_text("не видео", encoding="utf-8")
+    check("не-видео за дубль не принято", montage._footage(b) == own,
+          str(montage._footage(b)))
+
+    for f in d.iterdir():
+        f.unlink()
+    try:
+        montage._footage(b)
+        check("пустая папка это отказ словами", False, "смолчал")
+    except montage.NoFootage as e:
+        check("пустая папка это отказ словами", "ссылку" in str(e), str(e))
+
+    # ── 38. просьба про несколько роликов узнаётся ────────────────────
+    #
+    # Список слов был уже фразы: «сделай из этого видео несколько рилс»
+    # не попадало в него ничем и уходило монтировать запись целиком.
+    print("\n38. Просьба про несколько роликов")
+    for ask in ("сделай из этого видео несколько рилс",
+                "нарежь клипы из эфира", "сделай пару рилсов из записи"):
+        check(f"нарезка узнана: {ask[:34]}", montage.wants_split(ask), ask)
+    check("одиночный монтаж не считается нарезкой",
+          not montage.wants_split("смонтируй рилс"), "смонтируй рилс")
+
+    # ── 38б. ссылка в топике Reels это материал, а не тема ────────────
+    #
+    # Слово «рилс» весит на Редактора Reels, поэтому «сделай из этого
+    # видео несколько рилс <ссылка>» уходило писать суфлёр по теме,
+    # которой нет, вместо того чтобы резать присланную запись. Голая
+    # ссылка — туда же, топиком по умолчанию.
+    print("\n38б. Ссылка в топике Reels")
+    _r = lambda t: _resolve(t, "reels", {}).role       # noqa: E731
+    for ask in ("сделай из этого видео несколько рилс https://youtu.be/abc",
+                "смонтируй рилс https://youtu.be/abc",
+                "https://youtu.be/abc"):
+        check(f"ссылка уходит монтажу: {ask[:36]}", _r(ask) == "montage",
+              _r(ask))
+    check("сценарий без ссылки остаётся Редактору Reels",
+          _r("напиши сценарий рилса про AI") == "reels",
+          _r("напиши сценарий рилса про AI"))
+    check("ссылка вне топика Reels монтаж не утаскивает",
+          _resolve("посмотри https://youtu.be/abc и напиши пост",
+                   "review", {}).role == "editor",
+          _resolve("посмотри https://youtu.be/abc и напиши пост",
+                   "review", {}).role)
+
+    # ── 39. референс обложки называется, когда ТЗ нет ─────────────────
+    print("\n39. Референс обложки")
+    _, note = montage._cover_spec(b, "telegram", "reels")
+    check("отсутствие ТЗ названо", note and "ТЗ обложки нет" in note, str(note))
+    check("сверить не с чем — сказано",
+          note and "сверить не с чем" in note, str(note))
+    _, note = montage._cover_spec(b, "instagram", "reels")
+    check("при живом ТЗ лишнего не говорится", note is None, str(note))
+
 
 main()
 raise SystemExit(report())

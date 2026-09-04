@@ -31,7 +31,7 @@ from harness import CHAT, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
-from orchestrator import bridge, cli                                   # noqa: E402
+from orchestrator import bridge, cli, desk                                   # noqa: E402
 from storage import db                                            # noqa: E402
 
 db.init(cfg.db_path)
@@ -680,6 +680,57 @@ async def main() -> None:
     check("плану вход вне плана не показывают",
           "theme_adhoc" not in pl_txt,
           "план заводит темы Стратегом, второй вход тут лишний")
+
+    # ── референсы бренда доезжают Дизайнеру ───────────────────────────
+    #
+    # Папка `design/assets/reference/` была мёртвой: заведена руками, с
+    # картинками внутри, и ни одна строка кода её не открывала — имя
+    # встречалось в исходниках один раз, и то в комментарии. Читать
+    # картинку умеет только субагент на этом пути, поэтому кладём её
+    # именно сюда, и только Дизайнеру.
+    reset()
+    b_ref = desk.brand(CHAT)
+    ref_dir = b_ref.path("design/assets/reference/tg")
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    (ref_dir / "telegram-post-01.jpg").write_bytes(b"\xff\xd8\xff")
+    tid_rf = "2026-09-29-telegram-98"
+    with db.tx() as c:
+        c.execute("DELETE FROM themes WHERE id = ?", (tid_rf,))
+        c.execute("INSERT INTO themes (id, chat_id, date, plat, format, "
+                  "status, title) VALUES (?,?,?,'telegram','пост','ready',?)",
+                  (tid_rf, CHAT, "2026-09-29", "Тема с референсом"))
+    tid_r2 = bridge.create_task(CHAT, "свёрстай макет", workflow="design",
+                                today=OTHER_DAY)
+    rf_txt = (bridge.TASKS_DIR / tid_r2 / "input.md").read_text(encoding="utf-8")
+    check("раздел референсов есть", "## Референсы бренда" in rf_txt,
+          "иначе субагент не узнает, что живой скрин вообще существует")
+    check("референс назван путём, а не именем",
+          "telegram-post-01.jpg" in rf_txt and "/design/assets/reference/"
+          in rf_txt, "по имени файл не открыть")
+    check("путь нормализован",
+          "/../" not in rf_txt.split("## Референсы")[1],
+          "на неопрятном пути Director уже спотыкался в plan-05")
+    check("сказано, что их сверяют, а не клонируют",
+          "сверяют" in rf_txt.split("## Референсы")[1][:400])
+
+    # Пустая папка называется пустой: «сверить не с чем» это факт задачи.
+    for f in ref_dir.iterdir():
+        f.unlink()
+    reset()
+    tid_r3 = bridge.create_task(CHAT, "свёрстай макет", workflow="design",
+                                today=OTHER_DAY)
+    empty_txt = (bridge.TASKS_DIR / tid_r3 / "input.md").read_text(encoding="utf-8")
+    check("пустая папка названа пустой", "пуста, сверить не с чем" in empty_txt,
+          "молчание тут неотличимо от «всё сошлось»")
+
+    reset()
+    tid_pl2 = bridge.create_task(CHAT, "план на неделю", workflow="plan",
+                                 today=OTHER_DAY)
+    pl2_txt = (bridge.TASKS_DIR / tid_pl2 / "input.md").read_text(encoding="utf-8")
+    check("плану референсы не кладут", "## Референсы бренда" not in pl2_txt,
+          "Стратег макетов не верстает, это контекст не по адресу")
+    with db.tx() as c:
+        c.execute("DELETE FROM themes WHERE id = ?", (tid_rf,))
 
     reset()
     tid_res = bridge.create_task(CHAT, "что зашло", workflow="research",

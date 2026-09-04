@@ -602,13 +602,66 @@ def save_events(chat_id: int, answer: str) -> bool:
 
 
 
+def _refs(chat_id: int) -> list[str]:
+    """Референсы бренда — живые скрины настоящих постов, путями к файлам.
+
+    Кладутся только Дизайнеру и только на этом пути: субагент открывает
+    картинку сам и видит её глазами. Прямой путь роли идёт одним вызовом
+    без инструментов, и там референс может лишь называться.
+
+    Раздела нет — значит по незакрытым темам площадок с референсами не
+    нашлось. Пустая папка называется пустой: «сверить не с чем» это факт
+    задачи, а не мелочь, о которой можно промолчать.
+    """
+    b = desk.brand(chat_id)
+    if b is None:
+        return []
+
+    # Площадки берём с незакрытых тем: класть все подряд значит платить
+    # контекстом за папки, которых в этой задаче никто не откроет.
+    seen: list[tuple[str, str]] = []
+    for row in db.q("SELECT plat, format FROM themes WHERE chat_id = ? "
+                    "AND status IN ('idea', 'draft', 'ready')", chat_id):
+        pair = (row["plat"] or "", row["format"] or "")
+        if pair not in seen:
+            seen.append(pair)
+    if not seen:
+        return []
+
+    out = ["", "## Референсы бренда", "",
+           "Живые скрины настоящих постов. Их не клонируют — по ним "
+           "сверяют, как площадка выглядит в ленте. Открой те, что "
+           "относятся к твоей теме.", ""]
+    empty = True
+    for plat, fmt in seen:
+        files = design.brand_refs(b, plat, fmt)
+        d = design.refs_dir(b, plat, fmt)
+        if files:
+            empty = False
+            # Путь нормализуется здесь по той же причине, что и папка
+            # бренда выше: `…/content-factory/../content-factory-brands/…`
+            # рабочий, но Director им не пользуется и идёт угадывать.
+            out.append(f"- **{plat} · {fmt or 'без формата'}** — "
+                       + ", ".join(f"`{f.resolve()}`" for f in files))
+        elif d is not None:
+            out.append(f"- **{plat} · {fmt or 'без формата'}** — папка "
+                       f"`{d.resolve()}` пуста, сверить не с чем")
+        else:
+            out.append(f"- **{plat} · {fmt or 'без формата'}** — папка "
+                       "под эту площадку не заведена")
+    if empty:
+        out += ["", "Ни одного референса нет: собранный макет сверить не с "
+                    "чем — скажи об этом строкой в `final.md`."]
+    return out
+
+
 # Какие факты кладутся в `input.md` под какой workflow. Факты, не роли:
 # свободный слот и незакрытая тема — это данные задачи, как папка бренда.
 CONTEXT = {
     "plan":     (_slots, _index, _digest, _events, _history),
     "post":     (_themes, _index),
     "reels":    (_themes, _index),
-    "design":   (_themes, _index),
+    "design":   (_themes, _index, _refs),
     "idea":     (_themes, _index, _digest, _history),
     "research": (_index,),
 }

@@ -152,12 +152,16 @@ class Registry:
     async def send_file(self, role: str, chat_id: int, blob: bytes, name: str,
                         *, caption: str = "", topic: str = "general",
                         kb: InlineKeyboardMarkup | None = None,
-                        as_photo: bool = False):
+                        as_photo: bool = False, as_video: bool = False):
         """Отправить файл от лица роли.
 
         Картинку шлём и превью, и документом: превью видно сразу, документ
         сохраняет пиксели без пережатия Telegram. Макет, ужатый до
         неразличимого шрифта, невозможно принять или отклонить.
+
+        Видео — отдельная форма, а не документ: документ не играется в
+        ленте, и превью ролика превращается в файл, который надо скачать,
+        чтобы понять, что утверждаешь.
         """
         from aiogram.types import BufferedInputFile
 
@@ -172,6 +176,9 @@ class Registry:
         bot = self.bot(role)
         if as_photo:
             return await bot.send_photo(photo=file, **kw)
+        if as_video:
+            return await bot.send_video(video=file, supports_streaming=True,
+                                        **kw)
         return await bot.send_document(document=file, **kw)
 
     async def _send(self, role: str, chat_id: int, text: str, topic: str,

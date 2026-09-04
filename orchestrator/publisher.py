@@ -29,7 +29,27 @@ from storage import db
 log = logging.getLogger("publisher")
 
 TG_LIMIT = 4096              # потолок текста поста
-TG_CAPTION = 1024            # потолок подписи под картинкой
+TG_CAPTION = 1024            # потолок подписи под картинкой и под видео
+
+# Потолок загрузки у обычного Bot API. Локальный сервер поднимает его до
+# двух гигабайт, но у нас его нет, и упереться в этот потолок отказом
+# Telegram в момент отправки — значит показать человеку превью, которое
+# врало. Проверяем до кнопки.
+TG_VIDEO_MB = 50
+
+# Расширения, которые `Brand.read` умеет прочитать. Всё остальное в
+# `themes.asset` это не текст поста, и читать его нельзя.
+TEXT_SUFFIX = (".md", ".txt")
+
+
+def reel_path(b, theme_id: str):
+    """Смонтированный ролик этой темы. `None` — не смонтирован.
+
+    Ролик ищется файлом на диске, а не полем в базе: `asset` читается как
+    текст, и путь к mp4 в нём роняет чтение. Имя кладёт `montage._save`.
+    """
+    path = b.path("posts") / f"{theme_id}-reel.mp4"
+    return path if path.exists() else None
 
 
 class NotReady(RuntimeError):
@@ -46,6 +66,7 @@ class Package:
     theme: dict[str, Any]
     text: str = ""
     images: list[Any] = field(default_factory=list)   # пути к PNG
+    video: Any = None                                 # путь к mp4 или None
     problems: list[str] = field(default_factory=list)
 
     @property
@@ -61,11 +82,22 @@ class Package:
 # ── сборка комплекта ──────────────────────────────────────────────────
 
 def due(chat_id: int) -> list[dict[str, Any]]:
-    """Темы, готовые к публикации: текст утверждён, дата наступила."""
+    """Темы, готовые к публикации: работа сделана, дата наступила.
+
+    «Работа сделана» это либо утверждённый текст в `asset`, либо
+    смонтированный ролик на диске. Одним условием `asset IS NOT NULL`
+    обойтись нельзя: у темы, заведённой по факту съёмки, текста может не
+    быть вовсе, а ролик готов — и очередь её не показывала.
+    """
     rows = db.q("SELECT * FROM themes WHERE chat_id = ? AND status = 'ready' "
-                "AND asset IS NOT NULL AND date <= ? ORDER BY date",
-                chat_id, desk.today(chat_id))
-    return [dict(r) for r in rows]
+                "AND date <= ? ORDER BY date", chat_id, desk.today(chat_id))
+    b = desk.brand(chat_id)
+    out = []
+    for r in rows:
+        t = dict(r)
+        if t.get("asset") or (b is not None and reel_path(b, t["id"])):
+            out.append(t)
+    return out
 
 
 def overdue(chat_id: int) -> list[dict[str, Any]]:
@@ -81,30 +113,56 @@ def overdue(chat_id: int) -> list[dict[str, Any]]:
 
 
 def collect(chat_id: int, theme: dict[str, Any]) -> Package:
-    """Собрать комплект и честно перечислить, чего не хватает."""
+    """Собрать комплект и честно перечислить, чего не хватает.
+
+    Комплектов два вида, и требования у них разные. У поста главное —
+    текст: без него публиковать нечего. У ролика главное — видео, а
+    подпись необязательна: рилс без подписи это нормальный рилс, а вот
+    отказ «текста нет» на смонтированном ролике останавливал вторую цепь
+    завода целиком.
+    """
     b = desk.brand(chat_id)
     pkg = Package(theme=theme)
     if b is None:
         pkg.problems.append("профиля бренда нет")
         return pkg
 
-    if not theme.get("asset"):
-        pkg.problems.append("текста нет")
-    else:
-        raw = b.read(theme["asset"])
+    pkg.video = reel_path(b, theme["id"])
+
+    # `asset` читается как текст, поэтому сначала смотрим, текст ли это.
+    # Раньше сюда приходил путь к mp4 (его писал монтаж), и `b.read`
+    # падал `UnicodeDecodeError` внутри необёрнутого колбэка — человек
+    # нажимал кнопку и не получал ничего.
+    asset = str(theme.get("asset") or "")
+    if asset and not asset.lower().endswith(TEXT_SUFFIX):
+        pkg.problems.append(f"в теме вместо текста лежит {asset}")
+    elif asset:
+        raw = b.read(asset)
         pkg.text = (raw.split("-->", 1)[-1].strip()
                     if raw.startswith("<!--") else raw.strip())
         if not pkg.text:
-            pkg.problems.append(f"файл {theme['asset']} пуст")
+            pkg.problems.append(f"файл {asset} пуст")
+    elif not pkg.video:
+        pkg.problems.append("текста нет")
 
     # Макеты не обязательны: пост без обложки это нормальный пост.
-    pkg.images = sorted(b.path("posts").glob(f"{theme['id']}-*.png"))
+    # У ролика они и не нужны — обложка вшита в первый кадр.
+    pkg.images = [] if pkg.video else sorted(
+        b.path("posts").glob(f"{theme['id']}-*.png"))
 
-    limit = TG_CAPTION if pkg.images else TG_LIMIT
+    limit = TG_CAPTION if (pkg.images or pkg.video) else TG_LIMIT
     if len(pkg.text) > limit:
+        why = (" из-за видео" if pkg.video else
+               " из-за картинки" if pkg.images else "")
         pkg.problems.append(
-            f"текст {len(pkg.text)} знаков, потолок {limit}"
-            + (" из-за картинки" if pkg.images else ""))
+            f"текст {len(pkg.text)} знаков, потолок {limit}{why}")
+
+    if pkg.video:
+        mb = pkg.video.stat().st_size / 1024 / 1024
+        if mb > TG_VIDEO_MB:
+            pkg.problems.append(
+                f"ролик {mb:.0f} МБ, потолок Bot API {TG_VIDEO_MB} МБ — "
+                "отдам файлом, в канал не уйдёт")
 
     row = db.one("SELECT state, link FROM posts WHERE theme_id = ?", theme["id"])
     if row and row["state"] == "pub":
@@ -153,7 +211,19 @@ async def send(reg, chat_id: int, pkg: Package) -> str:
 
     bot = reg.bot("publisher")
     try:
-        if pkg.images:
+        if pkg.video:
+            # Видео уходит именно видео, а не документом: документ в
+            # канале не играется в ленте, и рилс превращается в файл,
+            # который надо скачать. `supports_streaming` даёт проигрывание
+            # до конца загрузки.
+            from aiogram.types import BufferedInputFile
+            msg = await bot.send_video(
+                chat_id=cfg.publish_channel,
+                video=BufferedInputFile(pkg.video.read_bytes(),
+                                        pkg.video.name),
+                caption=pkg.text or None,
+                supports_streaming=True)
+        elif pkg.images:
             from aiogram.types import BufferedInputFile
             msg = await bot.send_photo(
                 chat_id=cfg.publish_channel,
@@ -209,10 +279,16 @@ def _head(pkg: Package) -> str:
     """Строка про слот: дата, площадка, длина, чем закрыт."""
     t = pkg.theme
     n = len(pkg.images)
-    tail = (" · без картинки" if not n else
-            " · картинка" if n == 1 else f" · {n} картинок, выйдет первая")
+    if pkg.video:
+        mb = pkg.video.stat().st_size / 1024 / 1024
+        tail = f" · видео {mb:.0f} МБ"
+    else:
+        tail = (" · без картинки" if not n else
+                " · картинка" if n == 1 else
+                f" · {n} картинок, выйдет первая")
+    words = f"{len(pkg.text)} знаков" if pkg.text else "без подписи"
     return (f"📤 <b>{t.get('date')} · {pkg.plat} · {t.get('format')}</b>\n"
-            f"<code>{t['id']}</code> · {len(pkg.text)} знаков" + tail)
+            f"<code>{t['id']}</code> · {words}" + tail)
 
 
 def _tail(pkg: Package) -> list[str]:
@@ -231,7 +307,8 @@ def card(pkg: Package) -> str:
 
     Текста тут нет намеренно: пост с картинкой выходит подписью под фото,
     и вторая копия текста выше сломала бы главное обещание превью —
-    человек утверждает то, что увидит канал, а не пересказ.
+    человек утверждает то, что увидит канал, а не пересказ. С видео то же
+    самое: подпись едет под роликом.
     """
     return "\n".join([_head(pkg), *_tail(pkg)])
 
@@ -319,6 +396,15 @@ async def _show(reg, chat_id: int, theme: dict[str, Any], topic: str) -> None:
     # же. Текст отдельно от картинки показывал пост, которого не будет.
     # Подпись не вмещается — падаем в текстовую форму: собрать превью,
     # которое врёт про потолок, хуже, чем показать некрасиво.
+    # Ролик показывается роликом: человек утверждает то, что увидит
+    # канал, а первый кадр ролика это обложка, по которой его и листают.
+    if pkg.video:
+        await reg.say("publisher", chat_id, card(pkg) + note, topic=topic)
+        await reg.send_file("publisher", chat_id, pkg.video.read_bytes(),
+                            pkg.video.name, caption=pkg.text, topic=topic,
+                            kb=kb, as_video=True)
+        return
+
     as_post = bool(pkg.images) and bool(pkg.text) and len(pkg.text) <= TG_CAPTION
     if as_post:
         await reg.say("publisher", chat_id, card(pkg) + note, topic=topic)

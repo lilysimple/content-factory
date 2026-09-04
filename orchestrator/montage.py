@@ -198,13 +198,23 @@ def stage_video(b, blob: bytes, suffix: str = ".mp4") -> Path:
     return path
 
 
+# Что монтаж считает видео, когда человек кладёт файл в папку руками.
+# Присланное ботом всегда `pending.*`, но положенное руками называется
+# как называлось на камере, и требовать переименования значит завести
+# правило, о котором человек узнает только из молчаливого отказа.
+VIDEO_SUFFIX = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi")
+
+
 def _footage(b) -> Path:
+    """Свежайшее видео из входящих. Имя любое, лишь бы это было видео."""
     d = incoming_dir(b)
-    files = sorted(d.glob("pending.*"), key=lambda p: p.stat().st_mtime,
-                   reverse=True)
+    files = sorted((f for f in d.iterdir()
+                    if f.is_file() and f.suffix.lower() in VIDEO_SUFFIX),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
         raise NoFootage("видео ещё не пришло. Снимите ролик по сценарию и "
-                        "пришлите файлом в этот топик")
+                        "пришлите файлом в этот топик — или дайте ссылку "
+                        "на запись")
     return files[0]
 
 
@@ -360,19 +370,36 @@ COVER_DEFAULTS = {
 }
 
 
+def _refs_note(b, plat: str, fmt: str) -> str:
+    """Хвост к строке про дефолты: есть ли с чем сверить получившееся.
+
+    Говорится только когда ТЗ не нашлось. На каждом ролике эта строка
+    была бы шумом: при живом ТЗ обложка собрана по числам бренда, и
+    сверять её не с чем не приходится.
+    """
+    # Только точное совпадение площадки и формата: скрин поста обложке
+    # рилса не референс, а другой формат под тем же словом.
+    refs = design.brand_refs(b, plat, fmt, exact=True)
+    if refs:
+        return (". Сверить есть с чем: "
+                + ", ".join(f"<code>{f.name}</code>" for f in refs[:3]))
+    return ". Референсов обложки в папке бренда тоже нет — сверить не с чем"
+
+
 def _cover_spec(b, plat: str, fmt: str) -> tuple[dict[str, str], str | None]:
     """Настройки обложки из ТЗ бренда. Вторым — что сказать человеку."""
     rel = f"design/platforms/{plat}-{fmt}-cover.md"
     text = b.read(rel)
     if not text:
         return dict(COVER_DEFAULTS), (
-            f"ТЗ обложки нет (<code>{rel}</code>) — собрал на дефолтах")
+            f"ТЗ обложки нет (<code>{rel}</code>) — собрал на дефолтах"
+            + _refs_note(b, plat, fmt))
 
     m = COVER_BLOCK.search(text)
     if not m:
         return dict(COVER_DEFAULTS), (
             f"в <code>{rel}</code> нет блока <code>cover</code> — "
-            "собрал на дефолтах")
+            "собрал на дефолтах" + _refs_note(b, plat, fmt))
 
     spec = dict(COVER_DEFAULTS)
     for line in m.group(1).splitlines():
@@ -1032,7 +1059,19 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
         raise NoWork("профиля бренда ещё нет")
 
     theme = _pick(chat_id, ask)
-    video = _footage(b)
+
+    # Запись приходит двумя путями — файлом в топик или ссылкой на эфир, —
+    # и дальше монтаж их не различает. Раньше ссылку понимала только
+    # нарезка, а «смонтируй по ссылке» отвечало «видео ещё не пришло»:
+    # ссылка была прямо в сообщении и молча игнорировалась.
+    url = grab.link(ask)
+    if url:
+        if say:
+            await say(f"Скачиваю запись по ссылке <code>{url}</code>.")
+        video = (await grab.fetch(url, incoming_dir(b))).video
+    else:
+        video = _footage(b)
+
     beats = _beats(b, theme["id"]) if theme else {}
     color, accent = _colors(b)
 
@@ -1134,8 +1173,14 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
 # часть найденного (`footage.window`). Считать тишину заново на каждом
 # куске значит получить разные пороги на соседних секундах одной записи.
 
+# Слова, после которых из одной записи делают несколько роликов. Список
+# был уже фразы, которой это просят: «сделай из этого видео несколько
+# рилс» не попадало сюда ни одним словом и уходило монтировать запись
+# целиком одним роликом.
 SPLIT_WORDS = ("нареж", "нареза", "разрежь", "разбей", "на рилсы",
-               "на куски", "на ролики", "по кускам")
+               "на куски", "на ролики", "по кускам",
+               "несколько рилс", "несколько ролик", "пару рилс",
+               "нарезку", "клипы")
 
 
 def _clock(sec: float) -> str:
@@ -1373,12 +1418,20 @@ def _save(b, reel: Reel) -> Path:
     tid = reel.theme["id"]
     blob = reel.out.read_bytes()
     path = b.artifact(f"posts/{tid}-reel.mp4", blob)
-    # Готовое видео не «черновик»: сценарий уже был ready, монтаж его не
-    # понижает — desk.drafted() выставил бы status='draft', а это назад.
-    with db.tx() as c:
-        c.execute("UPDATE themes SET asset = ?, updated_at = datetime('now') "
-                  "WHERE id = ? AND chat_id = ?",
-                 (f"posts/{tid}-reel.mp4", tid, reel.theme["chat_id"]))
+    # `asset` тут НЕ трогаем, и это важнее, чем кажется. Поле читается как
+    # текст в трёх местах — `publisher.collect`, `editor.revise`,
+    # `design.build`, — и все три делают `b.read()`, то есть
+    # `read_text(utf-8)`. Путь к mp4 в этом поле роняет их
+    # `UnicodeDecodeError` на первом же нетекстовом байте, а колбэки в
+    # `bots/handlers.py` ничем не обёрнуты: человек нажимает «В очередь» и
+    # не получает вообще ничего. Молчание неотличимо от поломки.
+    #
+    # Вторая потеря тише и хуже: у темы из плана в `asset` лежал сценарий
+    # (`posts/{id}-script.md`), и перезапись уносила ссылку на него.
+    #
+    # Ролик ищется по имени файла — `posts/{id}-reel.mp4`, — тем же швом,
+    # каким Публикатор ищет макеты. Готовое видео при этом не «черновик»:
+    # сценарий уже был ready, и монтаж его не понижает.
     reel.out.unlink(missing_ok=True)            # временный файл в tools/
     return path
 
@@ -1475,7 +1528,7 @@ async def show(reg, chat_id: int, reel: Reel, topic: str = "reels") -> None:
     table.hold(chat_id, reel)
     await reg.say("reels", chat_id, caption(reel), topic=topic)
     await reg.send_file("reels", chat_id, path.read_bytes(), path.name,
-                        topic=topic)
+                        topic=topic, as_video=True)
     await reg.say("reels", chat_id, "Принимаем?", kb=_kb(reel.theme["id"]),
                   topic=topic)
 
@@ -1494,6 +1547,9 @@ async def run(reg, chat_id: int, ask: str, topic: str = "reels") -> None:
         return
     except NoFootage as e:
         await say(str(e))
+        return
+    except grab.NoVideo as e:
+        await say(f"Запись по ссылке не забралась: {e}")
         return
     except NotInstalled as e:
         await say(f"{e}")
@@ -1531,6 +1587,9 @@ async def run_split(reg, chat_id: int, ask: str,
         return
     except NoFootage as e:
         await say(str(e))
+        return
+    except grab.NoVideo as e:
+        await say(f"Запись по ссылке не забралась: {e}")
         return
     except NotInstalled as e:
         await say(f"{e}")
