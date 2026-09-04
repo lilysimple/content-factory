@@ -15,7 +15,7 @@ from harness import CHAT, FakeRegistry, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
-from orchestrator import agent, design, desk                          # noqa: E402
+from orchestrator import agent, design, desk, imagegen                          # noqa: E402
 from storage import db                                            # noqa: E402
 
 db.init(cfg.db_path)
@@ -78,7 +78,7 @@ def install(ans):
 COPY = "Кода не писала ни строчки. Навык нужен тот же самый."
 
 
-def seed(plat="telegram", fmt="пост", status="ready"):
+def seed(plat="telegram", fmt="пост", status="ready", rubric="Путь"):
     """Тема с утверждённым текстом на диске."""
     b = desk.brand(CHAT)
     tid = f"2026-08-15-{plat}-01"
@@ -87,8 +87,8 @@ def seed(plat="telegram", fmt="пост", status="ready"):
         c.execute("DELETE FROM themes WHERE chat_id = ?", (CHAT,))
         c.execute("INSERT INTO themes (id, chat_id, date, plat, format, "
                   "rubric, goal, status, title, asset) VALUES "
-                  "(?,?,'2026-08-15',?,?,'Путь','warm',?,'Путь в AI',?)",
-                  (tid, CHAT, plat, fmt, status, f"posts/{tid}.md"))
+                  "(?,?,'2026-08-15',?,?,?,'warm',?,'Путь в AI',?)",
+                  (tid, CHAT, plat, fmt, rubric, status, f"posts/{tid}.md"))
     return tid
 
 
@@ -260,7 +260,7 @@ async def main() -> None:
     install(answer([{"name": f"{i:02d}",
                      "html": card("Кода не писала", 1080, 1350,
                                   photo="призрак.jpg" if i == 1 else "author.jpg")}
-                    for i in range(1, 6)]))
+                    for i in range(1, 7)]))
     await design.run(reg, CHAT, "собери карусель", pick_bg=False)
     check("на HTML-пути замечание показано", "⚠️" in reg.texts(),
           "замечание проглочено")
@@ -318,6 +318,12 @@ async def main() -> None:
     print("\n8. Карусель")
     refs = design._reference("instagram", "карусель")
     check("эталонов карусели пять", len(refs) == 5, f"{len(refs)}")
+    # Паттернов пять, а карточек шесть: пункт повторяется трижды и на
+    # третий раз меняет сторону. Считать карточки по эталонам — ошибка,
+    # которую видно только у человека в ленте.
+    check("карточек карусели шесть",
+          design._cards("instagram", "карусель", [], refs) == 6,
+          str(design._cards("instagram", "карусель", [], refs)))
     # У Telegram эталона нет и быть не должно: он переехал на шаблон со
     # слотами, а эталон приглашал бы модель переизобрести разметку,
     # которой она не видит.
@@ -389,6 +395,110 @@ async def main() -> None:
           not design._needs_bg("telegram", "опрос"))
     check("у поста спрашивают", design._needs_bg("telegram", "пост"))
 
+    # ── 8c. рубрики, где фон генерируется ─────────────────────────────
+    # «Разбор ошибки» и «Артефакт в ленте» — чужая поломка и чужой
+    # промпт: своей съёмки под них не бывает, и портрет автора в кадре
+    # обещал бы не то, что стоит в посте. Генератор подменён, всё
+    # остальное настоящее.
+    print("\n8c. Сгенерированный фон")
+    frame = b.path(f"design/assets/images/{design._photos(b)[0]}").read_bytes()
+    GEN = {"n": 0, "prompt": [], "aspect": []}
+
+    def fake_make(prompt, aspect="4:5"):
+        GEN["n"] += 1
+        GEN["prompt"].append(prompt)
+        GEN["aspect"].append(aspect)
+        return frame
+
+    def two_ways(p):
+        """Бриф кадра и слоты приходят из одного `agent.ask`."""
+        return ("wide desk with a single lit lamp and paper"
+                if "предметную сцену" in p
+                else answer([{"name": "cover", "slots": slots()}]))
+
+    imagegen.ready = lambda: True
+    imagegen.make = fake_make
+
+    tid = seed(rubric="Разбор ошибки")
+    reg.clear()
+    SENT_FILES.clear()
+    install(two_ways)
+    await design.run(reg, CHAT, "сделай обложку")
+
+    saved = json.loads(b.path(f"posts/{tid}.bg.json").read_text(encoding="utf-8"))
+    check("генерация позвана один раз", GEN["n"] == 1, str(GEN["n"]))
+    check("соотношение сторон по холсту", GEN["aspect"] == ["4:5"],
+          str(GEN["aspect"]))
+    check("сюжет от модели уехал в кадр",
+          "single lit lamp" in GEN["prompt"][0], GEN["prompt"][0][:120])
+    check("рамку кадра держит код, а не модель",
+          "no letters" in GEN["prompt"][0] and "No people" in GEN["prompt"][0],
+          GEN["prompt"][0][:200])
+    check("сгенерированное идёт первым вариантом",
+          [o["kind"] for o in saved["options"]][:1] == ["gen"],
+          str([o["kind"] for o in saved["options"]]))
+    check("рядом стоят свои фото, а не только генерация",
+          "own" in [o["kind"] for o in saved["options"]],
+          str([o["kind"] for o in saved["options"]]))
+    check("показаны три варианта", len(SENT_FILES) == 3, str(SENT_FILES))
+    check("кадр ждёт выбора в кэше, а не в фотобанке",
+          b.path(f"design/assets/.gen/{tid}.jpg").exists()
+          and not any(n.startswith("gen-") for n in design._photos(b)),
+          str(design._photos(b)))
+
+    reg.clear()
+    await design.on_callback(reg, CHAT, f"bg:{tid}:1")
+    made = [n for n in design._photos(b) if n.startswith("gen-")]
+    check("выбранный кадр переехал в фотобанк", len(made) == 1, str(made))
+    check("кэш убран", not b.path(f"design/assets/.gen/{tid}.jpg").exists())
+    check("чем и по чему сделано — записано",
+          b.path("design/assets/gen-credits.md").is_file())
+    if made:
+        check("макет собран на сгенерированном фоне",
+              made[0] in b.path(f"posts/{tid}-cover.html").read_text(encoding="utf-8"),
+              made[0])
+
+    # Сгенерированное не должно всплыть на чужой обложке само: как и
+    # сток, оно берётся только кнопкой или именем файла в `photos.md`.
+    check("в слепую ротацию генерация не идёт",
+          not design._pick_photo(b, {"goal": "нет такой цели"},
+                                 ["gen-x.jpg", "author.jpg"]).startswith("gen-"))
+
+    # Рубрика решает, а не желание сэкономить круг вёрстки.
+    GEN["n"] = 0
+    tid = seed(rubric="Из жизни")
+    reg.clear()
+    install(two_ways)
+    await design.run(reg, CHAT, "сделай обложку")
+    check("на обычной рубрике генерации нет", GEN["n"] == 0, str(GEN["n"]))
+
+    # Ключа нет — фон просто находится иначе, вёрстка не падает.
+    imagegen.ready = lambda: False
+    GEN["n"] = 0
+    tid = seed(rubric="Артефакт в ленте")
+    reg.clear()
+    install(two_ways)
+    await design.run(reg, CHAT, "сделай обложку")
+    saved = json.loads(b.path(f"posts/{tid}.bg.json").read_text(encoding="utf-8"))
+    check("без ключа генерация не зовётся", GEN["n"] == 0, str(GEN["n"]))
+    check("без ключа варианты остаются",
+          len(saved["options"]) >= 2 and "gen" not in
+          [o["kind"] for o in saved["options"]], str(saved["options"]))
+    imagegen.ready = lambda: True
+
+    # У раздачи фон появился 03.09: до этого слота `photo` в шаблоне не
+    # было вовсе, и «Артефакт в ленте» этим форматом остался бы без
+    # обложки-фона.
+    check("у раздачи спрашивают фон", design._needs_bg("telegram", "раздача"))
+    tid = seed(fmt="раздача", rubric="Артефакт в ленте")
+    reg.clear()
+    install(two_ways)
+    await design.run(reg, CHAT, "сделай карточку раздачи")
+    await design.on_callback(reg, CHAT, f"bg:{tid}:1")
+    png = b.path(f"posts/{tid}-cover.png")
+    check("раздача рендерится с фоном", png.exists() and png.stat().st_size > 50_000,
+          str(png))
+
     # ── 9. правка это правка, а не пересборка ─────────────────────────
     # Раньше `revise` звал `run`: модель переписывала весь HTML, Chrome
     # перерисовывал все карточки. «Подвинь заголовок» стоило столько же,
@@ -396,10 +506,10 @@ async def main() -> None:
     print("\n9. Точечная правка")
     tid = seed(plat="instagram", fmt="карусель")
     install(answer([{"name": f"{i:02d}", "html": card(f"Карточка {i}", 1080, 1350)}
-                    for i in range(1, 6)]))
+                    for i in range(1, 7)]))
     await design.run(reg, CHAT, "собери карусель", pick_bg=False)
     made = sorted(x.name for x in b.path("posts").glob(f"{tid}-*.png"))
-    check("собрано пять карточек", len(made) == 5, str(made))
+    check("собрано шесть карточек", len(made) == 6, str(made))
 
     was = {x.name: x.stat().st_mtime_ns
            for x in b.path("posts").glob(f"{tid}-*.png")}
@@ -424,11 +534,11 @@ async def main() -> None:
     check("перерисована ровно одна карточка", len(changed) == 1, str(changed))
     check("перерисована именно третья", changed and changed[0].endswith("-03.png"),
           str(changed))
-    check("нетронутые карточки уцелели", len(now) == 5, str(sorted(now)))
+    check("нетронутые карточки уцелели", len(now) == 6, str(sorted(now)))
     check("человеку сказано, сколько поправлено",
-          "1 из 5" in reg.texts(), reg.texts()[:200])
-    check("в комплект уехали все пять",
-          len([n for n, _, ph in SENT_FILES if n.endswith(".png") and ph]) == 5,
+          "1 из 6" in reg.texts(), reg.texts()[:200])
+    check("в комплект уехали все шесть",
+          len([n for n, _, ph in SENT_FILES if n.endswith(".png") and ph]) == 6,
           str([n for n, _, _ in SENT_FILES]))
     check("кнопки после правки на месте",
           [":".join(x.split(":")[:2]) for x in reg.last().buttons] ==
@@ -439,7 +549,7 @@ async def main() -> None:
     await design.on_callback(reg, CHAT, "fix")
     reg.clear()
     install(answer([{"name": f"{i:02d}", "html": card(f"Новая {i}", 1080, 1350)}
-                    for i in range(1, 6)]))
+                    for i in range(1, 7)]))
     await design.revise(reg, CHAT, "пересобери с нуля, другой макет")
     check("«пересобери» ведёт к полной сборке",
           "Верстаю" in reg.texts() or "карточки" in reg.texts(),
