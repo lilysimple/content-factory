@@ -84,6 +84,18 @@ VIDEO_LINK = re.compile(
 AMBIGUOUS = re.compile(r"сделай (что-нибудь|материал|контент)", re.I)
 
 
+def is_footage(text: str, topic_key: str | None) -> bool:
+    """Ссылка на запись в топике Reels — материал на монтаж.
+
+    Отдельной функцией, а не строчкой внутри `resolve`, потому что тот же
+    факт нужен раньше маршрутизации: `refresh.wants_refresh` срабатывает
+    на **любую** ссылку и стоит в `handlers` выше, поэтому присланный в
+    Reels дубль уезжал перечитывать профиль и до монтажа не доходил
+    вовсе. Знание одно, место одно.
+    """
+    return topic_key == "reels" and bool(VIDEO_LINK.search(text or ""))
+
+
 @dataclass(frozen=True)
 class Route:
     role: str | None            # None → надо спросить
@@ -104,7 +116,7 @@ def resolve(text: str, topic_key: str | None, usernames: dict[str, str]) -> Rout
             return Route(role, "intent")
 
     # 3. Ссылка на запись в топике Reels: материал, а не тема.
-    if topic_key == "reels" and VIDEO_LINK.search(low):
+    if is_footage(low, topic_key):
         return Route("montage", "intent")
 
     if AMBIGUOUS.search(low):

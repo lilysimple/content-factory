@@ -754,6 +754,29 @@ def main() -> None:
           _resolve("посмотри https://youtu.be/abc и напиши пост",
                    "review", {}).role)
 
+    # ── 38в. перечитывание профиля дубль не перехватывает ─────────────
+    #
+    # `resolve` разводил ссылку правильно, а человек всё равно получал
+    # Ресёрчера: `refresh.wants_refresh` видит **любую** ссылку и стоит в
+    # `handlers` выше маршрутизации. Живой прогон 04.09, ссылка на эфир в
+    # топике Reels уехала перечитывать профиль. Стережёт `is_footage`, и
+    # проверяется здесь тот же порядок, что в обработчике.
+    print("\n38в. Дубль важнее перечитывания профиля")
+    from bots.router import is_footage                          # noqa: E402
+    from orchestrator import sources                            # noqa: E402
+
+    for ask in ("https://youtu.be/abc",
+                "нарежь https://www.youtube.com/watch?v=abc на рилсы"):
+        seen = bool(sources.extract_urls(ask))
+        check(f"ссылка видна перечитыванию: {ask[:30]}", seen, ask)
+        check(f"но дубль её забирает: {ask[:30]}",
+              is_footage(ask, "reels"), ask)
+    check("ссылка не в Reels остаётся перечитыванию",
+          not is_footage("посмотри https://youtu.be/abc", "review"),
+          "review")
+    check("текст без ссылки дублем не считается",
+          not is_footage("смонтируй уже", "reels"), "reels")
+
     # ── 39. референс обложки называется, когда ТЗ нет ─────────────────
     print("\n39. Референс обложки")
     _, note = montage._cover_spec(b, "telegram", "reels")

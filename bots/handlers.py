@@ -17,7 +17,7 @@ from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
 
 from bots import topics
 from bots.registry import registry
-from bots.router import resolve
+from bots.router import is_footage, resolve
 from config import cfg
 from orchestrator import (bridge, design, desk, editor, montage, onboarding,
                           publisher, reels, refresh, reply, research, strategy)
@@ -414,7 +414,14 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
 
         # Материалы после онбординга уточняют существующий профиль,
         # а не создают новый бренд.
-        if refresh.wants_refresh(msg):
+        #
+        # Исключение — ссылка на запись в топике Reels: это материал на
+        # монтаж, и `router.resolve` разводит её тем же фактом. Но
+        # `wants_refresh` срабатывает на **любую** ссылку и стоит раньше
+        # маршрутизации, поэтому до монтажа такая ссылка не доезжала
+        # вовсе: человек кидал дубль в Reels и получал перечитывание
+        # профиля Ресёрчером.
+        if refresh.wants_refresh(msg) and not is_footage(raw, tkey):
             await refresh.start(registry, msg)
             return
 
