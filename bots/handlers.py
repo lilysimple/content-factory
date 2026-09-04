@@ -277,6 +277,42 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             "Видео принято. Напишите «смонтируй» — соберу ролик по "
             "ближайшему утверждённому сценарию.", topic=tkey)
 
+    # ── статистика в топике Метрики ───────────────────────────────────
+    MAX_STATS_MB = 20        # тот же потолок скачивания у Bot API
+
+    async def handle_stats(chat_id: int, msg: Message) -> bool:
+        """Принять скрин кабинета или выгрузку, брошенную в 📊 Метрики.
+
+        Без этой ветки документ уходил в `refresh` и перечитывал профиль
+        бренда, а фото не сохранялось вовсе: `msg.photo` вне онбординга не
+        обрабатывал никто. Ресёрчер читает эту папку сам — `research.snapshot`
+        называет ему файлы в разделе «Скрины статистики».
+        """
+        b = desk.brand(chat_id)
+        if b is None:
+            return False
+
+        media = msg.document or (msg.photo[-1] if msg.photo else None)
+        if media is None:
+            return False
+        if media.file_size and media.file_size > MAX_STATS_MB * 1024 * 1024:
+            await registry.say(
+                "research", chat_id,
+                f"Файл больше {MAX_STATS_MB} МБ — Telegram не отдаёт такие "
+                "ботам. Пришлите выжимкой или частями.", topic="metrics")
+            return True
+
+        buf = await registry.bot("research").download(media.file_id)
+        name = getattr(media, "file_name", None) or (
+            f"{desk.today(chat_id)}-{media.file_unique_id}.jpg")
+        path = research.stash_stats(b, buf.read(), name)
+        await registry.say(
+            "research", chat_id,
+            f"Забрал <code>{path.name}</code> в статистику бренда. "
+            "Разберу в ближайшей сводке — напишите «собери сводку», "
+            "когда неделя закроется.", topic="metrics")
+        return True
+
     # ── обычное сообщение ─────────────────────────────────────────────
     @dp_assistant.message(F.text | F.voice | F.photo | F.document | F.video)
     async def on_message(msg: Message) -> None:
@@ -306,6 +342,12 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
                         .startswith("video/")):
             await handle_footage(chat_id, msg, tkey or "reels")
             return
+
+        # Файл в 📊 Метрики это цифры, а не материал профиля: разбирать
+        # его должен Ресёрчер, а не распаковка ЯДРА.
+        if tkey == "metrics" and (msg.photo or msg.document):
+            if await handle_stats(chat_id, msg):
+                return
 
         # Ответ на вопрос про события недели: он не новая задача, а
         # недостающий факт для той, что уже ждёт запуска.

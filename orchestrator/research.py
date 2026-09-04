@@ -21,6 +21,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from statistics import median
 from typing import Any
 
@@ -169,6 +170,49 @@ SNAP_TOP = 3                # сколько постов сверху и сни
 SNAP_CUT = 120              # знаков от текста поста
 STATS_DIR = "research/stats"
 
+# Что кабинет площадки отдаёт человеку: картинку или выгрузку таблицей.
+SHOT_SUFFIX = (".png", ".jpg", ".jpeg", ".webp")
+TABLE_SUFFIX = (".csv", ".tsv", ".xlsx", ".json", ".txt", ".md")
+
+
+def stats_dir(b) -> Path:
+    d = b.path(STATS_DIR)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def stashed(b) -> tuple[list[str], list[str]]:
+    """Что лежит в папке статистики: скрины и выгрузки, по именам."""
+    d = b.path(STATS_DIR)
+    if not d.is_dir():
+        return [], []
+    files = sorted(f for f in d.iterdir()
+                   if f.is_file() and f.name.lower() != "readme.md")
+    shots = [f.name for f in files if f.suffix.lower() in SHOT_SUFFIX]
+    tables = [f.name for f in files if f.suffix.lower() in TABLE_SUFFIX]
+    return shots, tables
+
+
+def stash_stats(b, blob: bytes, name: str) -> Path:
+    """Положить присланный скрин или выгрузку в папку статистики бренда.
+
+    Имя не затирается: два скрина одного кабинета за разные недели
+    приезжают из Telegram под одним и тем же `IMG_1234.PNG`, и молчаливая
+    перезапись стоила бы человеку прошлого замера.
+    """
+    d = stats_dir(b)
+    # Имя приходит из Telegram: брать его как путь значит пустить `../`
+    # в чужую папку. Нужен только базовый компонент.
+    name = Path(name).name or "stats.bin"
+    path = d / name
+    n = 2
+    while path.exists():
+        path = d / f"{Path(name).stem}-{n}{Path(name).suffix}"
+        n += 1
+    path.write_bytes(blob)
+    log.info("статистика принята: %s (%s байт)", path, len(blob))
+    return path
+
 
 def _line(p: sources.Post) -> str:
     seen = f"{p.views}" if p.views is not None else "—"
@@ -275,14 +319,11 @@ async def snapshot(b, *, window: Window | None = None) -> tuple[str, list[str]]:
                     "|---|---|---|---|---|"] + rows + [""]
             out += ["Верх и низ каждого канала внутри окна:", ""] + blocks
 
-    folder = b.path(STATS_DIR)
-    shots = sorted(f.name for f in folder.glob("*")
-                   if f.is_file() and f.suffix.lower() in
-                   {".png", ".jpg", ".jpeg", ".webp"}) if folder.is_dir() else []
+    shots, tables = stashed(b)
     out += ["## Скрины статистики", ""]
-    if shots:
+    if shots or tables:
         out += [f"Лежат в `{STATS_DIR}` папки бренда, читай их сам:", ""]
-        out += [f"- {n}" for n in shots]
+        out += [f"- {n}" for n in shots + tables]
         out += ["", "Они дополняют цифры выше: охват, ER, подписки, досмотры "
                 "лента не отдаёт. Разобранное дописывай строками в "
                 "`stats.csv`, поле без данных оставляй прочерком."]
