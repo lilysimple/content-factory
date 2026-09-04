@@ -653,6 +653,34 @@ async def main() -> None:
     with db.tx() as c:
         c.execute("DELETE FROM themes WHERE id = ?", (tid_rub,))
 
+    # ── тема вне плана: вход есть, и он один ──────────────────────────
+    #
+    # «Сделай пост по такой теме, её нет в плане» приходит регулярно, а
+    # посадка требует тему в базе. Придумать `theme_id` нельзя — его
+    # проверяют, — поэтому вход показан фактом в контракте. Плану он не
+    # нужен: план заводит темы сам.
+    reset()
+    tid_ad = bridge.create_task(CHAT, "сделай карусель про страх перед AI",
+                                workflow="design", today=OTHER_DAY)
+    ad_txt = (bridge.TASKS_DIR / tid_ad / "input.md").read_text(encoding="utf-8")
+    check("вход для темы вне плана назван",
+          "tools/theme_adhoc.py" in ad_txt,
+          "иначе Director придумает theme_id, и посадка откажет")
+    check("команда несёт id задачи", f"theme_adhoc.py {tid_ad}" in ad_txt,
+          "чей это чат, знает база по задаче, а не аргумент из головы")
+    check("сказано, что тема заводится до вызова ролей",
+          "до вызова ролей" in ad_txt,
+          "посадка идёт после конца прогона: заведённый там id "
+          "Дизайнеру уже не достанется")
+
+    reset()
+    tid_pl = bridge.create_task(CHAT, "план на неделю", workflow="plan",
+                                today=OTHER_DAY)
+    pl_txt = (bridge.TASKS_DIR / tid_pl / "input.md").read_text(encoding="utf-8")
+    check("плану вход вне плана не показывают",
+          "theme_adhoc" not in pl_txt,
+          "план заводит темы Стратегом, второй вход тут лишний")
+
     reset()
     tid_res = bridge.create_task(CHAT, "что зашло", workflow="research",
                                  today=OTHER_DAY)

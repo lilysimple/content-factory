@@ -29,7 +29,7 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import ROOT, cfg
-from orchestrator import agent, desk, publisher, stock
+from orchestrator import agent, desk, imagegen, publisher, stock
 from orchestrator.desk import NoWork
 from storage import db
 
@@ -165,6 +165,23 @@ PHOTO_RULES = "design/photos.md"
 MARK_FILE = "design/mark.md"
 MARK_RX = re.compile(r"^Подпись на макете:\s*(.+?)\s*$", re.M)
 STOCK = "stock-"      # префикс файлов со стока, см. orchestrator/stock.py
+GEN = imagegen.PREFIX  # префикс сгенерированного, см. orchestrator/imagegen.py
+
+# Ни сток, ни генерация не попадают на макет как «своё фото»: код не
+# ставит их молча ни ротацией, ни правилом «*». Выбрать их можно только
+# кнопкой человека или вписав имя файла в `design/photos.md` руками.
+NOT_OWN = (STOCK, GEN)
+
+# Рубрики, где фон генерируется, а не снимается. Список у кода, а не у
+# бренда, потому что это правило продукта: «Разбор ошибки» — это чужая
+# поломка, «Артефакт в ленте» — чужой промпт, и портрет автора в кадре
+# обещает не то, что стоит в посте. Своя съёмка при этом не отменяется:
+# генерация идёт первым вариантом из трёх, остальные два свои.
+GEN_RUBRICS = ("разбор ошибки", "артефакт в ленте")
+
+# Усилие на бриф для генерации. Это перевод темы в описание кадра, а не
+# суждение: какие рубрики генерируются, решено выше и не обсуждается.
+GEN_BRIEF_EFFORT = "low"
 
 # Сколько фонов показать человеку до вёрстки. Три — потому что выбор из
 # двух это «да/нет», а из пяти уже работа: человек листает вместо того,
@@ -378,11 +395,12 @@ def _pick_photo(b, theme: dict[str, Any], photos: list[str]) -> str:
     order = [p for p in (rules.get(goal) or rules.get("*") or []) if p in photos]
     if not order:
         # Запасная ротация идёт только по своим фото. Сток
-        # (`tools/stock_pull.py`, префикс `stock-`) попадает на макет,
-        # если человек вписал имя файла в правило руками: безликая
-        # картинка со стока на обложке личного бренда читается как
-        # AI-контент, и выбрать её молча код не должен.
-        order = [p for p in photos if not p.startswith(STOCK)] or photos
+        # (`tools/stock_pull.py`, префикс `stock-`) и сгенерированное
+        # (`imagegen`, префикс `gen-`) попадают на макет, только если
+        # человек вписал имя файла в правило руками: безликая картинка
+        # на обложке личного бренда читается как AI-контент, и выбрать
+        # её молча код не должен.
+        order = [p for p in photos if not p.startswith(NOT_OWN)] or photos
     recent = _recent_photos(b, len(order) - 1)
     return next((p for p in order if p not in recent), order[0])
 
@@ -964,7 +982,7 @@ def _own(b, theme: dict[str, Any], photos: list[str]) -> list[str]:
     goal = str(theme.get("goal") or "").strip().lower()
     order = [p for p in (rules.get(goal) or rules.get("*") or []) if p in photos]
     order += [p for p in photos
-              if p not in order and not p.startswith(STOCK)]
+              if p not in order and not p.startswith(NOT_OWN)]
     recent = _recent_photos(b, BG_CHOICES)
     # Недавние не выбрасываются, а уезжают в конец: на маленьком
     # фотобанке выбросить их значило бы остаться без вариантов вовсе.
@@ -1005,15 +1023,85 @@ async def _keywords(chat_id: int, theme: dict[str, Any]) -> str:
     return " ".join(words)
 
 
+def _wants_gen(theme: dict[str, Any]) -> bool:
+    """Генерируется ли фон у этой рубрики. Сравнение по нижнему регистру."""
+    return str(theme.get("rubric") or "").strip().lower() in GEN_RUBRICS
+
+
+def _aspect(size: tuple[int, int]) -> str:
+    """Холст → соотношение сторон для генератора.
+
+    Просить квадрат и обрезать его кодом нельзя: модель компонует кадр
+    под то соотношение, которое ей назвали, и центр композиции уехал бы
+    под обрез вместе со всей задумкой.
+    """
+    w, h = size
+    known = {(1080, 1350): "4:5", (1080, 1920): "9:16",
+             (1920, 1080): "16:9", (1080, 1080): "1:1"}
+    return known.get((w, h), "4:5")
+
+
+# Рамка кадра. Держится кодом, а не моделью: это не про тему, а про то,
+# куда ляжет текст и чего на обложке бренда не бывает никогда. Буквы
+# запрещены отдельной строкой — генераторы любят дописать в кадр
+# собственный заголовок, и он приезжает поверх настоящего.
+GEN_FRAME = (
+    "Editorial photograph used as a post cover background. "
+    "Subject: {subject}. "
+    "Muted graphite and warm off-white palette, one soft directional "
+    "light, shallow depth of field, matte film grain, calm and quiet. "
+    "No people, no faces, no hands. No text, no letters, no numbers, "
+    "no logos, no user interface screenshots. "
+    "Keep the top-left corner and the whole bottom third calm and nearly "
+    "empty: the headline is set there. Vertical composition, no borders.")
+
+
+async def _gen_brief(chat_id: int, theme: dict[str, Any]) -> str:
+    """Тема поста → предметное описание кадра для генератора.
+
+    У модели просим только сюжет: остальное держит `GEN_FRAME`. Если
+    спросить кадр целиком, она каждый раз переизобретает свет и палитру,
+    и обложки одной рубрики перестают быть одной рубрикой.
+
+    Не вышло — не беда: генерация просто не подмешается к вариантам.
+    """
+    title = str(theme.get("title") or "").strip()
+    if not title:
+        return ""
+    try:
+        answer = await agent.ask(
+            "design", chat_id,
+            "Тема поста: " + title +
+            f"\nРубрика: {theme.get('rubric') or '—'}."
+            "\n\nОпиши по-английски предметную сцену для фона обложки: "
+            "одно предложение, до пятнадцати слов, без кавычек и "
+            "пояснений. Предмет, фактура, пространство — стол, бумага, "
+            "провод, стекло, тень. Людей, интерфейсов и надписей не "
+            "предлагай.",
+            max_tokens=200, effort=GEN_BRIEF_EFFORT)
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("бриф для генерации не вышел: %s", e)
+        return ""
+    line = " ".join(answer.strip().splitlines()[:1]).strip() if answer.strip() else ""
+    return line[:200]
+
+
 def _own_page(b, theme: dict[str, Any], photos: list[str],
               page: int) -> list[str]:
     start = page * BG_CHOICES
     return _own(b, theme, photos)[start:start + BG_CHOICES]
 
 
-def _options(own: list[str], *, page: int, query: str) -> list[dict[str, Any]]:
-    """Три кандидата: свои сначала, сток добирает нехватку."""
-    out: list[dict[str, Any]] = [{"kind": "own", "name": n} for n in own]
+def _options(own: list[str], *, page: int, query: str,
+             gen: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Три кандидата: сгенерированный первым, свои, сток на нехватку.
+
+    Генерация идёт первой, а не единственной: у рубрики она уместнее
+    съёмки, но обещать это за человека код не будет — рядом стоят свои
+    фото, и кнопка остаётся за ним.
+    """
+    out: list[dict[str, Any]] = [gen] if gen else []
+    out += [{"kind": "own", "name": n} for n in own][:BG_CHOICES - len(out)]
     if len(out) < BG_CHOICES and query and stock.ready():
         try:
             found = stock.search(query, BG_CHOICES - len(out), page=page + 1)
@@ -1065,13 +1153,33 @@ async def offer(reg, chat_id: int, ask: str, *, topic: str = "design",
     own = _own_page(b, theme, photos, page)
     saved = _bg_read(b, theme["id"])
     query = str(saved.get("query") or "") if saved else ""
+
+    # Генерация только на первой тройке. «Ещё три» — это просьба
+    # посмотреть, что ещё есть, и второй платный кадр на неё был бы
+    # ответом не по адресу: человек уже видел, что предложила модель.
+    gen: dict[str, Any] | None = None
+    if page == 0 and _wants_gen(theme) and imagegen.ready():
+        subject = await _gen_brief(chat_id, theme)
+        if subject:
+            prompt = GEN_FRAME.format(subject=subject)
+            try:
+                imagegen.stage(b, theme["id"], imagegen.make(
+                    prompt, _aspect(size_of(theme))))
+                gen = {"kind": "gen", "subject": subject, "prompt": prompt}
+            except (imagegen.NoGen, OSError) as e:
+                # Генерация не встала — вариантов просто станет меньше.
+                # Ронять вёрстку из-за фона нельзя: свои фото на месте.
+                log.warning("фон не сгенерировался: %s", e)
+    else:
+        imagegen.sweep(b, theme["id"])
+
     # Слова для стока спрашиваем у модели, только когда своих фото не
     # хватило: у бренда с полным фотобанком это лишний вызов на каждом
     # макете, а он стоит секунд.
-    if len(own) < BG_CHOICES and not query:
+    if len(own) + (1 if gen else 0) < BG_CHOICES and not query:
         query = await _keywords(chat_id, theme)
 
-    options = _options(own, page=page, query=query)
+    options = _options(own, page=page, query=query, gen=gen)
     if len(options) < 2:
         return False
 
@@ -1087,6 +1195,11 @@ async def offer(reg, chat_id: int, ask: str, *, topic: str = "design",
         if opt["kind"] == "own":
             blob = b.path(f"design/assets/images/{opt['name']}").read_bytes()
             caption = f"{i}. {opt['name']}"
+        elif opt["kind"] == "gen":
+            blob = imagegen.staged(b, theme["id"])
+            if not blob:
+                continue
+            caption = f"{i}. сгенерировано · {opt.get('subject') or '—'}"
         else:
             ph = opt["photo"]
             try:
@@ -1564,6 +1677,7 @@ async def _on_bg(reg, chat_id: int, action: str, arg: str,
     ask = str(saved.get("ask") or f"свёрстай макет по теме {theme_id}")
 
     if action == "bgauto":
+        imagegen.sweep(b, theme_id)
         await run(reg, chat_id, ask, topic, pick_bg=False)
         return
 
@@ -1588,6 +1702,19 @@ async def _on_bg(reg, chat_id: int, action: str, arg: str,
 
     if opt.get("kind") == "own":
         photo = str(opt.get("name") or "")
+        imagegen.sweep(b, theme_id)
+    elif opt.get("kind") == "gen":
+        row = db.one("SELECT title FROM themes WHERE id = ? AND chat_id = ?",
+                     theme_id, chat_id)
+        try:
+            photo = imagegen.take(b, theme_id, str(row["title"] if row else ""),
+                                  str(opt.get("prompt") or ""))
+        except (imagegen.NoGen, OSError) as e:
+            await say(f"Сгенерированный фон не забрался: {e}. Выбери другой.")
+            return
+        await say(f"Забрал в фотобанк: <code>{photo}</code>. "
+                  "Чем и по какому запросу — в "
+                  "<code>design/assets/gen-credits.md</code>.")
     else:
         # Скачивается только выбранное: папка бренда не должна обрастать
         # тем, что человек отверг.
@@ -1596,6 +1723,7 @@ async def _on_bg(reg, chat_id: int, action: str, arg: str,
         except (stock.NoStock, KeyError, OSError) as e:
             await say(f"Стоковый фон не забрался: {e}. Выбери другой.")
             return
+        imagegen.sweep(b, theme_id)
         await say(f"Забрал в фотобанк: <code>{photo}</code>. "
                   "Автор записан в <code>design/assets/stock-credits.md</code>.")
 

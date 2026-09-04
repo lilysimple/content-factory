@@ -1,31 +1,46 @@
 <!-- @dsTemplate viewport="1080x1350" name="Telegram · раздача"
      Слоты заполняет код, а не модель; набор — SLOTS в
-     orchestrator/design.py. Фото здесь нет намеренно: раздают вещь, а
-     не показывают автора, и светлый холст читается в ленте иначе, чем
-     тёмная обложка поста. Слот `photo` до этого шаблона не доезжает.
+     orchestrator/design.py.
 
-     Система та же, что у поста, но перевёрнутая по свету: на молоке
-     акцентом текста работает `--text-accent` (тёмный оттенок), а чистый
-     `--accent` остаётся заливкой плашек — светлый неон на светлом фоне
-     не читается. -->
+     Свет остаётся перевёрнутым относительно поста: холст молочный, и на
+     нём акцентом текста работает `--text-accent` (тёмный оттенок), а
+     чистый `--accent` остаётся заливкой плашек — светлый неон на
+     светлом фоне не читается.
+
+     Фото до 03.09 здесь не было намеренно: раздают вещь, а не
+     показывают автора. Слот `photo` появился не ради портрета, а ради
+     рубрики «Артефакт в ленте», где фон генерируется (`imagegen`):
+     раздают там промпт или чек-лист, и предметный кадр наверху — это и
+     есть вещь. Поэтому фото стоит полосой сверху, а не во весь холст:
+     светлый холст с текстом остаётся тем, чем был. -->
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <link rel="stylesheet" href="../design/tokens.css"><style>
   *{box-sizing:border-box;margin:0;padding:0;}
   body{font-family:var(--font-body);}
   .slide{width:1080px;height:1350px;position:relative;overflow:hidden;
          background:var(--milk);}
+  img{display:block;}
+  .band-photo{position:absolute;left:0;right:0;top:0;height:520px;
+              overflow:hidden;}
+  .band-photo img{width:100%;height:100%;object-fit:cover;}
+  /* Два слоя защиты на одной полосе: сверху тень под плашку и подпись,
+     снизу растворение в молоко — иначе полоса кончается линией, и
+     обложка распадается на две несвязанные половины. */
+  .band-photo .veil{position:absolute;inset:0;background:linear-gradient(
+       180deg,rgba(31,31,31,0.62) 0%,rgba(31,31,31,0.16) 34%,
+       rgba(31,31,31,0.00) 62%,rgba(248,245,241,0.86) 92%,
+       var(--milk) 100%);}
   .pill{position:absolute;left:84px;top:84px;padding:20px 40px;
         border-radius:var(--radius-pill);background:var(--accent);
         font-family:var(--font-display);font-size:30px;font-weight:700;
         letter-spacing:0.08em;text-transform:uppercase;
         color:var(--accent-ink);}
+  /* Подпись лежит на фотографии, а не на молоке: тёмный вторичный текст
+     на кадре не читается, поэтому здесь она молочная. */
   .mark{position:absolute;right:84px;top:84px;height:70px;
         display:flex;align-items:center;font-family:var(--font-body);
-        font-size:30px;font-weight:500;color:var(--text-secondary);}
-  /* Блок текста в оптическом центре, а не под плашкой: на светлом
-     холсте без фото пустая нижняя треть читается как незавёрстанная. */
-  .well{position:absolute;left:84px;right:84px;top:50%;
-        transform:translateY(-56%);}
+        font-size:30px;font-weight:500;color:rgba(248,245,241,0.82);}
+  .well{position:absolute;left:84px;right:84px;top:560px;}
   .head{--accent-headline:var(--text-accent);font-family:var(--font-display);font-weight:800;line-height:1.04;
         letter-spacing:-0.03em;color:var(--text-primary);
         font-size:{{headline_size}}px;}
@@ -39,6 +54,10 @@
               color:var(--accent-ink);text-align:center;}
 </style></head><body>
 <div class="slide">
+  <div class="band-photo">
+    <img src="../design/assets/images/{{photo}}">
+    <div class="veil"></div>
+  </div>
   <div class="pill">{{rubric}}</div>
   <div class="mark">{{handle}}</div>
   <div class="well">

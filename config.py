@@ -77,6 +77,14 @@ class Config:
     # Дизайнер не должен добирать картинку в момент сборки макета.
     pexels_key: str = os.getenv("PEXELS_API_KEY", "")
 
+    # Ключ Gemini для генерации фона (`orchestrator/imagegen.py`).
+    # Отдельный от модели завода намеренно: текст идёт через Claude Code
+    # по подписке, ключа Anthropic у завода нет с 01.09, а картинки там
+    # взять негде. Пусто — генерация не подмешивается к вариантам фона.
+    gemini_key: str = os.getenv("GEMINI_API_KEY", "")
+    gemini_image_model: str = os.getenv("GEMINI_IMAGE_MODEL",
+                                        "gemini-3-pro-image-preview")
+
     def missing_tokens(self) -> list[str]:
         return [role for role, token in self.tokens.items() if not token]
 

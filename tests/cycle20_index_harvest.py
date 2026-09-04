@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -462,6 +464,79 @@ async def main() -> None:
           res.post_ids == [tid3] and res.plan_ids == [],
           f"post_ids={res.post_ids} plan_ids={res.plan_ids}")
     check("посадка сказала об этом", bool(note), note)
+
+    # ── 7г. Тема вне плана ────────────────────────────────────────────
+    #
+    # Просьба «сделай пост по такой теме» приходит мимо плана регулярно,
+    # а посадка требует тему в базе: `editor.land` и `design.land`
+    # отказывают словами «темы нет в базе». Придумать `theme_id` нельзя —
+    # его проверяют, — поэтому тема заводится по факту просьбы, тем же
+    # швом, что и тема под снятый дубль: `desk.adhoc`.
+    #
+    # Командой, а не полем в контракте: в одном прогоне по одной теме
+    # идут Редактор и Дизайнер, и второму нужен тот же id, что и первому.
+    # Посадка случается после конца прогона — id, заведённый там, второму
+    # уже не достался бы.
+    print("\n7г. Тема вне плана")
+
+    free_bridge()
+    t7 = bridge.create_task(CHAT, "сделай пост карусель про страх перед AI",
+                            workflow="post", today="2026-08-31",
+                            brand_slug=b.slug, brand_path=str(b.root))
+
+    def adhoc(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(harness.REPO / "tools" / "theme_adhoc.py"),
+             *args], capture_output=True, text=True, env=os.environ,
+            cwd=harness.REPO)
+
+    r = adhoc(t7, "--plat", "instagram", "--format", "карусель",
+              "--title", "Как перестать бояться AI",
+              "--hook", "Страшно не вам одному")
+    tid_ad = r.stdout.strip()
+    check("тема вне плана заведена", r.returncode == 0, r.stderr)
+    check("напечатан один id и ничего больше",
+          bool(desk.ID_RX.fullmatch(tid_ad)), repr(r.stdout))
+
+    ad = db.one("SELECT * FROM themes WHERE id = ?", tid_ad)
+    check("тема легла в чат задачи, а не в аргумент из головы",
+          ad and ad["chat_id"] == CHAT)
+    check("помечена как вне плана", ad["src"] == "adhoc", ad["src"])
+    check("даты у неё нет: чужой день она не занимает",
+          not ad["date"], ad["date"])
+    check("статус idea: работа впереди", ad["status"] == "idea", ad["status"])
+    check("формат доехал", ad["format"] == "карусель", ad["format"])
+
+    r = adhoc(t7, "--plat", "tiktok", "--title", "чужая площадка")
+    check("чужая площадка — отказ, а не тихий дефолт",
+          r.returncode == 1 and "не из набора" in r.stderr, r.stderr)
+    r = adhoc("2020-01-01-post-99", "--plat", "telegram", "--title", "х")
+    check("тема без задачи не заводится", r.returncode == 2, r.stderr)
+
+    # Дальше по цепи всё как у плановой темы: текст садится, статус
+    # переходит в draft, у темы появляется файл.
+    (bridge.TASKS_DIR / t7 / "post.md").write_text(
+        "текст для человека\n\n```json\n"
+        + json.dumps({"theme_id": tid_ad, "text": clean,
+                      "checks": {"voice": 5}}, ensure_ascii=False)
+        + "\n```\n", encoding="utf-8")
+    res = bridge.Result(task_id=t7)
+    await bridge.harvest(res)
+    landed = db.one("SELECT * FROM themes WHERE id = ?", tid_ad)
+    check("текст по теме вне плана сел", landed["status"] == "draft",
+          landed["status"])
+    check("файл текста записан в папку бренда", bool(landed["asset"]),
+          "иначе Дизайнеру нечего верстать")
+
+    # Дизайнер до неё доходит: обе проверки посадки макета — тема в базе
+    # и утверждённый текст — пройдены, и отказ остаётся только по макету.
+    try:
+        await design.land(CHAT, {"theme_id": tid_ad})
+        why = ""
+    except Exception as e:                                    # noqa: BLE001
+        why = str(e)
+    check("макет упирается в макет, а не в тему",
+          "нет в базе" not in why and "утверждённого текста" not in why, why)
 
     # ── 7б-2. Посадка макета Дизайнера ────────────────────────────────
     #

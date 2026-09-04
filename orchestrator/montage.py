@@ -1150,36 +1150,18 @@ def wants_split(ask: str) -> bool:
     return any(w in low for w in SPLIT_WORDS)
 
 
-def _next_id(chat_id: int, day: str, plat: str) -> str:
-    """Свободный id темы на сегодня. Формат тот же, что у плана."""
-    n = 1
-    while True:
-        tid = f"{day}-{plat}-{n:02d}"
-        if db.one("SELECT id FROM themes WHERE id = ? AND chat_id = ?",
-                  tid, chat_id) is None:
-            return tid
-        n += 1
-
-
 def _theme(chat_id: int, frag, plat: str, fmt: str) -> dict[str, Any]:
     """Завести тему под кусок записи.
 
-    Дата остаётся пустой намеренно: слот в плане ставит Стратег, а
-    нарезка приходит от человека с камерой, а не из плана. Тема ложится
-    в базу готовой к публикации, но не занимает чужой день.
+    Тема ложится в базу готовой к публикации: работа уже сделана, резать
+    и рендерить осталось коду. Всё остальное — свободный id, пустая дата,
+    `src = 'adhoc'` — общее правило темы вне плана, и живёт оно в
+    `desk.adhoc`: тем же швом заводится тема под пост, которого не было
+    в плане.
     """
-    tid = _next_id(chat_id, desk.today(chat_id), plat)
-    with db.tx() as c:
-        c.execute(
-            "INSERT INTO themes (id, chat_id, plat, format, title, hook, "
-            "why, src, status) VALUES (?,?,?,?,?,?,?,'adhoc','ready')",
-            (tid, chat_id, plat, fmt, frag.title or frag.hook, frag.hook,
-             frag.why))
-    row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
-                 tid, chat_id)
-    return dict(row) if row else {"id": tid, "chat_id": chat_id,
-                                  "plat": plat, "format": fmt,
-                                  "title": frag.title, "hook": frag.hook}
+    return desk.adhoc(chat_id, plat=plat, fmt=fmt,
+                      title=frag.title or frag.hook, hook=frag.hook,
+                      why=frag.why, status="ready")
 
 
 async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]:

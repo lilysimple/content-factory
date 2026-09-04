@@ -73,6 +73,72 @@ def drafted(chat_id: int, theme_id: str, asset: str) -> None:
                   (asset, theme_id, chat_id))
 
 
+# ── тема вне плана ────────────────────────────────────────────────────
+#
+# Слот в плане ставит Стратег, но не всякая работа приходит из плана.
+# Человек снял дубль из головы или попросил пост по теме, которой в
+# плане нет и не будет, — тогда тема заводится **по факту работы**, а не
+# работа по теме. Первым так стал монтаж; дом у этого правила один,
+# здесь: вторая копия INSERT разъехалась бы с первой на первой починке.
+#
+# Дата остаётся пустой намеренно: тема не из плана и чужой день занимать
+# не должна. `src = 'adhoc'` отличает её от плановой навсегда — по нему
+# видно, что слот под неё никто не ставил.
+
+# Площадки, под которые в заводе есть холст, шаблоны и пути к артефактам.
+# Список закрыт: `plat` уезжает в id темы и в имена файлов, и опечатка
+# здесь заводит тему, которую потом не найдёт ни Дизайнер, ни Публикатор.
+PLATS = ("telegram", "instagram", "youtube")
+
+# Статусы, в которых тему заводят по факту. `idea` — работа впереди
+# (текст ещё пишется), `ready` — работа уже сделана (ролик смонтирован).
+ADHOC_STATUS = ("idea", "ready")
+
+
+def next_id(chat_id: int, day: str, plat: str) -> str:
+    """Свободный id темы на день. Формат тот же, что у плана."""
+    n = 1
+    while True:
+        tid = f"{day}-{plat}-{n:02d}"
+        if db.one("SELECT id FROM themes WHERE id = ? AND chat_id = ?",
+                  tid, chat_id) is None:
+            return tid
+        n += 1
+
+
+def adhoc(chat_id: int, *, plat: str, fmt: str, title: str, hook: str = "",
+          why: str = "", rubric: str = "", status: str = "idea") -> dict[str, Any]:
+    """Завести тему вне плана. Возвращает тему строкой базы.
+
+    Отказ здесь громкий, а не тихий дефолт: тема с чужой площадкой или
+    без заголовка доедет до Дизайнера холстом не того размера и до
+    Публикатора комплектом без имени.
+    """
+    plat = (plat or "").strip().lower()
+    if plat not in PLATS:
+        raise NoWork(f"площадка «{plat or 'не названа'}» не из набора: "
+                     + ", ".join(PLATS))
+    if not (title := (title or "").strip()):
+        raise NoWork("у темы вне плана нет заголовка: по нему её потом "
+                     "ищет человек")
+    if status not in ADHOC_STATUS:
+        raise NoWork(f"статус «{status}» теме вне плана не ставится: "
+                     + ", ".join(ADHOC_STATUS))
+
+    tid = next_id(chat_id, today(chat_id), plat)
+    with db.tx() as c:
+        c.execute("INSERT INTO themes (id, chat_id, plat, format, rubric, "
+                  "title, hook, why, src, status) "
+                  "VALUES (?,?,?,?,?,?,?,?,'adhoc',?)",
+                  (tid, chat_id, plat, (fmt or "").strip(), rubric.strip(),
+                   title, hook.strip(), why.strip(), status))
+    log.info("тема вне плана %s: %s / %s", tid, plat, fmt or "без формата")
+    row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
+                 tid, chat_id)
+    return dict(row) if row else {"id": tid, "chat_id": chat_id, "plat": plat,
+                                  "format": fmt, "title": title, "hook": hook}
+
+
 def brief(theme: dict[str, Any]) -> list[str]:
     """Тема списком «поле: значение». Пустые поля не показываем вовсе."""
     return [f"- {label}: {theme[key]}"
