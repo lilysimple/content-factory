@@ -83,7 +83,7 @@ async def main() -> None:
     got = {r["date"] for r in rows()}
     check("нераспознанная дата не записана",
           "как-нибудь на неделе" not in got, f"в базе {sorted(got)}")
-    card = reg.last()
+    card = reg.last_in(strategy.DRAFT_TOPIC)
     check("карточка не падает на кривой дате", card is not None
           and "Traceback" not in (card.text or ""))
 
@@ -120,8 +120,9 @@ async def main() -> None:
     reg.clear()
     install(plan([{"date": win[1], "goal": "продажа", "title": "чужая цель"}]))
     await strategy.run(reg, CHAT, "план")
-    check("карточка собралась", reg.last() is not None
-          and "Баланс" in reg.last().text, "баланс не посчитался")
+    draft = reg.last_in(strategy.DRAFT_TOPIC)
+    check("карточка собралась", draft is not None
+          and "Баланс" in draft.text, "баланс не посчитался")
 
     # ── 7. окно занято целиком ────────────────────────────────────────
     print("\n7. Свободных дат нет")

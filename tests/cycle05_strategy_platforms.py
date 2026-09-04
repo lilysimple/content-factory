@@ -76,7 +76,7 @@ async def main() -> None:
                                      for p in strategy.PLANNED},
           str(sorted(r["id"] for r in got)))
 
-    card = reg.last()
+    card = reg.last_in(strategy.DRAFT_TOPIC)
     check("в карточке видны площадки",
           all(p in card.text for p in strategy.PLANNED),
           "площадка не показана")

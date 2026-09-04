@@ -30,7 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import cfg                                            # noqa: E402
-from orchestrator.imagery import convert, slug                    # noqa: E402
+from orchestrator.imagery import INDEX, convert, slug             # noqa: E402
 
 # Потолок фотобанка. Не про диск: папку бренда отдают клиенту, а
 # `photos.md` человек раскладывает руками — по шести сотням кадров
@@ -38,7 +38,6 @@ from orchestrator.imagery import convert, slug                    # noqa: E402
 # отбор под обложки, а не вся съёмка.
 SANE = 60
 
-INDEX = ".photos-index.json"
 ALBUM_RX = re.compile(r"^Альбом в Фото:\s*(.+?)\s*$", re.M)
 
 

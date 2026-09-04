@@ -87,7 +87,7 @@ async def main() -> None:
           all(r["id"] == f"{r['date']}-telegram-01" for r in rows),
           str([r["id"] for r in rows]))
 
-    card = reg.last()
+    card = reg.last_in(strategy.DRAFT_TOPIC)
     check("карточка от Стратега", card.role == "strategy", card.role)
     check("кнопки на карточке",
           card.buttons == ["plan:ok", "plan:fix", "plan:redo"],

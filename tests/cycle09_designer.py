@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 
 import harness
 from harness import CHAT, FakeRegistry, check, report
@@ -15,7 +16,8 @@ from harness import CHAT, FakeRegistry, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
-from orchestrator import agent, design, desk, imagegen                          # noqa: E402
+from orchestrator import agent, design, desk, imagegen, imagery   # noqa: E402
+from orchestrator.desk import NoWork                               # noqa: E402
 from storage import db                                            # noqa: E402
 
 db.init(cfg.db_path)
@@ -616,6 +618,75 @@ async def main() -> None:
     made = b.path(f"posts/{tid}-cover.html").read_text(encoding="utf-8")
     check("кавычка в слоте экранирована", "&quot;" in made, made[:400])
     check("макет всё равно собрался", b.path(f"posts/{tid}-cover.png").exists())
+
+    # ── 12. фотобанк пополняется из чата ──────────────────────────────
+    #
+    # Топик 📸 Фотобанк был декорацией: банк рос только из альбома «Фото»,
+    # то есть с ноутбука, а снимают на телефон. Здесь проверяется то, что
+    # обработчик зовёт: имя из подписи, дубль по id файла, честный размер.
+    print("\n12. Фотобанк пополняется из чата")
+    images = b.path("design/assets/images")
+    was = len(design._photos(b))
+    src = images / design._photos(b)[0]
+    big = src.read_bytes()
+
+    got = design.stash_photo(b, big, name="Рабочее место, утро",
+                             key="tg:AAA")
+    check("файл лёг в фотобанк", (images / got.name).is_file(), got.name)
+    check("имя из подписи латиницей", got.name == "rabochee-mesto-utro.jpg",
+          got.name)
+    check("банк вырос на один", got.total == was + 1,
+          f"{was} → {got.total}")
+    check("это своё фото, а не машинное",
+          not got.name.startswith(design.NOT_OWN), got.name)
+    check("новое фото видно ротации", got.name in design._photos(b))
+
+    # Тот же кадр по второму разу: в чат он прилетает чаще, чем кажется,
+    # а на дублях ротация фона слепнет.
+    again = design.stash_photo(b, big, name="Другая подпись",
+                               key="tg:AAA")
+    check("дубль по id не кладётся", again.seen and again.name == got.name,
+          again.name)
+    check("банк не вырос на дубле", again.total == got.total,
+          f"{got.total} → {again.total}")
+    check("второго файла нет",
+          not (images / "drugaya-podpis.jpg").is_file())
+
+    # Без подписи и без имени файла кадр всё равно имеет имя, и второй не
+    # затирает первый.
+    first = design.stash_photo(b, big, key="tg:BBB")
+    second = design.stash_photo(b, big, key="tg:CCC")
+    check("безымянное получает имя", first.name == "photo.jpg", first.name)
+    check("второе безымянное не затирает первое",
+          second.name == "photo-02.jpg", second.name)
+
+    # Сжатое телеграмом фото (1280 по длинной стороне) до холста не
+    # дотягивает вдвое. Кадр берём, но человеку про это говорим.
+    small_file = b.path("posts") / "small.jpg"
+    small_file.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["sips", "-s", "format", "jpeg", "-Z", "800",
+                    str(src), "--out", str(small_file)],
+                   check=True, capture_output=True)
+    small = design.stash_photo(b, small_file.read_bytes(), name="сжатое",
+                               key="tg:DDD")
+    check("сжатое названо мелким", small.side < design.PHOTO_MIN,
+          f"{small.side} px")
+    check("сжатое не растянуто до холста",
+          max(imagery.measure(images / small.name)) == small.side,
+          f"{small.side} → {imagery.measure(images / small.name)}")
+    check("крупное ужато под холст",
+          max(imagery.measure(images / got.name)) <= imagery.LONG_SIDE,
+          str(imagery.measure(images / got.name)))
+
+    # Не картинка — это ответ человеку, а не сбой завода.
+    try:
+        design.stash_photo(b, "не картинка вовсе".encode(),
+                           name="мусор", key="tg:EEE")
+        check("на битом файле отказ", False, "исключения не было")
+    except NoWork as e:
+        check("на битом файле отказ", "не открылся" in str(e), str(e))
+    check("битое в банк не попало",
+          "musor.jpg" not in design._photos(b))
 
 
 asyncio.run(main())

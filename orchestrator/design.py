@@ -21,6 +21,7 @@ import html as _html
 import json as _json
 import re
 import shutil
+import subprocess
 import tempfile as _tmp
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,7 +30,7 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import ROOT, cfg
-from orchestrator import agent, desk, imagegen, publisher, stock
+from orchestrator import agent, desk, imagegen, imagery, publisher, stock
 from orchestrator.desk import NoWork
 from storage import db
 
@@ -344,6 +345,76 @@ def _photos(b) -> list[str]:
         return []
     return sorted(f.name for f in folder.iterdir()
                   if f.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"})
+
+
+# Длинная сторона, ниже которой фон поедет мылом. Холст 1080×1920
+# снимается с `--force-device-scale-factor=2`, то есть 2160×3840, и
+# телеграмное сжатие фото (1280 по длинной стороне) до него не дотягивает
+# вдвое. Файл всё равно берём — но человеку про это говорим, пока он ещё
+# у телефона и может переслать файлом.
+PHOTO_MIN = 1600
+
+# Сколько знаков подписи берём в имя файла. Имя уезжает в `photos.md` и в
+# HTML макета, и «rabochee-mesto-utrom-kogda-eshe-nikto-ne-pishet» там
+# читать невозможно.
+PHOTO_NAME = 40
+
+
+@dataclass(frozen=True)
+class Stashed:
+    """Что стало с присланным кадром. Читает обработчик, чтобы ответить."""
+    name: str            # имя файла в папке бренда
+    side: int            # длинная сторона исходника, точки
+    seen: bool           # это фото уже лежало в банке
+    total: int           # сколько фото в банке теперь
+
+
+def stash_photo(b, blob: bytes, *, name: str = "", key: str = "",
+                suffix: str = ".jpg") -> Stashed:
+    """Присланное фото в фотобанк бренда.
+
+    Фотобанк пополнялся только из альбома «Фото» (`tools/photos_pull.py`),
+    то есть с ноутбука и руками. Топик 📸 Фотобанк при этом висел в
+    структуре с первого дня и не делал ничего: снятое на телефон человек
+    кидал в чат, а оно уходило перечитывать профиль.
+
+    `key` — id файла у отправителя. По нему присланное дважды не ложится
+    дублем: один и тот же кадр приезжает в чат по второму разу чаще, чем
+    кажется, а ротация фона на дублях слепнет.
+    """
+    images = b.path("design/assets/images")
+    images.mkdir(parents=True, exist_ok=True)
+
+    index = imagery.index_read(images)
+    if key and (images / index.get(key, "")).is_file():
+        got = index[key]
+        return Stashed(got, max(imagery.measure(images / got)), True,
+                       len(_photos(b)))
+
+    # Без подписи имя будет `photo.jpg`, `photo-02.jpg` и так далее.
+    # Человек переименует их сам, когда будет раскладывать по целям в
+    # `photos.md`: угадывать сюжет по байтам код не умеет.
+    base = imagery.slug(name)[:PHOTO_NAME].strip("-") or "photo"
+    fname = imagery.free_name(images, base)
+
+    with _tmp.TemporaryDirectory(prefix="photo-") as tmp:
+        raw = Path(tmp) / f"raw{suffix or '.jpg'}"
+        raw.write_bytes(blob)
+        try:
+            side = max(imagery.measure(raw))
+            imagery.convert(raw, Path(tmp) / fname)
+        except subprocess.CalledProcessError as e:
+            # Не картинка или битые байты. Это ответ человеку, а не сбой
+            # завода: он прислал файл и ждёт строки о том, что с ним.
+            raise NoWork("файл не открылся как изображение: "
+                         f"{e.stderr.decode()[:120].strip()}") from e
+        (images / fname).write_bytes((Path(tmp) / fname).read_bytes())
+
+    if key:
+        index[key] = fname
+        imagery.index_write(images, index)
+    log.info("фотобанк пополнен: %s (%s px)", fname, side)
+    return Stashed(fname, side, False, len(_photos(b)))
 
 
 def _photo_rules(b) -> dict[str, list[str]]:

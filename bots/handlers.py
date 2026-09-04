@@ -21,12 +21,13 @@ from bots.router import is_footage, resolve
 from config import cfg
 from orchestrator import (bridge, design, desk, editor, montage, onboarding,
                           publisher, reels, refresh, reply, research, strategy)
+from orchestrator.desk import NoWork
 from storage import db
 
 log = logging.getLogger("handlers")
 
 # Куда отвечать, если команду дали в General: у каждой задачи свой топик.
-TOPIC = {"plan": "strategy", "post": "review", "reels": "reels",
+TOPIC = {"plan": "review", "post": "review", "reels": "reels",
          "research": "research", "design": "design", "idea": "strategy"}
 
 # Роль, которую распознал старый маршрутизатор, → workflow моста.
@@ -188,14 +189,19 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         # до одного текста, и в прогоне 2026-08-31-plan-04 так и вышло:
         # задача звалась `plan`, отработал Редактор, а кнопок под текстом
         # не было — их искали по слову «post», которого в шапке не стояло.
-        kb = None
+        # План уходит не туда, где спросили, а в «✍️ На ревью»: черновик
+        # живёт там, где с ним спорят, а «🎯 Стратегия» держит только
+        # утверждённое. Путь моста и путь старого Стратега кладут его
+        # одинаково — `strategy.show_draft` один на двоих.
         if res.plan_ids:
             strategy.remember(chat_id, res.plan_ids)
-            kb = strategy.kb("bplan")
-        elif len(res.post_ids) == 1:
-            kb = editor.kb(res.post_ids[0], "bpost")
-
-        await registry.say("assistant", chat_id, res.text, topic=tkey, kb=kb)
+            await strategy.show_draft(registry, chat_id, res.text,
+                                      role="assistant", prefix="bplan")
+        else:
+            kb = (editor.kb(res.post_ids[0], "bpost")
+                  if len(res.post_ids) == 1 else None)
+            await registry.say("assistant", chat_id, res.text, topic=tkey,
+                               kb=kb)
 
         # Макет уезжает человеку картинками и файлами, а не строкой в
         # чате: показывает его тот же `design.show`, что и у старого
@@ -313,6 +319,72 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             "когда неделя закроется.", topic="metrics")
         return True
 
+    # ── фото в топике Фотобанк ────────────────────────────────────────
+    MAX_PHOTO_MB = 20        # тот же потолок скачивания у Bot API
+
+    async def handle_photo(chat_id: int, msg: Message) -> bool:
+        """Принять снимок, брошенный в 📸 Фотобанк.
+
+        Топик стоял в структуре с первого дня и не делал ничего: фото из
+        него уходило в `refresh` перечитывать профиль, а фотобанк
+        пополнялся только с ноутбука, из альбома «Фото»
+        (`tools/photos_pull.py`). Снято при этом на телефон, и человек
+        оттуда же и кидает.
+        """
+        b = desk.brand(chat_id)
+        if b is None:
+            return False
+
+        doc = msg.document
+        if doc is not None and not (doc.mime_type or "").startswith("image/"):
+            # Не картинка — значит материал профиля, и разбирать его
+            # должен `refresh`, а не фотобанк.
+            return False
+        media = doc or (msg.photo[-1] if msg.photo else None)
+        if media is None:
+            return False
+        if media.file_size and media.file_size > MAX_PHOTO_MB * 1024 * 1024:
+            await registry.say(
+                "design", chat_id,
+                f"Файл больше {MAX_PHOTO_MB} МБ — Telegram не отдаёт такие "
+                "ботам. Пришлите пожатым.", topic="photos")
+            return True
+
+        buf = await registry.bot("design").download(media.file_id)
+        name = (msg.caption or "").strip() or Path(
+            getattr(media, "file_name", "") or "").stem
+        try:
+            got = design.stash_photo(
+                b, buf.read(), name=name,
+                key=f"tg:{media.file_unique_id}",
+                suffix=Path(getattr(media, "file_name", "") or "").suffix)
+        except NoWork as e:
+            await registry.say("design", chat_id, str(e), topic="photos")
+            return True
+
+        if got.seen:
+            await registry.say(
+                "design", chat_id,
+                f"Это фото уже в банке: <code>{got.name}</code>. Дублем не "
+                "кладу — на дублях слепнет ротация фона.", topic="photos")
+            return True
+
+        note = ""
+        if got.side < design.PHOTO_MIN:
+            # Фото, отправленное картинкой, телеграм жмёт до 1280 по
+            # длинной стороне, а холст снимается вдвое крупнее. Сказать
+            # надо сейчас, пока человек у телефона и может переслать
+            # файлом: на обложке это видно, а в чате уже поздно.
+            note = (f" Только длинная сторона {got.side} точек — на обложке "
+                    "будет мылом. Под фон пришлите тот же кадр файлом.")
+        await registry.say(
+            "design", chat_id,
+            f"Забрал в фотобанк: <code>{got.name}</code>, всего "
+            f"{got.total} фото.{note} Под какую цель ставить — "
+            "строкой в <code>design/photos.md</code>; что не вписано, идёт "
+            "ротацией по всей папке.", topic="photos")
+        return True
+
     # ── обычное сообщение ─────────────────────────────────────────────
     @dp_assistant.message(F.text | F.voice | F.photo | F.document | F.video)
     async def on_message(msg: Message) -> None:
@@ -347,6 +419,11 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         # его должен Ресёрчер, а не распаковка ЯДРА.
         if tkey == "metrics" and (msg.photo or msg.document):
             if await handle_stats(chat_id, msg):
+                return
+
+        # Фото в 📸 Фотобанк это сырьё для обложек, а не материал профиля.
+        if tkey == "photos" and (msg.photo or msg.document):
+            if await handle_photo(chat_id, msg):
                 return
 
         # Ответ на вопрос про события недели: он не новая задача, а
@@ -546,12 +623,10 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             if action == "ok":
                 # Темы остаются `idea`: утверждён смысл, текстов ещё нет.
                 strategy.remember(chat_id, [])
-                await registry.say(
-                    "assistant", chat_id,
-                    f"Утвердила, {len(ids)} тем в плане. Выгрузка лежит в "
-                    "<code>plans/</code> в папке бренда.\n\n"
-                    "Дальше за текстами: скажи «напиши пост», и возьму "
-                    "ближайшую тему.", topic=tkey)
+                await strategy.approve(
+                    registry, chat_id, ids, role="assistant",
+                    nudge="Дальше за текстами: скажи «напиши пост», "
+                          "и возьму ближайшую тему.")
                 return
             if action == "fix":
                 _await_plan_fix[chat_id] = tkey

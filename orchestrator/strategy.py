@@ -570,6 +570,19 @@ def land(chat_id: int, data: dict[str, Any], *,
 _batch: dict[int, list[str]] = {}
 _awaiting_fix: set[int] = set()
 
+# Текст последней показанной карточки: по кнопке «Утвердить» тот же план
+# перевыкладывается в «Стратегию» целиком. Собирать его заново нечем —
+# карточка рисуется по `Plan`, которого после хода уже нет, а у моста
+# его не было вовсе.
+_shown: dict[int, str] = {}
+
+# Черновик и утверждённое живут в разных топиках, и это не косметика:
+# «✍️ На ревью» — то, с чем ещё спорят, «🎯 Стратегия» — то, по чему
+# работают. План, оставленный в одном топике, смешивает эти две вещи, и
+# через неделю непонятно, какая из четырёх карточек в силе.
+DRAFT_TOPIC = "review"
+PLAN_TOPIC = "strategy"
+
 
 def kb(prefix: str = "plan") -> InlineKeyboardMarkup:
     """Кнопки согласования плана. Префикс говорит, чей план согласуют.
@@ -589,14 +602,20 @@ def kb(prefix: str = "plan") -> InlineKeyboardMarkup:
     ]])
 
 
-def remember(chat_id: int, ids: list[str]) -> None:
+def remember(chat_id: int, ids: list[str], card_text: str = "") -> None:
     """Запомнить батч, по которому работают кнопки.
 
     Публичная точка входа для моста: темы туда кладёт `strategy.land`, а
     знать про них должен тот же `_batch`, иначе «Другие темы» под планом
     из моста удалят чужой батч или ничего.
+
+    `card_text` — то, что человек увидел черновиком. Пустая строка не
+    затирает запомненное: `remember(chat_id, [])` снимает батч после
+    утверждения, а текст к этому моменту уже нужен для перевыкладки.
     """
     _batch[chat_id] = list(ids)
+    if card_text:
+        _shown[chat_id] = card_text
 
 
 def batch(chat_id: int) -> list[str]:
@@ -611,6 +630,7 @@ def forget(chat_id: int) -> int:
 
 def _drop(chat_id: int) -> int:
     """Убрать неутверждённый батч. Утверждённое и начатое не трогаем."""
+    _shown.pop(chat_id, None)
     ids = _batch.pop(chat_id, [])
     if not ids:
         return 0
@@ -625,6 +645,45 @@ def _drop(chat_id: int) -> int:
 def wants_fix(chat_id: int) -> bool:
     """Человек нажал «Правки» и сейчас пишет, что именно поправить."""
     return chat_id in _awaiting_fix
+
+
+async def show_draft(reg, chat_id: int, text: str, *, role: str = "strategy",
+                     prefix: str = "plan") -> None:
+    """Показать черновик плана: карточка в «На ревью», строка в General.
+
+    Один вход на оба пути — старого Стратега и мост, — потому что топик
+    черновика это свойство плана, а не того, кто его собрал.
+
+    Строка в General не дублирует план, а зовёт: топики в супергруппе
+    свёрнуты, и собранная неделя без окрика лежит непрочитанной ровно до
+    того дня, на который была рассчитана.
+    """
+    _shown[chat_id] = text
+    await reg.say(role, chat_id, text, kb=kb(prefix), topic=DRAFT_TOPIC)
+    await reg.say(role, chat_id,
+                  "🎯 Собрала план недели, он в «✍️ На ревью» и ждёт "
+                  "утверждения.", topic="general")
+
+
+async def approve(reg, chat_id: int, ids: list[str], *,
+                  role: str = "strategy", nudge: str = "") -> None:
+    """Утверждённый план перевыложить в «Стратегию» и позвать в General.
+
+    Черновик остаётся там, где с ним спорили. В «🎯 Стратегия» попадает
+    только то, по чему уже работают, — иначе топик перестаёт отвечать на
+    единственный вопрос, ради которого в него заходят: что в силе.
+    """
+    head = (f"✅ <b>План недели утверждён</b> — {len(ids)} тем.\n"
+            "Выгрузка лежит в <code>plans/</code> в папке бренда.")
+    body = _shown.pop(chat_id, "")
+    await reg.say(role, chat_id,
+                  f"{head}\n\n{body}" if body else head, topic=PLAN_TOPIC)
+    if nudge:
+        await reg.say(role, chat_id, nudge, topic=PLAN_TOPIC,
+                      with_label=False)
+    await reg.say(role, chat_id,
+                  f"✅ План недели утверждён, {len(ids)} тем — лежит в "
+                  "«🎯 Стратегия».", topic="general")
 
 
 async def run(reg, chat_id: int, ask: str, topic: str = "strategy") -> None:
@@ -654,8 +713,7 @@ async def run(reg, chat_id: int, ask: str, topic: str = "strategy") -> None:
         return
 
     _batch[chat_id] = [t["id"] for t in saved]
-    await reg.say("strategy", chat_id, card(brand_name, plan, saved),
-                  kb=kb(), topic=topic)
+    await show_draft(reg, chat_id, card(brand_name, plan, saved))
 
 
 async def revise(reg, chat_id: int, instruction: str,
@@ -678,12 +736,9 @@ async def on_callback(reg, chat_id: int, action: str,
             return
         # Темы остаются `idea`: утверждён смысл, а текстов ещё нет.
         # Следующий шаг за Редактором, и врать про него нельзя.
-        await reg.say(
-            "strategy", chat_id,
-            f"Утвердил, {len(ids)} тем в плане. Выгрузка лежит в "
-            "<code>plans/</code> в папке бренда.\n\n"
-            "Дальше за Редактором: скажи «напиши пост», и он возьмёт "
-            "ближайшую тему.", topic=topic)
+        await approve(reg, chat_id, ids,
+                      nudge="Дальше за Редактором: скажи «напиши пост», "
+                            "и он возьмёт ближайшую тему.")
         return
 
     if action == "fix":
