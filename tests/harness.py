@@ -53,6 +53,23 @@ def setup() -> None:
                 if f.is_file():
                     f.unlink()
 
+    # Фотобанк чистим не целиком, а от машинных кадров: своя съёмка это
+    # профиль тенанта, а сгенерированное и стоковое — производное, и
+    # попадает оно туда живой работой бота.
+    #
+    # Без этого `cycle09` требует банк без единого `gen-`, получает его
+    # с кадром, который человек выбрал кнопкой вчера, и падает. Причём
+    # падает не сразу: первый прогон на чистом бренде проходит, а все
+    # следующие нет, и выглядит это как плавающий тест, а не как
+    # зависимость от чужой работы.
+    assets = TMP / "brands" / "lily-space" / "design" / "assets"
+    for f in (assets / "images").glob("*"):
+        if f.is_file() and f.name.startswith(("gen-", "stock-")):
+            f.unlink()
+    for name in ("gen-credits.md", "stock-credits.md"):
+        (assets / name).unlink(missing_ok=True)
+    shutil.rmtree(assets / ".gen", ignore_errors=True)
+
     os.environ["DB_PATH"] = str(TMP / "factory.db")
     os.environ["BRANDS_PATH"] = str(TMP / "brands")
     sys.path.insert(0, str(REPO))
