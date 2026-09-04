@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,8 +22,85 @@ TMP = Path(__file__).parent / ".sandbox"
 CHAT = -1003990495505
 
 
+def live_pids() -> list[int]:
+    """Пиды живого завода: `main.py`, запущенный из этого репозитория.
+
+    Одного `pgrep` мало. Имя `main.py` носит половина питоновских
+    проектов, и стенд, отказавшийся стартовать из-за чужого процесса,
+    хуже стенда без проверки: он врёт про причину. Поэтому у каждого
+    кандидата спрашивается рабочая папка, и совпадение с репозиторием
+    и есть доказательство.
+
+    `lsof` тут не роскошь: на macOS `ps` отдаёт путь к интерпретатору,
+    а не к скрипту, и cwd по нему не узнать. Нет `lsof` — считаем, что
+    завода нет: ложная тревога дороже пропуска, прогон всё равно
+    покажет гонку отказами.
+    """
+    try:
+        found = subprocess.run(["pgrep", "-f", "main.py"],
+                               capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    pids = []
+    for raw in found.stdout.split():
+        try:
+            pid = int(raw)
+        except ValueError:
+            continue
+        try:
+            where = subprocess.run(["lsof", "-a", "-p", raw, "-d", "cwd", "-Fn"],
+                                   capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for line in where.stdout.splitlines():
+            if line.startswith("n") and line[1:] == str(REPO):
+                pids.append(pid)
+                break
+    return pids
+
+
+def refuse_if_live() -> None:
+    """Стенд не стартует рядом с работающим заводом.
+
+    Причина не в чистоте, а в честности отчёта. Стенд копирует папку
+    бренда и боевую базу, а завод в них пишет: копирование ловит
+    `shutil.Error`, уборка — `Directory not empty`, и цикл падает целиком,
+    не дойдя до проверок. Выглядит это как поломка Дизайнера или
+    Публикатора, хотя сломана песочница.
+
+    Так и случилось 04.09: два прогона подряд на одном и том же коде
+    уронили разные наборы циклов — 9, 15, 18, 19, 20, потом 9, 11, 12,
+    14, 15, 18, 19, 21, — а цикл 20, упавший в первый раз, во второй
+    прошёл все 130 проверок. Полчаса ушло на поиск регрессии, которой не
+    было.
+
+    Отказ громкий и с командой: молчаливый пропуск вернул бы ту же
+    неопределённость, ради которой всё и затевалось.
+    """
+    if os.getenv("FACTORY_TESTS_ALLOW_LIVE") == "1":
+        return
+    pids = live_pids()
+    if not pids:
+        return
+    label = "space.lily.content-factory"
+    sys.exit(
+        "\n  Стенд не запущен: завод работает.\n\n"
+        f"  Живой процесс: {', '.join(str(p) for p in pids)}. Он пишет в папку\n"
+        "  бренда и в боевую базу, пока стенд их копирует, поэтому циклы\n"
+        "  падают на песочнице и врут про причину.\n\n"
+        "  Снять завод, прогнать стенд, поднять обратно:\n\n"
+        f"    launchctl bootout gui/$(id -u)/{label}\n"
+        "    ./.venv/bin/python tests/run.py\n"
+        "    ./deploy/install-agent.sh\n\n"
+        "  Осознанно рядом с живым заводом: FACTORY_TESTS_ALLOW_LIVE=1\n"
+    )
+
+
 def setup() -> None:
     """Свежая песочница на каждый прогон."""
+    refuse_if_live()
+
     if TMP.exists():
         shutil.rmtree(TMP)
     TMP.mkdir(parents=True)
@@ -116,6 +194,17 @@ class FakeRegistry:
 
     def last(self) -> Say | None:
         return self.sent[-1] if self.sent else None
+
+    def last_in(self, topic: str) -> Say | None:
+        """Последнее сообщение в названном топике.
+
+        Карточку плана нельзя брать последним сообщением: следом за ней в
+        General уходит строка-окрик, и `last()` возвращает её.
+        """
+        for s in reversed(self.sent):
+            if s.topic == topic:
+                return s
+        return None
 
     def texts(self) -> str:
         return "\n---\n".join(s.text for s in self.sent)

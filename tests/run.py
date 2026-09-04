@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import harness
+
 HERE = Path(__file__).parent
 PY = HERE.parent / ".venv" / "bin" / "python"
 
@@ -78,6 +80,11 @@ def run(name: str) -> tuple[int, int, list[str]]:
 
 
 def main(live: bool) -> int:
+    # Проверка живого завода стоит здесь, а не только в `harness.setup`:
+    # циклы идут подпроцессами, и отказ изнутри каждого напечатался бы
+    # тринадцать раз подряд как тринадцать разных поломок.
+    harness.refuse_if_live()
+
     plan = OFFLINE + (LIVE if live else [])
     ok_all = total_all = 0
     broken: list[tuple[str, list[str]]] = []
