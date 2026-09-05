@@ -123,6 +123,28 @@ CREATE TABLE IF NOT EXISTS bridge_runs (
     error              TEXT
 );
 
+-- Очередь задач к мосту. Мост берёт одну за раз — это потолок процесса
+-- Claude Code, а не пожелание, — но человек ставит задачи пачкой: «напиши
+-- пост», «ещё один», «и сценарий». До очереди вторая просьба получала
+-- отказ и пропадала: чтобы завод её увидел, надо было сидеть и повторять.
+--
+-- Здесь лежит только просьба, не задача. Папку и `input.md` собирает
+-- `create_task` в момент, когда очередь дошла: факты в контракте
+-- (свободные слоты, статусы тем) устаревают, пока строка ждёт, и задача,
+-- слепленная при постановке, ушла бы работать по позавчерашнему плану.
+CREATE TABLE IF NOT EXISTS bridge_queue (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL,
+    workflow   TEXT NOT NULL,
+    ask        TEXT NOT NULL,
+    topic      TEXT,                        -- ключ топика, куда отвечать
+    status     TEXT DEFAULT 'waiting',      -- waiting|taken|done|failed|dropped
+    created_at TEXT DEFAULT (datetime('now')),
+    taken_at   TEXT,
+    task_id    TEXT,                        -- id прогона, когда дошла очередь
+    error      TEXT
+);
+
 CREATE TABLE IF NOT EXISTS llm_usage (
     chat_id INTEGER NOT NULL,
     day     TEXT NOT NULL,

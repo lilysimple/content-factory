@@ -50,6 +50,11 @@ async def amain() -> None:
     if n := bridge.sweep():
         log.warning("брошенных прогонов моста закрыто: %s", n)
 
+    # Строка очереди, взятая процессом, которого больше нет, не идёт и не
+    # ждёт — то есть просто пропала, а человек ждёт ответа. Возвращаем.
+    if n := bridge.unstick():
+        log.warning("строк очереди возвращено в работу: %s", n)
+
     await registry.start()
 
     dp_assistant = Dispatcher()
@@ -60,11 +65,16 @@ async def amain() -> None:
     log.info("поехали: 1 ассистент + %s рабочих", len(workers))
 
     try:
+        # Очередь разбирается отдельной корутиной, а не внутри обработчика
+        # сообщения: пока обработчик ждёт получасовой прогон, aiogram не
+        # берёт следующие апдейты — и вторая просьба человека доходит до
+        # завода после того, как первая закончилась.
         await asyncio.gather(
             dp_assistant.start_polling(registry.bot("assistant"),
                                        allowed_updates=ASSISTANT_UPDATES),
             dp_workers.start_polling(*workers,
                                      allowed_updates=WORKER_UPDATES),
+            handlers.pump(),
         )
     finally:
         await registry.close()

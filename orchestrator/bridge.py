@@ -250,6 +250,122 @@ def sweep() -> int:
     return n
 
 
+# ── очередь ───────────────────────────────────────────────────────────
+#
+# `Busy` остаётся: мост по-прежнему держит один процесс Claude Code за
+# раз, и это потолок железа, а не политика. Очередь стоит **перед** ним и
+# меняет не потолок, а судьбу второй просьбы — раньше она получала отказ
+# и исчезала, теперь ждёт.
+#
+# Хранится просьба, а не задача: `create_task` зовётся в момент, когда
+# очередь дошла. Иначе `input.md` третьей по счёту задачи описывал бы
+# завод таким, каким он был двадцать минут и две публикации назад — со
+# свободными слотами, которые заняты, и темами `idea`, у которых уже есть
+# текст. Ровно на этом «напиши пост» три раза подряд написал бы три
+# текста по одной теме.
+
+QUEUE_MAX = 10               # на чат; каждая строка это минуты работы
+
+
+class QueueFull(RuntimeError):
+    """Очередь чата заполнена. Дальше копить бессмысленно."""
+
+
+def enqueue(chat_id: int, ask: str, *, workflow: str,
+            topic: str = "") -> tuple[int, int]:
+    """Поставить просьбу в очередь. Возвращает (id строки, место в очереди).
+
+    Место считается по всей очереди, а не по чату: мост один на завод,
+    и человеку важно, сколько задач стоит перед его, а не сколько из них
+    его собственных.
+    """
+    if len(waiting(chat_id)) >= QUEUE_MAX:
+        raise QueueFull(f"в очереди уже {QUEUE_MAX} задач")
+
+    with db.tx() as c:
+        cur = c.execute(
+            "INSERT INTO bridge_queue (chat_id, workflow, ask, topic) "
+            "VALUES (?, ?, ?, ?)", (chat_id, workflow, ask.strip(), topic))
+        qid = int(cur.lastrowid)
+    log.info("в очередь: %s «%s» (строка %s)", workflow, ask[:40], qid)
+    return qid, place(qid)
+
+
+def waiting(chat_id: int | None = None) -> list[Any]:
+    """Строки, которые ещё ждут. По возрастанию id, то есть по времени."""
+    if chat_id is None:
+        return db.q("SELECT * FROM bridge_queue WHERE status = 'waiting' "
+                    "ORDER BY id")
+    return db.q("SELECT * FROM bridge_queue WHERE status = 'waiting' "
+                "AND chat_id = ? ORDER BY id", chat_id)
+
+
+def place(qid: int) -> int:
+    """Какой по счёту стоит строка. 1 — следующая на выход, 0 — не ждёт."""
+    row = db.one("SELECT 1 FROM bridge_queue WHERE id = ? AND "
+                 "status = 'waiting'", qid)
+    if row is None:
+        return 0
+    ahead = db.one("SELECT count(*) AS n FROM bridge_queue WHERE "
+                   "status = 'waiting' AND id < ?", qid)
+    return int(ahead["n"]) + 1
+
+
+def take() -> Any:
+    """Взять следующую просьбу, если мост свободен. Иначе None.
+
+    Занятость спрашивается у `running`, а не у собственного статуса:
+    задачу мосту умеет ставить не только очередь (старые роли, стенд), и
+    два источника занятости разошлись бы молча.
+    """
+    if running():
+        return None
+    with db.tx() as c:
+        row = c.execute("SELECT * FROM bridge_queue WHERE status = 'waiting' "
+                        "ORDER BY id LIMIT 1").fetchone()
+        if row is None:
+            return None
+        c.execute("UPDATE bridge_queue SET status = 'taken', "
+                  "taken_at = datetime('now') WHERE id = ?", (row["id"],))
+    return row
+
+
+def settle(qid: int, *, status: str, task_id: str = "",
+           error: str = "") -> None:
+    """Закрыть строку очереди исходом."""
+    with db.tx() as c:
+        c.execute("UPDATE bridge_queue SET status = ?, task_id = ?, error = ? "
+                  "WHERE id = ?", (status, task_id, error[:500], qid))
+
+
+def drop_waiting(chat_id: int) -> int:
+    """Снять всё, что ещё не взято. Идущую задачу не трогает."""
+    with db.tx() as c:
+        cur = c.execute("UPDATE bridge_queue SET status = 'dropped' "
+                        "WHERE chat_id = ? AND status = 'waiting'", (chat_id,))
+    return cur.rowcount
+
+
+def unstick() -> int:
+    """Вернуть в очередь строки, взятые процессом, которого больше нет.
+
+    Родня `sweep`: завод перезапускается посреди работы (launchd поднимает
+    упавший, `kill -9` снимает застрявший), и строка остаётся `taken`
+    навсегда. Она не идёт и не ждёт — то есть просто пропала, а человек
+    ждёт ответа. Возвращаем в очередь: повторный прогон дешевле молчания.
+
+    Зовётся **на старте завода**, рядом со `sweep`, и только там: посреди
+    работы она вернула бы в очередь ту самую строку, которая сейчас идёт.
+    """
+    with db.tx() as c:
+        cur = c.execute("UPDATE bridge_queue SET status = 'waiting', "
+                        "taken_at = NULL WHERE status = 'taken'")
+        n = cur.rowcount
+    if n:
+        log.warning("строк очереди возвращено после перезапуска: %s", n)
+    return n
+
+
 def _slots(chat_id: int) -> list[str]:
     """Окно плана и свободные слоты — фактом, а не заданием посчитать.
 

@@ -9,6 +9,7 @@ callback_query приходит тому боту, который ОТПРАВИ
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -63,6 +64,210 @@ def topic_key_of(chat_id: int, thread_id: int | None) -> str | None:
         if row["topic_id"] == thread_id:
             return row["key"]
     return None
+
+
+# ── очередь задач к мосту ─────────────────────────────────────────────
+#
+# Мост держит один процесс Claude Code за раз, и это остаётся. Меняется
+# судьба второй просьбы: раньше `bridge.Busy` отвечал отказом, и просьба
+# исчезала — человек, поставивший подряд «напиши пост», «ещё один» и
+# «сценарий», получал один текст и два отказа. Теперь просьбы копятся, а
+# разбирает их `pump` по одной.
+#
+# Постановка и исполнение разведены намеренно. Обработчик сообщения
+# обязан вернуться быстро: пока он ждал прогон, aiogram держал апдейт, и
+# всё, что человек писал следом, разбиралось после — то есть через
+# двадцать минут.
+
+async def bridge_task(chat_id: int, ask: str, workflow: str,
+                      tkey: str) -> None:
+    """Поставить задачу в очередь и сказать человеку, какая она по счёту.
+
+    Один код на два входа — команду `/plan` и обычную просьбу словами.
+    Пока это лежало в одном обработчике, второй вход означал бы вторую
+    копию ожидания, отказов и журнала, и чинить их пришлось бы парой.
+    """
+    db.ensure_tenant(chat_id, cfg.default_tz)
+
+    # Прогрев к вебинару, о котором Стратег не знает, поставить нельзя,
+    # а спросить его самого посреди прогона некому. Поэтому спрашиваем
+    # здесь, до постановки, и только когда про это окно ещё не спрашивали.
+    if workflow == "plan" and not bridge.events_known(chat_id):
+        _await_events[chat_id] = (ask, workflow, tkey)
+        await registry.say("assistant", chat_id,
+                           bridge.events_question(chat_id), topic=tkey)
+        return
+
+    try:
+        _, spot = bridge.enqueue(chat_id, ask, workflow=workflow, topic=tkey)
+    except bridge.QueueFull as e:
+        await registry.say("assistant", chat_id,
+                           f"Больше не беру: {e}. Дождись, пока разберу "
+                           "накопленное, или сними очередь — /queue.",
+                           topic=tkey)
+        return
+
+    what = bridge.WORKFLOWS[workflow]
+    if spot == 1 and not bridge.running():
+        # Ждать молча минуты нельзя: молчание неотличимо от поломки.
+        await registry.say("assistant", chat_id,
+                           f"Приняла задачу: {what}. Собираю команду и "
+                           "начинаю работу, это займёт несколько минут.",
+                           topic=tkey)
+        return
+
+    ahead = spot - 1
+    await registry.say(
+        "assistant", chat_id,
+        f"Приняла задачу: {what}. Работаю по одной за раз, поэтому она "
+        f"{spot}-я в очереди — впереди {_tasks(ahead)}. Возьмусь сама, "
+        "отвечать не нужно.", topic=tkey)
+
+
+def _tasks(n: int) -> str:
+    """«впереди 2 задачи». Число словом не пишем, а склонение считаем."""
+    tail = "задач" if n % 100 // 10 == 1 else \
+        {1: "задача", 2: "задачи", 3: "задачи", 4: "задачи"}.get(n % 10, "задач")
+    return f"{n} {tail}"
+
+
+async def _deliver(chat_id: int, tkey: str, res) -> None:
+    """Вернуть человеку то, что мост привёз. Общий хвост на все задачи."""
+    task_id = res.task_id
+
+    if not res.ok:
+        await registry.say("assistant", chat_id,
+                           f"Не довела задачу {task_id} до конца: "
+                           f"{res.error}", topic=tkey)
+        return
+
+    # Посаженное согласуется теми же кнопками, что и у старых ролей.
+    # Кнопка без посадки была бы обманом: соглашаться не с чем, пока
+    # в базе ничего не изменилось.
+    #
+    # Кнопки выбираются по тому, что **село**, а не по тому, какой
+    # workflow объявлен в шапке задачи. Director вправе свернуть план
+    # до одного текста, и в прогоне 2026-08-31-plan-04 так и вышло:
+    # задача звалась `plan`, отработал Редактор, а кнопок под текстом
+    # не было — их искали по слову «post», которого в шапке не стояло.
+    # План уходит не туда, где спросили, а в «✍️ На ревью»: черновик
+    # живёт там, где с ним спорят, а «🎯 Стратегия» держит только
+    # утверждённое. Путь моста и путь старого Стратега кладут его
+    # одинаково — `strategy.show_draft` один на двоих.
+    if res.plan_ids:
+        strategy.remember(chat_id, res.plan_ids)
+        await strategy.show_draft(registry, chat_id, res.text,
+                                  role="assistant", prefix="bplan")
+    else:
+        kb = (editor.kb(res.post_ids[0], "bpost")
+              if len(res.post_ids) == 1 else None)
+        await registry.say("assistant", chat_id, res.text, topic=tkey,
+                           kb=kb)
+
+    # Макет уезжает человеку картинками и файлами, а не строкой в
+    # чате: показывает его тот же `design.show`, что и у старого
+    # Дизайнера, поэтому и кнопки под ним те же самые.
+    if res.landed_obj is not None:
+        await design.show(registry, chat_id, res.landed_obj,
+                          topic=tkey or "design")
+
+    # Текстов может быть несколько, а клавиатура у сообщения одна:
+    # тогда каждая тема получает свою строку со своими кнопками.
+    if len(res.post_ids) > 1:
+        for tid in res.post_ids:
+            await registry.say(
+                "assistant", chat_id,
+                f"Текст по теме <code>{tid}</code> записан, "
+                "тема в статусе draft.",
+                topic=tkey, kb=editor.kb(tid, "bpost"))
+
+    tail = [f"Задача <code>{task_id}</code>, {res.secs} с"]
+    if res.cost is not None:
+        # Это диагностика CLI, а не счёт: на подписке считаются лимиты.
+        tail.append(f"оценка по API-тарифу ${res.cost:.3f}")
+    if res.artifacts:
+        tail.append("файлы: " + ", ".join(res.artifacts))
+    await registry.say("assistant", chat_id, " · ".join(tail),
+                       topic="logs", with_label=False)
+
+
+async def _serve(row) -> None:
+    """Отработать одну строку очереди целиком: завести, прогнать, ответить."""
+    chat_id = int(row["chat_id"])
+    workflow = row["workflow"]
+    tkey = row["topic"] or TOPIC.get(workflow, "general")
+    qid = int(row["id"])
+
+    tenant = db.ensure_tenant(chat_id, cfg.default_tz)
+    b = desk.brand(chat_id)
+
+    # `input.md` собирается здесь, а не при постановке: пока строка ждала,
+    # слоты занялись, а темы сменили статус. Задача, слепленная в момент
+    # просьбы, работала бы по позавчерашнему заводу.
+    try:
+        task_id = bridge.create_task(
+            chat_id, row["ask"], workflow=workflow, today=desk.today(chat_id),
+            brand_slug=tenant["brand_slug"] or "",
+            brand_path=str(b.root) if b else "")
+    except bridge.Busy as e:
+        # Мост занял кто-то помимо очереди. Строку возвращаем ждать.
+        log.info("очередь ждёт: мост занят задачей %s", e)
+        bridge.settle(qid, status="waiting")
+        return
+    except Exception as e:                                   # noqa: BLE001
+        log.exception("строка очереди %s не завелась", qid)
+        bridge.settle(qid, status="failed", error=str(e))
+        await registry.say("assistant", chat_id,
+                           f"Задачу «{bridge.WORKFLOWS[workflow]}» завести не "
+                           f"вышло: {e}", topic=tkey)
+        return
+
+    bridge.settle(qid, status="taken", task_id=task_id)
+    await registry.say("assistant", chat_id,
+                       f"Берусь: {bridge.WORKFLOWS[workflow]}.\n"
+                       f"Задача <code>{task_id}</code>, "
+                       "это займёт несколько минут.", topic=tkey)
+
+    # Одной фразы на пять минут мало: человек не отличает «идёт работа»
+    # от «зависло». Мост зовёт это на каждый вход и выход субагента.
+    async def step(text: str) -> None:
+        await registry.say("assistant", chat_id, text, topic=tkey,
+                           with_label=False)
+
+    try:
+        res = await bridge.run(task_id, on_step=step)
+        await _deliver(chat_id, tkey, res)
+        bridge.settle(qid, status="done" if res.ok else "failed",
+                      task_id=task_id, error=res.error)
+    except Exception as e:                                   # noqa: BLE001
+        # Упасть тут значит унести с собой весь цикл разбора очереди, и
+        # завод замолчит до перезапуска. Поэтому исход всегда пишется.
+        log.exception("прогон %s из очереди сорвался", task_id)
+        bridge.settle(qid, status="failed", task_id=task_id, error=str(e))
+        await registry.say("assistant", chat_id,
+                           f"Задача {task_id} сорвалась: {e}", topic=tkey)
+
+
+async def pump(period: float = 3.0) -> None:
+    """Разбирать очередь по одной задаче. Живёт всё время работы завода.
+
+    Отдельная корутина, а не работа внутри обработчика сообщения: пока
+    обработчик ждал прогон, aiogram не разбирал следующие апдейты, и
+    вторая просьба человека доходила до завода через двадцать минут —
+    после того, как первая закончилась.
+    """
+    log.info("разбор очереди запущен")
+    while True:
+        try:
+            row = bridge.take()
+            if row is not None:
+                await _serve(row)
+                continue
+        except asyncio.CancelledError:
+            raise
+        except Exception:                                    # noqa: BLE001
+            log.exception("разбор очереди споткнулся")
+        await asyncio.sleep(period)
 
 
 def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
@@ -128,107 +333,6 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
     # не воспроизводилось: лог текст сообщений не пишет.
     _CMDS = "|".join(bridge.WORKFLOWS)
 
-    async def bridge_task(chat_id: int, ask: str, workflow: str,
-                          tkey: str) -> None:
-        """Довезти задачу до Director и вернуть ответ человеку.
-
-        Один код на два входа — команду `/plan` и обычную просьбу словами.
-        Пока это лежало в одном обработчике, второй вход означал бы вторую
-        копию ожидания, отказов и журнала, и чинить их пришлось бы парой.
-        """
-        tenant = db.ensure_tenant(chat_id, cfg.default_tz)
-        b = desk.brand(chat_id)
-
-        # Прогрев к вебинару, о котором Стратег не знает, поставить нельзя,
-        # а спросить его самого посреди прогона некому. Поэтому спрашиваем
-        # здесь, до запуска, и только когда про это окно ещё не спрашивали.
-        if workflow == "plan" and not bridge.events_known(chat_id):
-            _await_events[chat_id] = (ask, workflow, tkey)
-            await registry.say("assistant", chat_id,
-                               bridge.events_question(chat_id), topic=tkey)
-            return
-
-        try:
-            task_id = bridge.create_task(
-                chat_id, ask, workflow=workflow, today=desk.today(chat_id),
-                brand_slug=tenant["brand_slug"] or "",
-                brand_path=str(b.root) if b else "")
-        except bridge.Busy as e:
-            await registry.say("assistant", chat_id,
-                               f"Уже работаю над задачей {e}. "
-                               "Пока беру по одной за раз.", topic=tkey)
-            return
-
-        # Ждать молча минуты нельзя: молчание неотличимо от поломки.
-        await registry.say("assistant", chat_id,
-                           f"Приняла задачу: {bridge.WORKFLOWS[workflow]}. "
-                           "Собираю команду и начинаю работу.\n"
-                           f"Задача <code>{task_id}</code>, это займёт "
-                           "несколько минут.", topic=tkey)
-
-        # Одной фразы на пять минут мало: человек не отличает «идёт работа»
-        # от «зависло». Мост зовёт это на каждый вход и выход субагента.
-        async def step(text: str) -> None:
-            await registry.say("assistant", chat_id, text, topic=tkey,
-                               with_label=False)
-
-        res = await bridge.run(task_id, on_step=step)
-
-        if not res.ok:
-            await registry.say("assistant", chat_id,
-                               f"Не довела задачу {task_id} до конца: "
-                               f"{res.error}", topic=tkey)
-            return
-
-        # Посаженное согласуется теми же кнопками, что и у старых ролей.
-        # Кнопка без посадки была бы обманом: соглашаться не с чем, пока
-        # в базе ничего не изменилось.
-        #
-        # Кнопки выбираются по тому, что **село**, а не по тому, какой
-        # workflow объявлен в шапке задачи. Director вправе свернуть план
-        # до одного текста, и в прогоне 2026-08-31-plan-04 так и вышло:
-        # задача звалась `plan`, отработал Редактор, а кнопок под текстом
-        # не было — их искали по слову «post», которого в шапке не стояло.
-        # План уходит не туда, где спросили, а в «✍️ На ревью»: черновик
-        # живёт там, где с ним спорят, а «🎯 Стратегия» держит только
-        # утверждённое. Путь моста и путь старого Стратега кладут его
-        # одинаково — `strategy.show_draft` один на двоих.
-        if res.plan_ids:
-            strategy.remember(chat_id, res.plan_ids)
-            await strategy.show_draft(registry, chat_id, res.text,
-                                      role="assistant", prefix="bplan")
-        else:
-            kb = (editor.kb(res.post_ids[0], "bpost")
-                  if len(res.post_ids) == 1 else None)
-            await registry.say("assistant", chat_id, res.text, topic=tkey,
-                               kb=kb)
-
-        # Макет уезжает человеку картинками и файлами, а не строкой в
-        # чате: показывает его тот же `design.show`, что и у старого
-        # Дизайнера, поэтому и кнопки под ним те же самые.
-        if res.landed_obj is not None:
-            await design.show(registry, chat_id, res.landed_obj,
-                              topic=tkey or "design")
-
-        # Текстов может быть несколько, а клавиатура у сообщения одна:
-        # тогда каждая тема получает свою строку со своими кнопками.
-        if len(res.post_ids) > 1:
-            for tid in res.post_ids:
-                await registry.say(
-                    "assistant", chat_id,
-                    f"Текст по теме <code>{tid}</code> записан, "
-                    "тема в статусе draft.",
-                    topic=tkey, kb=editor.kb(tid, "bpost"))
-
-        tail = [f"Задача <code>{task_id}</code>, {res.secs} с"]
-        if res.cost is not None:
-            # Это диагностика CLI, а не счёт: на подписке считаются лимиты.
-            tail.append(f"оценка по API-тарифу ${res.cost:.3f}")
-        if res.artifacts:
-            tail.append("файлы: " + ", ".join(res.artifacts))
-        await registry.say("assistant", chat_id, " · ".join(tail),
-                           topic="logs", with_label=False)
-
     @dp_assistant.message(F.text.regexp(rf"^/({_CMDS})(@\S+)?(\s|$)"))
     async def on_bridge(msg: Message) -> None:
         chat_id = msg.chat.id
@@ -239,6 +343,45 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         tkey = (topic_key_of(chat_id, msg.message_thread_id)
                 or TOPIC.get(workflow, "strategy"))
         await bridge_task(chat_id, ask.strip(), workflow, tkey)
+
+    # ── очередь: посмотреть и снять ───────────────────────────────────
+    # Без этого пачку, поставленную сгоряча, нечем отменить: строки уже в
+    # базе, а идут они по одной по несколько минут каждая.
+    @dp_assistant.message(F.text.regexp(r"^/queue(@\S+)?(\s|$)"))
+    async def on_queue(msg: Message) -> None:
+        chat_id = msg.chat.id
+        if not cfg.chat_allowed(chat_id) or not db.topics_ready(chat_id):
+            return
+        tkey = topic_key_of(chat_id, msg.message_thread_id) or "general"
+        arg = (msg.text or "").partition(" ")[2].strip().lower()
+
+        if arg in {"clear", "стоп", "отмена", "сними", "очисти"}:
+            dropped = bridge.drop_waiting(chat_id)
+            now = bridge.running()
+            tail = (f" Задача <code>{now}</code> уже идёт, её не снимаю — "
+                    "она доработает." if now else "")
+            await registry.say(
+                "assistant", chat_id,
+                (f"Сняла из очереди {_tasks(dropped)}." if dropped
+                 else "В очереди и так пусто.") + tail, topic=tkey)
+            return
+
+        rows = bridge.waiting(chat_id)
+        now = bridge.running()
+        out = []
+        if now:
+            out.append(f"Сейчас идёт: <code>{now}</code>.")
+        elif not rows:
+            out.append("Очередь пуста, ничего не идёт.")
+        for i, r in enumerate(rows, 1):
+            ask = (r["ask"] or "").strip() or bridge.WORKFLOWS.get(
+                r["workflow"], r["workflow"])
+            out.append(f"{i}. {bridge.WORKFLOWS.get(r['workflow'], r['workflow'])}"
+                       f" — {ask[:80]}")
+        if rows:
+            out.append("")
+            out.append("Снять всё, что ещё не началось: <code>/queue clear</code>")
+        await registry.say("assistant", chat_id, "\n".join(out), topic=tkey)
 
     # ── кто-то зашёл или вышел ────────────────────────────────────────
     @dp_assistant.chat_member()
