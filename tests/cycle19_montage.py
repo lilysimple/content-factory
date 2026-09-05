@@ -454,6 +454,32 @@ def main() -> None:
           montage.fixes("подвинь заголовок на две строки ниже") == [],
           str(montage.fixes("подвинь заголовок на две строки ниже")))
 
+    print("\n27о. Карточка ролика переживает рестарт")
+    # Кнопка под пережившей рестарт карточкой поднимает работу из базы.
+    # Ролик ищется **файлом**, тем же швом, каким его ищет Публикатор:
+    # пока `_recover` смотрел в поле `asset`, куда `_save` намеренно
+    # ничего не кладёт, любая кнопка после перезапуска завода отвечала
+    # «этот монтаж уже неактуален» — и словарь субтитров поправить было
+    # нельзя вовсе.
+    fresh = desk.adhoc(CHAT, plat="instagram", fmt="reels",
+                       title="Дубль из головы", hook="хук", why="",
+                       status="ready")
+    check("без файла поднимать нечего",
+          montage._recover(CHAT, fresh["id"]) is None)
+    _brand().artifact(f"posts/{fresh['id']}-reel.mp4", b"\x00")
+    back = montage._recover(CHAT, fresh["id"])
+    check("файл на диске — карточка поднялась", back is not None)
+    check("ролик найден там, где его ищет Публикатор",
+          back is not None and back.out is not None
+          and back.out.name == f"{fresh['id']}-reel.mp4",
+          str(back.out if back else None))
+    check("поле asset для этого не нужно",
+          back is not None and not back.theme.get("asset"),
+          str(back.theme.get("asset") if back else None))
+    check("дубля на столе нет, и это честно",
+          back is not None and str(back.video) == "/dev/null",
+          str(back.video if back else None))
+
     print("\n27. Словарь живёт в папке бренда")
     b3 = _brand()
     b3.path(montage.LEXICON).unlink(missing_ok=True)

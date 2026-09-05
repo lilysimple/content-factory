@@ -1464,14 +1464,23 @@ def _sweep() -> None:
 # ── карточка и кнопки ─────────────────────────────────────────────────
 
 def _recover(chat_id: int, theme_id: str) -> Reel | None:
+    """Карточка, пережившая рестарт: тема из базы, ролик с диска.
+
+    Ролик ищется **файлом**, а не полем `asset`. Раньше искался полем — и
+    не находился никогда: путь к mp4 в `asset` роняет чтение как текст в
+    трёх местах, поэтому `_save` его туда намеренно не пишет. С того дня
+    любая кнопка под пережившей рестарт карточкой отвечала «этот монтаж
+    уже неактуален», включая «Правки»: словарь субтитров после
+    перезапуска завода поправить было нельзя вовсе.
+    """
     row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
                  theme_id, chat_id)
-    if row is None or not row["asset"] or not str(row["asset"]).endswith(".mp4"):
-        return None
     b = desk.brand(chat_id)
-    out = b.path(row["asset"]) if b else None
+    if row is None or b is None:
+        return None
+    out = publisher.reel_path(b, theme_id)
     return Reel(theme=dict(row), video=Path("/dev/null"), out=out) \
-        if out and out.exists() else None
+        if out else None
 
 
 table = desk.Desk("montage", corrections="montage-corrections.md",
