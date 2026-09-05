@@ -547,7 +547,52 @@ def card(dg: Digest) -> str:
     return "\n".join(out)
 
 
+# Просьба про фактуру уходит в другую работу, а не в недельную сводку.
+# Роль одна, продукта два, и разводить их топиком нельзя: оба живут в
+# 🔍 Ресёрче.
+FACTS_ASK = re.compile(r"фактур|чем подкрепить|подперет|подпереть", re.I)
+
+
+async def run_facts(reg, chat_id: int, ask: str,
+                    topic: str = "research") -> None:
+    """Собрать фактуру под названную тему и положить рядом с темой."""
+    async def say(text: str) -> None:
+        await reg.say("research", chat_id, text, topic=topic)
+
+    try:
+        theme = desk.pick(
+            chat_id, ask, statuses=("idea", "draft"),
+            none="темы {id} нет среди начатых и неначатых",
+            empty="тем, под которые нужна фактура, сейчас нет")
+    except desk.NoWork as e:
+        await say(f"Не понял, под какую тему: {e}. Назови id темы.")
+        return
+
+    try:
+        fx = await facts(chat_id, theme, say=say)
+    except NoData as e:
+        await say(f"Искать негде: {e}.")
+        return
+    except agent.BudgetExceeded as e:
+        await say(f"Остановился: {e}")
+        return
+    except Exception as e:                                   # noqa: BLE001
+        log.exception("фактура не собралась")
+        await say(f"Фактура не собралась: {desk.reason(e)}")
+        return
+
+    b = desk.brand(chat_id)
+    rel = FACTS_FILE.format(id=fx.theme_id)
+    b.artifact(rel, facts_markdown(fx))
+    await say(facts_card(fx) +
+              "\n\nРедактор возьмёт её сам, когда будет писать по этой теме.")
+
+
 async def run(reg, chat_id: int, ask: str, topic: str = "research") -> None:
+    if FACTS_ASK.search(ask or ""):
+        await run_facts(reg, chat_id, ask, topic=topic)
+        return
+
     async def say(text: str) -> None:
         await reg.say("research", chat_id, text, topic=topic)
 
@@ -581,6 +626,185 @@ def latest(b) -> tuple[str, str]:
     if not files:
         return "", ""
     return files[-1].stem, files[-1].read_text(encoding="utf-8")
+
+
+# ── фактура под тему ──────────────────────────────────────────────────
+#
+# Недельная сводка уезжает Стратегу и там кончается: от неё до текста
+# доживает одна строка `why` и хук темы. Редактору фактура не доставалась
+# вовсе, и это видно в его же `notes` — «цифра взята из хука Стратега,
+# по фактическому плану не сверена». Теории в такую щель не пролезает.
+#
+# Добывать факты сам Редактор не может и не будет: роль идёт одним
+# вызовом без инструментов (`--tools ""`, замер в `../CLAUDE.md`), а
+# субагенту `writer` поиска не дано. Наружу ходит только Ресёрчер,
+# значит фактура — его второй продукт, рядом с недельной сводкой.
+#
+# Источник тот же, что у сводки: каналы из `research/sources.md`. Список
+# заведён под это прямо — «@seeallochnaya, глубокий разбор релизов, чтобы
+# сверять факты перед постом». Веб-поиска здесь нет и не нужно: он
+# принёс бы то, чего человек не выбирал.
+#
+# **Ссылки на конкретный пост не будет.** Фетчер держит текст, просмотры
+# и дату, id сообщения не хранит. Поэтому источник это «канал плюс дата»,
+# и выдумывать permalink нельзя: ложная ссылка хуже её отсутствия.
+
+FACTS_FILE = "research/facts-{id}.md"
+FACTS_POSTS = 25            # сколько свежих постов берём с канала под тему
+FACTS_MAX = 5               # больше пяти Редактор в один текст не уложит
+FACTS_CUT = 400             # знаков поста в промпт: факт живёт в начале
+
+FACTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "facts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim":  {"type": "string"},
+                    "source": {"type": "string"},
+                    "date":   {"type": "string"},
+                    "useful": {"type": "string"},
+                },
+                "required": ["claim", "source", "date", "useful"],
+                "additionalProperties": False,
+            },
+        },
+        "gaps": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["facts", "gaps"],
+    "additionalProperties": False,
+}
+
+
+@dataclass
+class Facts:
+    """Фактура под одну тему: чем подпереть текст и чего не нашлось."""
+
+    theme_id: str
+    items: list[dict[str, str]] = field(default_factory=list)
+    gaps: list[str] = field(default_factory=list)
+    watched: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+
+
+def _facts_brief(theme: dict[str, Any], others: list[sources.Source]) -> str:
+    lines = ["## Тема, под которую нужна фактура", ""] + desk.brief(theme)
+    lines += ["", "## Что прочитано в чужих каналах", ""]
+    if not others:
+        lines.append("Ничего: список источников пуст или каналы не открылись.")
+    for src in others:
+        if not src.ok:
+            continue
+        lines += ["", f"### {src.title or src.url}", ""]
+        for post in src.posts[:FACTS_POSTS]:
+            when = f"{post.date:%Y-%m-%d}" if post.date else "дата неизвестна"
+            lines.append(f"- [{when}] {_cut(post.text, FACTS_CUT)}")
+    return "\n".join(lines)
+
+
+async def facts(chat_id: int, theme: dict[str, Any], *, say=None) -> Facts:
+    """Собрать фактуру под тему из прочитанных чужих каналов.
+
+    Правило здесь жёстче, чем в сводке: факт берётся **только** из
+    показанных постов. Модель знает про отрасль много и по памяти, но
+    её память это не источник — у неё нет ни даты, ни того, кто это
+    сказал, а Редактор поставит такую цифру в живой канал. Нечего
+    взять — пустой список и строка в `gaps`; пустая фактура честнее
+    правдоподобной.
+    """
+    b = desk.brand(chat_id)
+    if b is None:
+        raise NoData("профиль бренда ещё не собран")
+
+    urls = watchlist(b)
+    if not urls:
+        raise NoData(f"списка источников нет: заведи `{WATCHLIST}` в папке "
+                     "бренда")
+
+    if say:
+        await say(f"Ищу фактуру под тему <b>{theme.get('title') or theme['id']}</b> "
+                  f"в {len(urls)} каналах. Это займёт до минуты.")
+
+    fx = Facts(theme_id=theme["id"])
+    others = await sources.fetch_all(urls, limit=FACTS_POSTS)
+    for src in others:
+        (fx.watched if src.ok else fx.failed).append(src.summary())
+    if not any(src.ok for src in others):
+        fx.gaps.append("ни один источник не открылся, фактуры под тему нет")
+        return fx
+
+    answer = await agent.ask(
+        "research", chat_id,
+        _facts_brief(theme, others) +
+        f"\n\nОтбери до {FACTS_MAX} фактов, которыми можно подпереть эту "
+        "тему: исследование, релиз, цифра, разбор. Берёшь только то, что "
+        "стоит в показанных постах, — по памяти не добавляешь ничего. "
+        "У каждого факта: `claim` — что утверждается, `source` — канал, "
+        "`date` — дата поста, `useful` — чем это полезно читателю темы. "
+        "Подходящего нет — пустой список и строка в `gaps`. "
+        "Ответь одним JSON-объектом.",
+        brand_name=b.name(),
+        profile=desk.profile(b, ("Кто это", "Аудитория")),
+        max_tokens=MAX_TOKENS, schema=FACTS_SCHEMA)
+
+    data = agent.parse_json(answer, who="ресёрчер")
+    for raw in (data.get("facts") or [])[:FACTS_MAX]:
+        if not isinstance(raw, dict) or not str(raw.get("claim") or "").strip():
+            continue
+        fx.items.append({k: str(raw.get(k) or "").strip()
+                         for k in ("claim", "source", "date", "useful")})
+    fx.gaps += [str(g) for g in (data.get("gaps") or []) if str(g).strip()]
+    if not fx.items and not fx.gaps:
+        fx.gaps.append("в прочитанных постах фактуры под эту тему не нашлось")
+
+    log.info("фактура %s: фактов %s, дыр %s",
+             fx.theme_id, len(fx.items), len(fx.gaps))
+    return fx
+
+
+def facts_markdown(fx: Facts) -> str:
+    out = [f"# Фактура под тему {fx.theme_id}", ""]
+    if fx.items:
+        for it in fx.items:
+            src = " · ".join(x for x in (it["source"], it["date"]) if x)
+            out += [f"- **{it['claim']}**",
+                    f"  - источник: {src or '[уточнить факт]'}",
+                    f"  - чем полезно: {it['useful']}"]
+    else:
+        out.append("Фактов под эту тему в прочитанных каналах не нашлось.")
+    if fx.gaps or fx.failed:
+        out += ["", "## Чего не удалось собрать", ""]
+        out += [f"- {g}" for g in fx.gaps + fx.failed]
+    if fx.watched:
+        out += ["", "## Что прочитано", ""] + [f"- {w}" for w in fx.watched]
+    return "\n".join(out) + "\n"
+
+
+def facts_card(fx: Facts) -> str:
+    out = [f"🔍 <b>Фактура под тему</b> <code>{fx.theme_id}</code>"]
+    if fx.items:
+        out.append("")
+        for it in fx.items:
+            src = " · ".join(x for x in (it["source"], it["date"]) if x)
+            out.append(f"· {it['claim']}" + (f" <i>({src})</i>" if src else ""))
+    else:
+        out += ["", "В прочитанных каналах фактов под эту тему нет."]
+    if fx.gaps or fx.failed:
+        out += ["", "⚠️ " + "; ".join((fx.gaps + fx.failed)[:3])]
+    return "\n".join(out)
+
+
+def facts_for(b, theme_id: str) -> str:
+    """Собранная фактура под тему. Пусто — её не собирали.
+
+    Читает Редактор перед письмом. Отсутствие файла это не поломка и не
+    повод отказываться: тексты писались без фактуры и пишутся дальше,
+    просто без слоя чужих цифр.
+    """
+    text = b.read(FACTS_FILE.format(id=theme_id))
+    return text.strip() if text and text.strip() else ""
 
 
 # ── выжимка профиля ───────────────────────────────────────────────────

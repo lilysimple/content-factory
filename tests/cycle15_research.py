@@ -236,6 +236,61 @@ async def main() -> None:
     check("старой фразы про «не подключён» нет",
           "не подключён" not in layers, layers[:400])
 
+    # ── 11. фактура под тему ──────────────────────────────────────────
+    # Второй продукт роли: не сводка недели, а чем подпереть один текст.
+    # Правило жёстче, чем в сводке: только из показанных постов.
+    print("\n11. Фактура под тему")
+
+    b.artifact(research.WATCHLIST, "- @sio — разборы релизов\n")
+    fake_fetch({"https://t.me/s/sio": channel([100, 200], title="Сиолошная")})
+    with db.tx() as c:
+        c.execute("DELETE FROM themes WHERE chat_id = ?", (CHAT,))
+        c.execute("INSERT INTO themes (id, chat_id, date, plat, format, "
+                  "status, title) VALUES (?,?,?,?,?,'idea',?)",
+                  ("2026-09-10-telegram-01", CHAT, "2026-09-10", "telegram",
+                   "пост", "Роль настроена, а текст не мой"))
+
+    facts_answer = json.dumps({
+        "facts": [{"claim": "Отчёт про агентов вышел", "source": "@sio",
+                   "date": "2026-09-02", "useful": "цифра под первый абзац"}],
+        "gaps": ["цен в постах не было"],
+    }, ensure_ascii=False)
+    install(facts_answer)
+    reg.clear()
+    await research.run(reg, CHAT,
+                       "собери фактуру по теме 2026-09-10-telegram-01")
+
+    check("ушёл в фактуру, а не в сводку",
+          "Фактура под тему" in reg.texts(), reg.texts()[:200])
+    check("сводку недели не собирал",
+          "медиана" not in reg.texts().lower(), reg.texts()[:200])
+    rel = research.FACTS_FILE.format(id="2026-09-10-telegram-01")
+    saved = b.read(rel)
+    check("файл фактуры записан", bool(saved.strip()), rel)
+    check("факт в файле", "Отчёт про агентов" in saved, saved[:200])
+    check("источник и дата в файле", "@sio" in saved and "2026-09-02" in saved,
+          saved[:300])
+    check("дыра названа", "цен в постах не было" in saved, saved[:400])
+    check("Редактор эту фактуру видит",
+          "Отчёт про агентов" in research.facts_for(b, "2026-09-10-telegram-01"))
+    check("по другой теме фактуры нет",
+          research.facts_for(b, "2026-09-11-telegram-01") == "")
+
+    prompt = CALLS["prompts"][-1]
+    check("посты источника уехали в промпт", "Пост номер 1" in prompt,
+          prompt[:300])
+    check("запрет памяти в промпте", "по памяти" in prompt, prompt[-500:])
+
+    # Пустой ответ модели это результат, а не поломка.
+    install(json.dumps({"facts": [], "gaps": []}, ensure_ascii=False))
+    reg.clear()
+    await research.run(reg, CHAT,
+                       "собери фактуру по теме 2026-09-10-telegram-01")
+    check("пустая фактура названа словами",
+          "нет" in reg.texts().lower(), reg.texts()[:200])
+    check("выдуманного факта нет",
+          "Отчёт про агентов" not in reg.texts(), reg.texts()[:200])
+
 
 asyncio.run(main())
 raise SystemExit(report())
