@@ -40,10 +40,14 @@ whisper. Здесь остаётся сборка: собрать props, поз�
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import os
 import re
 import shutil
+import signal
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -59,21 +63,38 @@ log = logging.getLogger("montage")
 
 TOOLS = ROOT / "tools" / "remotion-montage"
 
-# Рендер видео это не PNG: минуты, не секунды. Потолок считается от
-# длины ролика, а не константой. Замер 30.08 (Remotion 4.0.518,
-# chrome-headless-shell, macOS arm64, штатная параллельность): 778
-# кадров за 183 с, то есть примерно 4,2 кадра в секунду. Плоские 240 с
-# хватало только коротким: сценарии Редактора Reels идут до 50 секунд
-# (`roles/reels.md`, таблица бюджета), а это ~1600 кадров и ~370 с —
-# такой ролик упирался бы в потолок всегда, и человек читал бы «не
-# уложился» вместо готового видео.
-RENDER_SECONDS_PER_FRAME = 0.25   # с запасом к замеренным 0,235
-RENDER_TIMEOUT_MIN = 240          # короткому ролику меньше не даём
+# Рендер видео это не PNG: минуты, не секунды. Сторожим здесь **движение,
+# а не время**: Remotion печатает «Rendered n/m» на каждый кадр, и пока
+# строки идут, рендер живой — даже если машина сегодня вдвое медленнее,
+# чем в день замера.
+#
+# Плоский бюджет «столько-то секунд на кадр» стоил пяти готовых роликов
+# в ночь на 05.09. Считался он по замеру 30.08 (0,235 с на кадр), а шли
+# те рендеры по 0,29 — и все пять убивались за секунду до выхода
+# процесса, уже дорендерив свой mp4 целиком. Человек читал «не уложился»,
+# а на диске лежало готовое видео. Скорость машины это не граница: мёртвый
+# рендер видно по молчанию, а не по секундомеру.
+#
+# Потолок остаётся крайним предохранителем — от рендера, который бодро
+# печатает кадры, но не кончится и к утру.
+RENDER_STALL = 180                # столько молчит только мёртвый рендер
+RENDER_CAP_PER_FRAME = 0.6        # втрое к худшему замеренному
+RENDER_CAP_MIN = 900
+
+PROGRESS_RX = re.compile(r"Rendered (\d+)/(\d+)")
 
 
-def _timeout(frames: int) -> int:
-    """Потолок рендера от числа кадров, не короче минимального."""
-    return max(RENDER_TIMEOUT_MIN, int(frames * RENDER_SECONDS_PER_FRAME) + 60)
+def _cap(frames: int) -> int:
+    """Крайний потолок рендера. Настоящую границу держит `RENDER_STALL`."""
+    return max(RENDER_CAP_MIN, int(frames * RENDER_CAP_PER_FRAME) + 120)
+
+
+def _got(last: str) -> str:
+    """«дошёл до 812 кадра из 1406» — по последней строке прогресса."""
+    m = PROGRESS_RX.search(last or "")
+    return f", дошёл до {m.group(1)} кадра из {m.group(2)}" if m else ""
+
+
 # Цвета берутся из `design/tokens.css` бренда по имени токена, а не
 # «первым попавшимся hex»: первым в файле лежит `--milk`, светлый фон, и
 # белый текст на нём исчезает. Имя токена — это договор с Дизайнером,
@@ -742,6 +763,80 @@ async def _ensure_browser() -> None:
             + err.decode(errors="replace").strip()[-200:])
 
 
+async def _kill(proc: asyncio.subprocess.Process) -> None:
+    """Убить рендер целиком, а не одну верхнюю обёртку.
+
+    `npx` это обёртка: работают под ней node и пул chrome-headless-shell,
+    а на выходе ещё и ffmpeg. Убитый в одиночку `npx` оставлял их жить —
+    они держали открытыми наши же трубы, и `communicate()` после этого не
+    возвращался никогда, а освободившиеся ядра доедали у следующего куска
+    нарезки. Поэтому подпроцесс идёт своей группой (`start_new_session`),
+    и убивается группа.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    with contextlib.suppress(ProcessLookupError):
+        proc.kill()
+    with contextlib.suppress(Exception):
+        await proc.wait()
+
+
+async def _watch(cmd: list[str], cwd: str, *,
+                 cap: int, stall: int) -> tuple[int, str, str]:
+    """Прогнать рендер, сторожа движение. Отдаёт код, прогресс и stderr.
+
+    Признак жизни — любая строка от Remotion; прогресс он печатает в
+    stdout по строке на кадр. Молчание дольше `stall` это смерть, и
+    только она обрывает рендер досрочно.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=cwd, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE, start_new_session=True)
+
+    loop = asyncio.get_running_loop()
+    beat = loop.time()          # когда рендер последний раз подал голос
+    last = ""                   # последняя строка прогресса
+    err: deque[str] = deque(maxlen=40)
+
+    async def pump(stream: asyncio.StreamReader, sink: deque[str] | None):
+        nonlocal beat, last
+        async for raw in stream:
+            line = raw.decode(errors="replace").strip()
+            beat = loop.time()
+            if not line:
+                continue
+            if sink is None:
+                last = line
+            else:
+                sink.append(line)
+
+    work = asyncio.gather(proc.wait(), pump(proc.stdout, None),
+                          pump(proc.stderr, err))
+    started = loop.time()
+    try:
+        while True:
+            try:
+                await asyncio.wait_for(asyncio.shield(work), timeout=5)
+                break
+            except asyncio.TimeoutError:
+                now = loop.time()
+                if now - beat > stall:
+                    why = (f"встал: {stall} с без единого кадра"
+                           + _got(last))
+                elif now - started > cap:
+                    why = f"не уложился в {cap} с" + _got(last)
+                else:
+                    continue
+                await _kill(proc)
+                raise NoRenderer("рендер " + why)
+    finally:
+        work.cancel()
+        with contextlib.suppress(Exception):
+            await work
+
+    return proc.returncode or 0, last, " | ".join(list(err)[-8:])
+
+
 async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
     if not _installed():
         raise NotInstalled(
@@ -813,27 +908,25 @@ async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
           f"--props={props_path}", "--timeout=60000"]
     frames = max(1, round((props["introSeconds"] + reel.cuts.total
                            + props["outroSeconds"]) * fps))
-    limit = _timeout(frames)
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, cwd=str(TOOLS),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=limit)
-    except asyncio.TimeoutError as e:
-        proc.kill()
-        await proc.wait()
-        raise NoRenderer(f"рендер не уложился в {limit} секунд "
-                         f"({frames} кадров)") from e
+        code, _, err = await _watch(cmd, str(TOOLS), cap=_cap(frames),
+                                    stall=RENDER_STALL)
+    except NoRenderer:
+        # Оборванный рендер оставляет за собой mp4 без последних кадров.
+        # Такой файл никому не нужен, а лежать он будет до следующего
+        # монтажа этой же темы: имя у него от id, а не от прогона.
+        out_path.unlink(missing_ok=True)
+        raise
     finally:
         props_path.unlink(missing_ok=True)
         (public / video_name).unlink(missing_ok=True)
         if cover_name:
             (public / cover_name).unlink(missing_ok=True)
 
-    if proc.returncode != 0 or not out_path.exists():
-        tail = err.decode(errors="replace").strip().splitlines()[-8:]
-        raise NoRenderer("Remotion не отдал файл: " + " | ".join(tail))
+    if code != 0 or not out_path.exists():
+        out_path.unlink(missing_ok=True)
+        raise NoRenderer("Remotion не отдал файл: " + err)
 
     return out_path
 

@@ -12,6 +12,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+
 import harness
 from harness import CHAT, check, report
 
@@ -811,6 +813,75 @@ def main() -> None:
           note and "сверить не с чем" in note, str(note))
     _, note = montage._cover_spec(b, "instagram", "reels")
     check("при живом ТЗ лишнего не говорится", note is None, str(note))
+
+    # ── 40. рендер сторожится движением, а не секундомером ────────────
+    #
+    # Ночь на 05.09: пять готовых роликов убиты за секунду до выхода
+    # процесса, потому что бюджет секунд на кадр считался по замеру
+    # двухнедельной давности, а машина в ту ночь была медленнее. Remotion
+    # сюда не зовётся — сторож проверяется на подставных командах, как и
+    # вся арифметика этого цикла.
+    print("\n40. Сторож рендера")
+    import sys as _sys                                            # noqa: E402
+    PY = _sys.executable
+
+    async def _watch(cmd, **kw):
+        return await montage._watch([PY, "-c", cmd], ".", **kw)
+
+    code, last, err = asyncio.run(_watch(
+        "for i in range(1, 4): print(f'Rendered {i}/3', flush=True)",
+        cap=30, stall=10))
+    check("рендер, который дошёл до конца, не обрывается", code == 0, str(code))
+    check("последний кадр виден", last == "Rendered 3/3", last)
+
+    code, _, err = asyncio.run(_watch(
+        "import sys; print('boom', file=sys.stderr); sys.exit(3)",
+        cap=30, stall=10))
+    check("чужая ошибка доезжает строкой", code == 3 and "boom" in err,
+          f"{code} / {err}")
+
+    # Медленный рендер это не мёртвый: пока идут кадры, его не трогают.
+    slow = ("import time\n"
+            "for i in range(1, 7):\n"
+            "    print(f'Rendered {i}/6', flush=True)\n"
+            "    time.sleep(0.4)\n")
+    code, last, _ = asyncio.run(_watch(slow, cap=30, stall=2))
+    check("медленный, но живой рендер доводится до конца",
+          code == 0 and last == "Rendered 6/6", f"{code} / {last}")
+
+    # А молчание это смерть, и внуки умирают вместе с ним: `npx` тут
+    # обёртка, работают под ней node и пул браузеров.
+    dead = ("import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(600)'])\n"
+            "print('Rendered 5/100', flush=True)\n"
+            "time.sleep(600)\n")
+    try:
+        asyncio.run(_watch(dead, cap=60, stall=2))
+        check("молчащий рендер обрывается", False, "не оборвался")
+    except montage.NoRenderer as e:
+        check("молчащий рендер обрывается", "встал" in str(e), str(e))
+        check("сказано, на каком кадре встал", "до 5 кадра из 100" in str(e),
+              str(e))
+
+    # Потолок остаётся предохранителем: кадры идут, конца не видно.
+    endless = ("import time\n"
+               "n = 0\n"
+               "while True:\n"
+               "    n += 1\n"
+               "    print(f'Rendered {n}/999999', flush=True)\n"
+               "    time.sleep(0.1)\n")
+    try:
+        asyncio.run(_watch(endless, cap=3, stall=30))
+        check("бесконечный рендер обрывается потолком", False, "не оборвался")
+    except montage.NoRenderer as e:
+        check("бесконечный рендер обрывается потолком",
+              "не уложился" in str(e), str(e))
+
+    check("длинному ролику потолок растёт",
+          montage._cap(20000) > montage._cap(2000), str(montage._cap(20000)))
+    check("короткому ролику потолок не режется",
+          montage._cap(1) == montage.RENDER_CAP_MIN, str(montage._cap(1)))
 
 
 main()
