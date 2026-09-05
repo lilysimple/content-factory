@@ -326,11 +326,20 @@ def _pick(chat_id: int, ask: str) -> dict[str, Any]:
 
 
 def _copy(b, theme: dict[str, Any]) -> str:
-    """Утверждённый текст без служебной шапки Редактора."""
+    """Утверждённый текст без служебной шапки Редактора и без подписи.
+
+    Подпись под карусель на карточки не идёт: у Редактора это отдельный
+    текст на 600–900 знаков после строки `## Подпись`, и живёт он в
+    ленте, а не на макете. Отдавать его сюда значит приглашать взять
+    слова подписи на карточку — а стоп-правило рецепта разрешает на
+    макет только слова Редактора, и формально они ими и будут.
+    """
     raw = b.read(theme["asset"])
     if not raw.strip():
         raise NoWork(f"файл {theme['asset']} пуст")
-    return raw.split("-->", 1)[-1].strip() if raw.startswith("<!--") else raw.strip()
+    text = raw.split("-->", 1)[-1].strip() if raw.startswith("<!--") \
+        else raw.strip()
+    return desk.split_caption(text)[0] or text
 
 
 def _mark(b) -> str:
