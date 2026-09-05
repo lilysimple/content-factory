@@ -37,7 +37,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import cfg                                            # noqa: E402
-from tools.photos_pull import LONG_SIDE, QUALITY, brand_dir, convert, slug  # noqa: E402
+# `convert` и `slug` переехали в `orchestrator/imagery.py`, когда их стал
+# звать не только этот инструмент. `brand_dir` остался в `photos_pull`:
+# он про аргументы командной строки, а не про картинки.
+from orchestrator.imagery import convert, slug                    # noqa: E402
+from tools.photos_pull import brand_dir                           # noqa: E402
 
 API = "https://api.pexels.com/v1/search"
 UA = "content-factory/1.0 (photo pull for brand assets)"

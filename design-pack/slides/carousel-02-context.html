@@ -1,48 +1,62 @@
-<!-- @dsCard group="Slides" viewport="1080x1350" name="Carousel · Context" subtitle="Photo above, panel below — card 2 of 6"
-     Карточка 2: что произошло. Фото сверху, светлая панель снизу со
-     скруглённым верхом — она наезжает на кадр, а не стыкуется с ним
-     встык: стык читается как две картинки, наезд как одна карточка. -->
+<!-- @dsCard group="Slides" viewport="1080x1350" name="Carousel · Context" subtitle="Photo above, flat panel below — card 2 of 6"
+     Карточка 2: что произошло. Фото сверху, светлая панель снизу.
+
+     Край панели прямой, а не скруглённый: в референсе
+     (`design/assets/reference/ig/`) кадр обрезается ровной линией, и
+     карточка читается разворотом — фото и разбор под ним. Скруглённый
+     наезд, который стоял здесь до 05.09, спорит с дугой на карточках
+     пунктов: две разные кривые на соседних экранах выглядят двумя
+     наборами.
+
+     Единственная карточка с блоком факта: цифра, дата или цитата под
+     тонкой линейкой, мельче основного текста. Факт берётся из текста
+     Редактора — выдуманных цифр здесь быть не может.
+
+     Кадр здесь без людей, и это не случайность. Обложка идёт с автором,
+     карточка 2 сразу за ней — два портрета подряд читаются фотоальбомом,
+     а не разбором. Полоса фото низкая (44% высоты), и пейзаж в неё
+     ложится лучше портрета: обрезать нечего.
+
+     Если на этой карточке всё-таки портрет, `object-position` по
+     вертикали решает, попадёт ли в полосу лицо. На `50% 34%` голова
+     автора оказывалась выше верхнего края, работало `50% 8%`. Кадр без
+     лица в личном бренде работает наполовину. -->
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <link rel="stylesheet" href="../design/tokens.css"><style>
   *{box-sizing:border-box;margin:0;padding:0;}
   body{font-family:var(--font-body);}
   .slide{width:1080px;height:1350px;position:relative;overflow:hidden;
-         background:var(--graphite);}
+         background:var(--milk);}
   img{display:block;}
-  .mark{position:absolute;left:72px;top:60px;display:flex;
-        align-items:center;gap:16px;font-size:28px;font-weight:500;
-        color:rgba(248,245,241,0.9);}
-  .dot{width:14px;height:14px;border-radius:50%;background:var(--accent);}
-  .panel{position:absolute;left:0;right:0;bottom:0;height:62%;
-         background:var(--card);border-radius:44px 44px 0 0;
-         padding:84px 84px 72px;}
-  .eyebrow{font-family:var(--font-display);font-size:30px;font-weight:700;
-           letter-spacing:0.1em;text-transform:uppercase;
-           color:var(--text-secondary);}
-  .head{font-family:var(--font-display);font-weight:800;font-size:76px;
-        line-height:1.14;letter-spacing:-0.025em;margin-top:36px;
+  .panel{position:absolute;left:0;right:0;bottom:0;height:56%;
+         background:var(--milk);padding:76px 84px 80px;}
+  .rule{width:132px;height:5px;border-radius:3px;
+        background:var(--accent-hover);}
+  .head{font-family:var(--font-display);font-weight:800;font-size:74px;
+        line-height:1.1;letter-spacing:-0.03em;margin-top:38px;
         color:var(--text-primary);}
-  .hl{background:var(--accent-tint);border-radius:10px;padding:2px 14px;
-      box-decoration-break:clone;-webkit-box-decoration-break:clone;}
-  .body{font-size:42px;line-height:1.5;color:var(--text-secondary);
-        margin-top:40px;}
-  .foot{position:absolute;left:84px;right:84px;bottom:64px;display:flex;
-        justify-content:space-between;align-items:baseline;
-        font-family:var(--font-display);font-weight:700;font-size:30px;
-        letter-spacing:0.08em;text-transform:uppercase;
-        color:var(--text-secondary);}
+  .ac{color:var(--text-accent);}
+  .lead{font-size:38px;line-height:1.45;color:var(--text-secondary);
+        margin-top:36px;}
+  .hair{height:1px;background:var(--border-firm);margin:44px 0 32px;}
+  /* Блок факта. Мельче лида намеренно: он подпирает мысль, а не спорит
+     с ней за внимание. */
+  .fact{font-size:30px;line-height:1.5;color:var(--text-secondary);}
+  .num{color:var(--text-accent);font-weight:600;}
 </style></head><body>
 <div class="slide">
-  <img src="../design/assets/images/author.jpg"
-       style="position:absolute;left:0;top:0;width:100%;height:46%;
-              object-fit:cover;object-position:50% 30%;">
-  <div class="mark"><span class="dot"></span>lily_.space</div>
+  <img src="../design/assets/images/img-1371.jpg"
+       style="position:absolute;left:0;top:0;width:100%;height:44%;
+              object-fit:cover;object-position:50% 55%;">
   <div class="panel">
-    <div class="eyebrow">Что произошло</div>
-    <div class="head">Много теории.<br><span class="hl">А бота нет</span></div>
-    <div class="body">Клиент просил «создай чат-бот по профориентации» и
-      утонул в методиках и ссылках. Два дня переписки, а продукта так и
-      нет. Знакомо?</div>
-    <div class="foot"><span>Знакомо?</span><span>02 / 06</span></div>
+    <div class="rule"></div>
+    <div class="head">Посты, макеты и планы<br>теперь собираются
+      <span class="ac">ролью, а не руками.</span></div>
+    <div class="lead">Без дизайнера, без вечера за клавиатурой
+      и без пятого круга правок.</div>
+    <div class="hair"></div>
+    <div class="fact">Первый пост завод опубликовал
+      <span class="num">3 сентября</span>: от сводки недели до канала
+      цепь прошла целиком.</div>
   </div>
 </div></body></html>

@@ -1,50 +1,51 @@
-<!-- @dsCard group="Slides" viewport="1080x1350" name="Carousel · Point" subtitle="Panel left, photo right — cards 3 and 4 of 6"
+<!-- @dsCard group="Slides" viewport="1080x1350" name="Carousel · Point" subtitle="Arc panel left, photo right — cards 3 and 4 of 6"
      Паттерн пункта. В карусели их три — карточки 3, 4 и 5, — и они
      чередуют сторону: два раза этот файл, один раз зеркальный
      (`carousel-04-point-mirror`). Одна и та же сторона три раза подряд
      читается как один длинный экран, и человек уходит на середине.
 
-     Номер идёт в `--text-accent`: неон на тёплом белом не читается. -->
+     Край панели — дуга, а не прямая: вертикальные радиусы сложены в
+     высоту карточки (675 + 675 = 1350), поэтому два угла сходятся в одну
+     непрерывную кривую, без прямого куска посередине. Это подпись
+     системы из референса (`design/assets/reference/ig/`), и ломать её
+     клоном не надо: меняются слова и фото, кривая остаётся.
+
+     Номера пункта в подвале больше нет. В референсе счёт ведут словами
+     («Раньше…», «Теперь…») или самим порядком карточек, а двузначный
+     `01` в углу тянул на себя внимание сильнее заголовка. -->
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <link rel="stylesheet" href="../design/tokens.css"><style>
   *{box-sizing:border-box;margin:0;padding:0;}
   body{font-family:var(--font-body);}
   .slide{width:1080px;height:1350px;position:relative;overflow:hidden;
-         background:var(--graphite);}
+         background:var(--milk);}
   img{display:block;}
-  .panel{position:absolute;left:0;top:0;bottom:0;width:66%;
-         background:var(--card);border-radius:0 44px 44px 0;
-         padding:84px 76px;}
-  .mark{display:flex;align-items:center;gap:16px;font-size:28px;
-        font-weight:500;color:var(--text-secondary);}
-  .dot{width:14px;height:14px;border-radius:50%;background:var(--accent-hover);}
-  .num{font-family:var(--font-display);font-weight:800;font-size:96px;
-       line-height:1;letter-spacing:-0.03em;color:var(--text-accent);
-       margin-top:180px;}
-  .head{font-family:var(--font-display);font-weight:800;font-size:70px;
-        line-height:1.12;letter-spacing:-0.025em;margin-top:24px;
-        color:var(--text-primary);}
-  .body{font-size:40px;line-height:1.5;color:var(--text-secondary);
-        margin-top:36px;}
-  .hl{background:var(--accent-tint);border-radius:10px;padding:2px 12px;
+  .panel{position:absolute;left:0;top:0;bottom:0;width:57%;
+         background:var(--milk);
+         border-radius:0 220px 220px 0/0 675px 675px 0;
+         padding:150px 96px 120px 84px;}
+  .head{font-family:var(--font-display);font-weight:800;font-size:76px;
+        line-height:1.08;letter-spacing:-0.03em;color:var(--text-primary);}
+  .ac{color:var(--text-accent);}
+  .rule{width:132px;height:5px;border-radius:3px;margin:40px 0 0;
+        background:var(--accent-hover);}
+  .body{font-size:36px;line-height:1.5;color:var(--text-secondary);
+        margin-top:34px;}
+  .body + .body{margin-top:32px;}
+  .num{color:var(--text-accent);font-weight:600;}
+  .hl{background:var(--accent-tint);border-radius:12px;padding:2px 12px;
       box-decoration-break:clone;-webkit-box-decoration-break:clone;}
-  .foot{position:absolute;left:76px;right:76px;bottom:72px;display:flex;
-        justify-content:space-between;align-items:baseline;
-        font-family:var(--font-display);font-weight:700;font-size:30px;
-        letter-spacing:0.08em;text-transform:uppercase;
-        color:var(--text-secondary);}
 </style></head><body>
 <div class="slide">
-  <img src="../design/assets/images/couch.jpg"
-       style="position:absolute;right:0;top:0;width:40%;height:100%;
-              object-fit:cover;object-position:50% center;">
+  <img src="../design/assets/images/img-0976.jpg"
+       style="position:absolute;inset:0;width:100%;height:100%;
+              object-fit:cover;object-position:78% 45%;">
   <div class="panel">
-    <div class="mark"><span class="dot"></span>lily_.space</div>
-    <div class="num">01</div>
-    <div class="head">Попросите задать вам вопросы</div>
-    <div class="body">Скажите: «задай мне <span class="hl">10–15
-      вопросов</span>, чтобы определить результат на выходе». Аудитория,
-      цели, формат. Так он соберёт ответ под вас.</div>
-    <div class="foot"><span>Правило первое</span><span>03 / 06</span></div>
+    <div class="head">Одна <span class="ac">роль</span><br>уже забирает<br>работу целой<br>команды</div>
+    <div class="rule"></div>
+    <div class="body">Она собирает план недели, пишет посты,
+      верстает макеты и готовит их к публикации.</div>
+    <div class="body">Раньше на это уходил
+      <span class="hl">целый вечер</span> и три круга правок.</div>
   </div>
 </div></body></html>
