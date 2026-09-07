@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import date
 
 import harness
 from harness import CHAT, FakeRegistry, check, report
@@ -290,6 +291,86 @@ async def main() -> None:
           "нет" in reg.texts().lower(), reg.texts()[:200])
     check("выдуманного факта нет",
           "Отчёт про агентов" not in reg.texts(), reg.texts()[:200])
+
+
+    # ── внешние источники: фид разбирается постами ────────────────────
+    print("\n7. Внешний источник: RSS и Atom")
+
+    rss = """<?xml version="1.0"?>
+<rss version="2.0"><channel>
+  <title>Marketing AI</title>
+  <item>
+    <title>Six questions for marketing leaders</title>
+    <description>&lt;p&gt;Organizations are eager to dive in&lt;/p&gt;</description>
+    <pubDate>Wed, 26 Aug 2026 09:00:00 +0000</pubDate>
+  </item>
+  <item>
+    <title><![CDATA[Старая новость]]></title>
+    <description>Была давно</description>
+    <pubDate>Mon, 03 Mar 2026 09:00:00 +0000</pubDate>
+  </item>
+</channel></rss>"""
+
+    src = sources.Source(url="https://example.org/rss", kind="website")
+    sources._read_feed(src, rss, 20)
+    check("фид разобран записями", src.ok and len(src.posts) == 2,
+          f"{src.ok} {len(src.posts)}")
+    check("вид источника — фид", src.kind == "feed", src.kind)
+    check("название фида, а не первой записи", src.title == "Marketing AI",
+          src.title)
+    check("заголовок записи в тексте",
+          src.posts[0].text.startswith("Six questions"), src.posts[0].text[:60])
+    check("разметка снята, а не показана",
+          "<p>" not in src.posts[0].text and "&lt;" not in src.posts[0].text,
+          src.posts[0].text[:80])
+    check("CDATA снята", src.posts[1].text.startswith("Старая новость"),
+          src.posts[1].text[:40])
+    check("дата RFC 822 разобрана",
+          src.posts[0].date is not None
+          and src.posts[0].date.date().isoformat() == "2026-08-26",
+          str(src.posts[0].date))
+
+    atom = """<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Weblog</title>
+  <entry>
+    <title>Разбор релиза</title>
+    <summary>Коротко о том, что поменялось</summary>
+    <updated>2026-08-27T08:42:49Z</updated>
+  </entry>
+</feed>"""
+    a = sources.Source(url="https://example.org/atom", kind="website")
+    sources._read_feed(a, atom, 20)
+    check("Atom разобран", a.ok and len(a.posts) == 1, f"{a.ok} {len(a.posts)}")
+    check("дата ISO 8601 разобрана",
+          a.posts[0].date is not None
+          and a.posts[0].date.date().isoformat() == "2026-08-27",
+          str(a.posts[0].date))
+
+    # Окно режет фид тем же кодом, что и ленту канала.
+    window = research.Window(date(2026, 8, 24), date(2026, 8, 30), "2026-W35")
+    fst = research.measure(src, window=window)
+    check("окно оставило только запись недели", fst.posts == 1, str(fst.posts))
+    check("старое посчитано вне окна", fst.outside == 1, str(fst.outside))
+    check("просмотров у фида нет", fst.with_views == 0, str(fst.with_views))
+
+    # Дата не разобралась — прочерк, а не сегодня: иначе прошлогодняя
+    # запись заедет в окно недели.
+    broken = sources.Source(url="https://example.org/bad", kind="website")
+    sources._read_feed(broken, rss.replace("Wed, 26 Aug 2026 09:00:00 +0000",
+                                           "позавчера"), 20)
+    check("кривая дата — прочерк", broken.posts[0].date is None,
+          str(broken.posts[0].date))
+
+    # HTML под видом фида это не фид: cookie-стена отдаёт двести и страницу.
+    wall = sources.Source(url="https://example.org/wall", kind="website")
+    sources._read_feed(wall, "<html><body>Skip to content</body></html>", 20)
+    check("страница фидом не притворится", not wall.ok, str(wall.ok))
+    check("причина названа", "записей" in wall.error, wall.error)
+
+    check("фид узнаётся по телу", bool(sources.FEED_MARK.search(rss)))
+    check("страница фидом не считается",
+          not sources.FEED_MARK.search("<html><head><title>x"))
 
 
 asyncio.run(main())

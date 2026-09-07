@@ -215,9 +215,12 @@ def stash_stats(b, blob: bytes, name: str) -> Path:
 
 
 def _line(p: sources.Post) -> str:
-    seen = f"{p.views}" if p.views is not None else "—"
+    # Просмотров у фида нет и не будет: их не отдают. Прочерк на этом месте
+    # читается как «ноль просмотров», а это разные вещи — колонка просто
+    # исчезает.
+    seen = f"{p.views} просм. · " if p.views is not None else ""
     when = f"{p.date:%d.%m}" if p.date else "дата?"
-    return f"- {seen} просм. · {when} · {_cut(p.text, SNAP_CUT)}"
+    return f"- {seen}{when} · {_cut(p.text, SNAP_CUT)}"
 
 
 async def snapshot(b, *, window: Window | None = None) -> tuple[str, list[str]]:
@@ -287,6 +290,15 @@ async def snapshot(b, *, window: Window | None = None) -> tuple[str, list[str]]:
             if not src.ok:
                 gaps.append(f"{src.url}: {src.error}")
                 continue
+            # Страница это не лента: постов с датами из неё не собрать, и
+            # дальше она молча дала бы строку «в окне нет ни одного поста»
+            # — дыру, в которой человек виноват адресом, а не источником.
+            # Называем причину, а не следствие.
+            if src.kind == "website":
+                gaps.append(f"{src.url}: это страница, а не фид — записей с "
+                            "датами из неё не собрать. Дай RSS-адрес "
+                            "источника или убери строку")
+                continue
             st = measure(src, window=window)
             name = src.title or src.url
             subs = src.subscribers.split()[0] if src.subscribers else "—"
@@ -337,7 +349,13 @@ async def snapshot(b, *, window: Window | None = None) -> tuple[str, list[str]]:
 
 
 def watchlist(b) -> list[str]:
-    """Чужие каналы, за которыми следим. Строки вида `- @имя — зачем`."""
+    """За чем следим: строки `- @канал — зачем` и `- <адрес фида> — зачем`.
+
+    Адрес разбирает `sources.fetch`: голое `@имя` это Telegram, ссылка на
+    RSS или Atom — внешний источник отрасли. Отличать их здесь не надо, а
+    вот проверять, что ссылка ведёт на фид, а не на страницу раздела, —
+    надо: страницу `snapshot` назовёт дырой и в срез не возьмёт.
+    """
     out = []
     for line in b.read(WATCHLIST).splitlines():
         line = line.strip()

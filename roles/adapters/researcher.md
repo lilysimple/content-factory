@@ -23,7 +23,7 @@ Code, а не получаешь всё готовым в теле запрос�
 | Профиль бренда | `{BRANDS_PATH}/{slug}/research/profile-digest.md` | `core.md` (секции «Кто это», «Аудитория», «Цель этапа», «Формат») + `goals.md` + `platforms.md` |
 | Цифры за окно | `tasks/{task-id}/stats.md` | снял Python: `research.snapshot`, окно `last_week` |
 | Скрины кабинета | `{BRANDS_PATH}/{slug}/research/stats/` | охват, ER, подписки, досмотры — чего в ленте нет; имена перечислены в `stats.md` |
-| Внешние источники отрасли | `{BRANDS_PATH}/{slug}/research/sources.md` | строки со ссылкой вне Telegram — за ними ходишь ты |
+| Внешние источники отрасли | `tasks/{task-id}/stats.md` | фиды из `research/sources.md`, снял тот же `research.snapshot` — сам за ними не ходишь |
 | Прошлые дайджесты | `{BRANDS_PATH}/{slug}/research/ГГГГ-Wnn.md` | твои же сводки, названы по покрытой неделе |
 | Задача | `tasks/{task-id}/input.md` | собрал `bridge.create_task` |
 

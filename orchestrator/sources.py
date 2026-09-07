@@ -18,6 +18,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 import httpx
@@ -95,6 +96,79 @@ def _when(chunk: str) -> datetime | None:
         return None
 
 
+# ── RSS и Atom ────────────────────────────────────────────────────────
+#
+# До 06.09 внешний источник вне Telegram в сводку не попадал вовсе, хотя
+# ссылки на него `sources.md` разрешал. `fetch` снимал со страницы плоский
+# текст, постов у такого источника не было ни одного, и `research._brief`
+# клал модели «N знаков текста» вместо самих новостей: платили за
+# скачивание и не получали ничего. Окно недели к ленте без дат не
+# применялось никак, а `measure` отдавал ноль постов и дыру «сравнивать
+# нечего» на каждый добавленный сайт.
+#
+# Фид это тот же список датированных записей, что и лента канала. Разобрав
+# его в `Post`, мы отдаём внешний источник тому же коду, что и Telegram:
+# `Window.split` режет прошлое, `measure` считает, `_brief` кладёт
+# двенадцать записей по двести знаков. Второго дома у арифметики не
+# появляется, и цена внешнего источника становится такой же, как у канала.
+#
+# Фид узнаётся по телу, а не по адресу: `/feed`, `/rss.xml`, `/atom` и
+# голый путь раздела встречаются вперемешку, а половина «RSS-адресов»
+# отдаёт HTML-страницу с двумя сотнями. Проверка по первым строкам ловит
+# и то, и другое.
+FEED_MARK = re.compile(r"<(rss|feed|rdf:RDF)[\s>]", re.I)
+FEED_ITEM = re.compile(r"<(item|entry)[\s>](.*?)</\1>", re.S | re.I)
+FEED_TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
+FEED_BODY = re.compile(
+    r"<(description|summary|content(?::encoded)?)[^>]*>(.*?)</\1>",
+    re.S | re.I)
+FEED_WHEN = re.compile(
+    r"<(pubDate|updated|published|dc:date)[^>]*>([^<]+)</\1>", re.I)
+CDATA = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.S)
+
+# Описание режется здесь, а не у читателя. Полнотекстовый фид Substack
+# отдаёт статью целиком — двадцать тысяч знаков на запись, — и без этой
+# границы один источник съедал бы больше, чем девять каналов вместе.
+FEED_CUT = 600
+
+
+def _feed_plain(raw: str) -> str:
+    """Текст записи фида: CDATA снимается, разметка внутри — тоже.
+
+    Порядок важен. Разметка в фиде приезжает экранированной
+    (`&lt;p&gt;`), и снять теги до `unescape` значит оставить их в тексте
+    видимыми: читатель получит «<p>Сегодня OpenAI</p>» вместо новости.
+    """
+    text = CDATA.sub(r"\1", raw)
+    text = html.unescape(text)
+    text = BR.sub("\n", text)
+    text = TAGS.sub(" ", text)
+    text = html.unescape(text)
+    text = SPACES.sub(" ", text)
+    return BLANKS.sub("\n\n", text).strip()
+
+
+def _feed_when(chunk: str) -> datetime | None:
+    """Дата записи: RFC 822 у RSS, ISO 8601 у Atom.
+
+    Не разобралось — прочерк, а не сегодня. Дата «на всякий случай»
+    затащила бы прошлогоднюю запись в окно недели, а это ровно та
+    поломка, ради которой окно и заведено.
+    """
+    m = FEED_WHEN.search(chunk)
+    if not m:
+        return None
+    stamp = m.group(2).strip()
+    try:
+        return parsedate_to_datetime(stamp)
+    except (TypeError, ValueError, IndexError):
+        pass
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 @dataclass
 class Post:
     text: str
@@ -109,7 +183,7 @@ class Post:
 @dataclass
 class Source:
     url: str
-    kind: str                       # telegram | website | instagram | youtube
+    kind: str                # telegram | feed | website | instagram | youtube
     ok: bool = False
     title: str = ""
     description: str = ""
@@ -121,6 +195,11 @@ class Source:
     def summary(self) -> str:
         if not self.ok:
             return f"{self.url} — не открылось: {self.error}"
+        if self.kind == "feed":
+            dated = [p.date for p in self.posts if p.date]
+            fresh = f", свежая {max(dated):%d.%m}" if dated else ""
+            return (f"{self.title or self.url}: "
+                    f"{len(self.posts)} записей в отдаче фида{fresh}")
         if self.kind == "telegram":
             lens = [p.length for p in self.posts if p.length]
             avg = sum(lens) // len(lens) if lens else 0
@@ -209,6 +288,13 @@ async def fetch(url: str, *, limit: int = 40) -> Source:
             src.error = "канал закрыт или постов не видно"
         return src
 
+    # Фид разбирается постами и уходит дальше тем же кодом, что и лента
+    # канала. Проверяем до страницы: тело у фида отдаётся с тем же
+    # `text/html` у половины хостов, так что заголовок ответа не улика.
+    if FEED_MARK.search(body[:2000]):
+        _read_feed(src, body, limit)
+        return src
+
     # website / youtube: снимаем текст страницы
     src.ok = True
     if m := re.search(r"<title[^>]*>(.*?)</title>", body, re.S | re.I):
@@ -217,6 +303,33 @@ async def fetch(url: str, *, limit: int = 40) -> Source:
                   flags=re.S | re.I)
     src.text = _plain(body)[:20_000]
     return src
+
+
+def _read_feed(src: Source, body: str, limit: int) -> None:
+    """Записи фида в `Post`. Просмотров тут нет и не будет: их не отдают."""
+    src.kind = "feed"
+    # Заголовок фида, а не первой записи: `<title>` есть и там, и там, и
+    # без выреза записей канал назывался бы своей верхней новостью.
+    if m := FEED_TITLE.search(FEED_ITEM.sub(" ", body)):
+        src.title = _feed_plain(m.group(1))
+
+    for _, chunk in FEED_ITEM.findall(body):
+        head = FEED_TITLE.search(chunk)
+        title = _feed_plain(head.group(1)) if head else ""
+        told = FEED_BODY.search(chunk)
+        text = _feed_plain(told.group(2))[:FEED_CUT] if told else ""
+        # Заголовок и описание склеиваются в одну строку: читателю ниже
+        # достаётся её начало, и заголовок должен быть в этом начале.
+        full = " — ".join(part for part in (title, text) if part)
+        if not full:
+            continue
+        src.posts.append(Post(full, None, _feed_when(chunk)))
+        if len(src.posts) >= limit:
+            break
+
+    src.ok = bool(src.posts)
+    if not src.ok:
+        src.error = "фид открылся, но записей в нём нет"
 
 
 async def fetch_all(urls: list[str], *, limit: int = 40) -> list[Source]:
