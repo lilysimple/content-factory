@@ -689,5 +689,44 @@ async def main() -> None:
           "musor.jpg" not in design._photos(b))
 
 
+    # ── 13. обложка ролика: слова из темы, рубрика запасная ───────────
+    print("\n13. Обложка ролика идёт без текста Редактора")
+    # Тема заводится по факту съёмки: Стратега не было, значит нет ни
+    # рубрики, ни утверждённого текста, и не будет. Отказ здесь означал
+    # бы, что цепь «Дизайнер до монтажа» не работает никогда.
+    reel = {"id": "adhoc-01", "plat": "instagram", "format": "reels",
+            "rubric": "", "asset": None,
+            "hook": "Сначала задай мне несколько вопросов",
+            "title": "Пусть модель сама соберёт с вас контекст"}
+    check("слова берутся из темы", design.takes_theme_words(reel))
+    check("пост по-прежнему берёт текст Редактора",
+          not design.takes_theme_words({"format": "пост"}))
+
+    words = design._copy(b, reel)
+    check("в разрешённых словах хук", "несколько вопросов" in words, words)
+    check("и заголовок темы", "соберёт с вас контекст" in words, words)
+
+    gaps: list[str] = []
+    filled = design._derive(b, reel, design._photos(b), notes=gaps)
+    check("рубрика взята запасная", filled["rubric"] == "ТЕХНИКА",
+          filled["rubric"])
+    check("запасная названа дырой",
+          any("запасная" in g for g in gaps), str(gaps))
+
+    # ТЗ рилса это не рецепт карусели. Промах тихий: ответ приходит
+    # нормальный, просто не по тому рецепту.
+    spec = design._spec(b, "instagram", "reels")
+    check("ТЗ рилса своё, а не Instagram вообще",
+          "карусел" not in spec.lower().split("\n")[0], spec[:60])
+
+    # Запаса нет — это снова отказ, а не пустой слот на обложке.
+    bare = dict(reel, plat="telegram", format="сторис")
+    try:
+        design._derive(b, bare, design._photos(b), notes=[])
+        check("без запаса отказ", False, "исключения не было")
+    except NoWork as e:
+        check("без запаса отказ", "запасной нет" in str(e), str(e))
+
+
 asyncio.run(main())
 raise SystemExit(report())

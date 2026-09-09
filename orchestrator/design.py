@@ -165,6 +165,15 @@ PHOTO_RULES = "design/photos.md"
 # не найдёт.
 MARK_FILE = "design/mark.md"
 MARK_RX = re.compile(r"^Подпись на макете:\s*(.+?)\s*$", re.M)
+# Запасная рубрика для обложки ролика. Рубрику ставит Стратег, но у темы
+# по факту съёмки его не было: она заводится дублем, а не планом. Слот в
+# шаблоне обязательный, и без запасного слова обложка не собирается
+# никогда — то есть цепь «Дизайнер до монтажа» не работает вовсе.
+#
+# Живёт в ТЗ формата, как блок `cover` у монтажа: две формы одного
+# решения, проза для модели и строка для кода.
+RUBRIC_RX = re.compile(r"^Запасная рубрика:\s*(.+?)\s*$", re.M)
+
 STOCK = "stock-"      # префикс файлов со стока, см. orchestrator/stock.py
 GEN = imagegen.PREFIX  # префикс сгенерированного, см. orchestrator/imagegen.py
 
@@ -325,8 +334,24 @@ def _pick(chat_id: int, ask: str) -> dict[str, Any]:
         empty="нет ни одного утверждённого текста")
 
 
+# Форматы, у которых слова свои. Обложка ролика берёт хук и заголовок
+# из темы, а текста Редактора у неё не бывает вовсе: тема заводится по
+# факту съёмки, сценарий уже произнесён, и ждать утверждённого текста
+# значит не собрать обложку никогда.
+FROM_THEME = {"reels", "shorts"}
+
+
+def takes_theme_words(theme: dict[str, Any]) -> bool:
+    """Слова на макет берутся из темы, а не из текста Редактора."""
+    return (theme.get("format") or "") in FROM_THEME
+
+
 def _copy(b, theme: dict[str, Any]) -> str:
     """Утверждённый текст без служебной шапки Редактора и без подписи.
+
+    У обложки ролика источник другой — сама тема. Правило «на макет
+    только слова Редактора» от этого не слабеет: список разрешённых слов
+    просто приезжает оттуда, откуда они на обложке и берутся.
 
     Подпись под карусель на карточки не идёт: у Редактора это отдельный
     текст на 600–900 знаков после строки `## Подпись`, и живёт он в
@@ -334,6 +359,9 @@ def _copy(b, theme: dict[str, Any]) -> str:
     слова подписи на карточку — а стоп-правило рецепта разрешает на
     макет только слова Редактора, и формально они ими и будут.
     """
+    if takes_theme_words(theme):
+        return "\n".join(str(theme.get(k) or "").strip()
+                          for k in ("hook", "title")).strip()
     raw = b.read(theme["asset"])
     if not raw.strip():
         raise NoWork(f"файл {theme['asset']} пуст")
@@ -486,21 +514,41 @@ def _pick_photo(b, theme: dict[str, Any], photos: list[str]) -> str:
 
 
 def _derive(b, theme: dict[str, Any], photos: list[str],
-            photo: str = "") -> dict[str, str]:
+            photo: str = "", notes: list[str] | None = None) -> dict[str, str]:
     """Слоты, которые заполняет код. Модель о них не знает.
 
     `photo` — фон, который человек утвердил кнопкой до вёрстки. Пусто —
     выбирает код правилом бренда, как было до 03.09: так работают
     пересборка правки и любой путь, где выбора не показывали.
+
+    `notes` — куда сложить дыру, если рубрика взята запасная. Отказом
+    это быть перестало: у темы по факту съёмки Стратега не было, и
+    отказ означал бы, что обложка ролика не собирается никогда.
     """
     rubric = str(theme.get("rubric") or "").strip()
     if not rubric:
-        raise NoWork(f"у темы {theme['id']} нет рубрики: её ставит Стратег")
+        rubric = _spare_rubric(b, theme)
+        if not rubric:
+            raise NoWork(
+                f"у темы {theme['id']} нет рубрики: её ставит Стратег, а "
+                "запасной нет в ТЗ формата (строка «Запасная рубрика:»)")
+        if notes is not None:
+            notes.append(f"рубрики у темы нет — на обложке запасная "
+                         f"«{rubric}» из ТЗ бренда")
     if photo and photo not in photos:
         raise NoWork(f"фото «{photo}» нет в папке бренда")
     return {"rubric": rubric.upper(),
             "photo": photo or _pick_photo(b, theme, photos),
             "handle": _mark(b)}
+
+
+def _spare_rubric(b, theme: dict[str, Any]) -> str:
+    """Запасная рубрика из ТЗ формата. Нет строки — нет и запаса."""
+    plat = theme.get("plat") or "telegram"
+    fmt = theme.get("format") or ""
+    rel = f"design/platforms/{plat}-{SLUG[fmt]}.md" if fmt in SLUG else ""
+    found = RUBRIC_RX.search(b.read(rel) or "") if rel else None
+    return found.group(1).strip() if found else ""
 
 
 def _spec(b, plat: str, fmt: str = "") -> str:
@@ -959,8 +1007,9 @@ async def build(chat_id: int, ask: str, *, say=None,
                   f"({plat} · {size[0]}×{size[1]}).\n"
                   "Сборка и рендер займут до минуты.")
 
+    gaps: list[str] = []
     if tpls:
-        fixed = _derive(b, theme, photos, photo)
+        fixed = _derive(b, theme, photos, photo, notes=gaps)
         answer = await agent.ask(
             "design", chat_id,
             _brief(theme, copy, photos, size, n, markup=False) +
@@ -988,7 +1037,7 @@ async def build(chat_id: int, ask: str, *, say=None,
 
     lay = Layout(theme=theme, cards=cards,
                  accent=str(data.get("accent") or ""),
-                 notes=[str(n) for n in (data.get("notes") or [])])
+                 notes=gaps + [str(n) for n in (data.get("notes") or [])])
 
     # Сверять готовый макет не с чем — это находка, а не пустяк. Молчание
     # тут неотличимо от «всё сошлось», а на деле у площадки просто нет ни
@@ -1079,7 +1128,7 @@ async def land(chat_id: int, data: dict[str, Any]) -> Layout:
     if row is None:
         raise NoWork(f"темы {tid} нет в базе")
     theme = dict(row)
-    if not theme.get("asset"):
+    if not theme.get("asset") and not takes_theme_words(theme):
         raise NoWork(f"у темы {tid} нет утверждённого текста: верстать "
                      "черновик значит верстать дважды")
 
@@ -1090,8 +1139,10 @@ async def land(chat_id: int, data: dict[str, Any]) -> Layout:
     photos = _photos(b)
     copy = _copy(b, theme)
 
+    notes = [str(n) for n in (data.get("notes") or [])]
     if tpls:
-        cards = _cards_from_slots(data, tpls, photos, _derive(b, theme, photos))
+        cards = _cards_from_slots(data, tpls, photos,
+                                  _derive(b, theme, photos, notes=notes))
     else:
         cards = [c for c in (data.get("cards") or [])
                  if isinstance(c, dict) and str(c.get("html") or "").strip()]
@@ -1099,8 +1150,7 @@ async def land(chat_id: int, data: dict[str, Any]) -> Layout:
         raise NoWork(f"по теме {tid} не пришло ни одного макета")
 
     lay = Layout(theme=theme, cards=cards,
-                 accent=str(data.get("accent") or ""),
-                 notes=[str(n) for n in (data.get("notes") or [])])
+                 accent=str(data.get("accent") or ""), notes=notes)
     return await emit(b, lay, size_of(theme), copy, photos, slots=bool(tpls))
 
 
