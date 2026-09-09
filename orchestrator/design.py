@@ -393,10 +393,16 @@ def chrome() -> str:
 # ── вход ──────────────────────────────────────────────────────────────
 
 def _pick(chat_id: int, ask: str) -> dict[str, Any]:
-    """Тема с утверждённым текстом. Верстать черновик смысла нет."""
+    """Тема с утверждённым текстом. Верстать черновик смысла нет.
+
+    У обложки ролика текста не бывает вовсе: слова ей даёт тема, а не
+    Редактор (`takes_theme_words`). Третий гейт того же правила — после
+    `land` и `_copy`; пока он стоял здесь один, путь бота отказывал
+    ровно там, где остальные два уже пропускали.
+    """
     return desk.pick(
         chat_id, ask, statuses=("ready",), fresh="ready",
-        suits=lambda r: bool(r["asset"]),
+        suits=lambda r: bool(r["asset"]) or (r["format"] or "") in FROM_THEME,
         wrong="у темы {id} нет утверждённого текста",
         none="темы {id} нет среди утверждённых",
         empty="нет ни одного утверждённого текста")
@@ -1765,7 +1771,18 @@ async def _patch_slots(reg, chat_id: int, lay: Layout, htmls: list[Path],
         f = path.with_name(f"{path.stem}.slots.json")
         if not f.exists():
             raise NoWork("слотов на диске нет, макет собран старым способом")
-        current[name] = _json.loads(f.read_text(encoding="utf-8"))
+        saved = _json.loads(f.read_text(encoding="utf-8"))
+        # Слоты на диске могли остаться от прежней версии шаблона: у
+        # обложки ролика контракт сменился с заголовка на лесенку, и
+        # старые имена доезжали до `_fill` отказом «лишние слоты». Для
+        # человека это ложь о причине — правится не его просьба, а то,
+        # что макет собран по другому шаблону.
+        tpl = {stem: t for stem, t in tpls}.get(name) or tpls[0][1]
+        stale = set(saved) - (set(SLOT_RX.findall(tpl)) - _computed(tpl))
+        if stale:
+            raise NoWork("макет собран по прежней версии шаблона "
+                         f"({', '.join(sorted(stale))}) — точечно не правится")
+        current[name] = saved
 
     await reg.say("design", chat_id, f"Правлю по слотам: {instruction}",
                   topic=topic)

@@ -728,6 +728,35 @@ async def main() -> None:
         check("без запаса отказ", "запасной нет" in str(e), str(e))
 
 
+    # Отбор темы — третий гейт того же правила, после `land` и `_copy`.
+    # Пока он стоял непочиненным, путь бота отказывал ровно там, где
+    # остальные два уже пропускали, и человек видел «сначала текст от
+    # Редактора» по теме, у которой текста не будет никогда.
+    with db.tx() as c:
+        c.execute("DELETE FROM themes WHERE chat_id = ?", (CHAT,))
+        c.execute("INSERT INTO themes (id, chat_id, plat, format, rubric, "
+                  "status, title, hook, src, asset) VALUES "
+                  "(?,?,'instagram','reels','','ready',?,?,'adhoc',NULL)",
+                  ("adhoc-08", CHAT, "Техника наводящих вопросов",
+                   "Сначала задай мне несколько вопросов"))
+    picked = design._pick(CHAT, "свёрстай обложку по теме adhoc-08")
+    check("тема без текста Редактора отбирается под обложку",
+          picked["id"] == "adhoc-08", str(picked.get("id")))
+
+    # Пост без текста по-прежнему не верстается: правило не ослабло, оно
+    # просто перестало распространяться на обложку ролика.
+    with db.tx() as c:
+        c.execute("UPDATE themes SET format = 'пост', plat = 'telegram' "
+                  "WHERE chat_id = ?", (CHAT,))
+    try:
+        design._pick(CHAT, "свёрстай обложку по теме adhoc-08")
+        check("пост без текста не отбирается", False, "исключения не было")
+    except NoWork as e:
+        # Формулировка зависит от того, осталась ли хоть одна годная
+        # тема: «у темы N нет» против «нет ни одного». Важно, что отказ.
+        check("пост без текста не отбирается",
+              "утверждённого текста" in str(e), str(e))
+
     # ── 14. обложка ролика говорит языком бренда ──────────────────────
     print("\n14. Лесенка обложки, а не заголовок")
     reels_tpl = design._templates("instagram", "reels")
