@@ -1,11 +1,16 @@
 <!-- @dsTemplate viewport="1080x1920" name="Instagram · reels"
-     Обложка рилса, которую верстает Дизайнер. Не путать с обложкой,
+     Обложка ролика, которую верстает Дизайнер. Не путать с обложкой,
      которую собирает монтаж из кадра дубля (`montage`, ТЗ
-     `design/platforms/instagram-reels-cover.md`): эта нужна, когда
-     дубля нет или кадр из него не годится.
+     `design/platforms/instagram-reels-cover.md`): та нужна, когда этой
+     нет.
 
-     Кегль хука идёт от `_fit` и умножается в CSS: холст выше, места
-     под текст больше, а арифметика остаётся в одном месте. -->
+     Язык снят с живых обложек бренда (`design/assets/reference/reels/`):
+     узкая тяжёлая буква поверх кадра, лесенка коротких строк, каждая
+     своим цветом, без затемнения. Затемнения тут нет нарочно — вес
+     буквы держит читаемость сам, а скрим превращал обложку в титр.
+
+     Кегль каждой строки считает код (`_cover_fit`), цвет назначает CSS
+     по месту строки. Модель приносит только разбивку по смыслу. -->
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <link rel="stylesheet" href="../design/tokens.css"><style>
   *{box-sizing:border-box;margin:0;padding:0;}
@@ -13,28 +18,52 @@
   .slide{width:1080px;height:1920px;position:relative;overflow:hidden;
          background:var(--graphite);}
   img{display:block;}
-  .pill{position:absolute;left:80px;top:250px;padding:18px 38px;
-        border-radius:100px;background:rgba(255,255,255,0.18);
-        backdrop-filter:blur(6px);font-family:var(--font-display);
-        font-size:32px;font-weight:700;letter-spacing:0.08em;
-        text-transform:uppercase;color:#fff;}
-  .well{position:absolute;left:80px;right:80px;bottom:320px;}
-  .head{--accent-headline:var(--accent-on-dark);font-family:var(--font-display);font-weight:800;line-height:1.04;
-        letter-spacing:-0.025em;color:var(--milk);
-        font-size:calc({{headline_size}}px * 1.18);}
-  .sub{font-family:var(--font-body);font-size:46px;line-height:1.4;
-       color:rgba(248,245,241,0.85);margin-top:40px;max-width:860px;}
+  .shot{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;}
+
+  /* Маскот и рубрика — верхний угол. Оба необязательны. */
+  .mascot{position:absolute;left:72px;top:120px;width:260px;height:auto;}
+  .rubric{position:absolute;left:78px;top:420px;
+          font-family:var(--font-cover);font-weight:700;font-size:44px;
+          letter-spacing:0.06em;text-transform:uppercase;
+          color:var(--cover-1);}
+  .rubric:empty{display:none;}
+
+  /* Низ обложки — одна колонка: лесенка, под ней плашка. Колонкой, а
+     не двумя абсолютными блоками: у плашки и лесенки высота считается
+     из текста, и порознь они наезжали друг на друга тем вернее, чем
+     длиннее фраза. */
+  .bottom{position:absolute;left:72px;right:72px;bottom:120px;
+          display:flex;flex-direction:column;align-items:flex-start;gap:44px;}
+  .well{width:100%;}
+  .line{font-family:var(--font-cover);font-weight:900;line-height:0.94;
+        letter-spacing:-0.01em;text-transform:uppercase;
+        text-wrap:balance;}
+  .line:empty{display:none;}
+  .line:nth-of-type(1){color:var(--cover-1);}
+  .line:nth-of-type(2){color:var(--cover-2);}
+  .line:nth-of-type(3){color:var(--cover-3);}
+  .line:nth-of-type(4){color:var(--cover-1);}
+
+  /* Плашка бренда под лесенкой. Размер скромный нарочно: в фотобанке
+     бренда лежит квадратный знак, а не пилюля с надписью, и во всю
+     ширину он читается белым прямоугольником поверх кадра. */
+  .sticker{width:132px;height:132px;border-radius:50%;object-fit:cover;}
+  /* Стикера может не быть вовсе: пустой слот оставляет `src`,
+     оканчивающийся на слэш, и Chrome рисует значок битой картинки.
+     Прячем оба — и маскот, и плашку. */
+  img[src$="/"]{display:none;}
 </style></head><body>
 <div class="slide">
-  <img src="../design/assets/images/{{photo}}"
-       style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;">
-  <div style="position:absolute;inset:0;background:linear-gradient(180deg,
-       rgba(31,31,31,0.45) 0%,rgba(31,31,31,0.08) 32%,
-       rgba(31,31,31,0.86) 100%);"></div>
-  <div class="pill">{{rubric}}</div>
-  <div class="well">
-    <div class="head">{{headline}}<span
-         style="color:var(--accent-on-dark);">{{headline_accent}}</span></div>
-    <div class="sub">{{subtitle}}</div>
+  <img class="shot" src="../design/assets/images/{{photo}}">
+  <img class="mascot" src="../design/assets/stickers/{{mascot}}">
+  <div class="rubric">{{rubric}}</div>
+  <div class="bottom">
+    <div class="well">
+      <div class="line" style="font-size:{{line1_size}}px">{{line1}}</div>
+      <div class="line" style="font-size:{{line2_size}}px">{{line2}}</div>
+      <div class="line" style="font-size:{{line3_size}}px">{{line3}}</div>
+      <div class="line" style="font-size:{{line4_size}}px">{{line4}}</div>
+    </div>
+    <img class="sticker" src="../design/assets/stickers/{{sticker}}">
   </div>
 </div></body></html>

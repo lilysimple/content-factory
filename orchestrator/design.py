@@ -151,9 +151,75 @@ SLOTS: dict[str, tuple[str, int]] = {
 # повтор фото через день заметить не может в принципе.
 MODEL_SLOTS = ("headline", "headline_accent", "subtitle")
 
+# У обложки ролика контракт свой, и общий сюда не годится дважды.
+#
+# Первое: у неё не заголовок, а лесенка — три-четыре коротких строки, и
+# ломает их не арифметика, а смысл («Собираю контент агентов / в тг чате
+# / с помощью»). Кто где переносит, решает модель; цвет и кегль строки
+# считает код.
+#
+# Второе: потолок в 52 знака ставил её в тупик. Хук на 61 знак получал
+# минимальный кегль и на плитке в сетке читался мелким — а разложенный
+# лесенкой он как раз крупный. Потолок здесь на всю фразу, не на строку.
+COVER_SLOTS: dict[str, tuple[str, int]] = {
+    "line1": ("первая строка обложки, одно-три слова", 30),
+    "line2": ("вторая строка", 30),
+    "line3": ("третья строка, можно пустой", 30),
+    "line4": ("четвёртая строка, можно пустой", 30),
+}
+COVER_MODEL_SLOTS = ("line1", "line2", "line3", "line4")
+
+# Пустыми бывают хвостовые строки лесенки и стикеры: у бренда может не
+# быть ни одного, и это не дырка в макете.
+# Строки лесенки поштучно пустыми быть вправе все: минимум держит одно
+# правило («хотя бы две») там же, где считается сама лесенка. Два места
+# на одно требование дают два разных сообщения об одной ошибке, и первым
+# срабатывает менее внятное.
+MAY_BE_EMPTY = ("headline_accent", "handle", "sticker", "mascot",
+                *("line1", "line2", "line3", "line4"))
+
+# Шаблоны, у которых слоты свои. Ключ — имя файла без расширения.
+OWN_SLOTS = {"instagram-reels": (COVER_SLOTS, COVER_MODEL_SLOTS)}
+
+# Стикеры обложки: картинки бренда, которые кладутся поверх кадра. Живут
+# отдельно от фотобанка нарочно — попав в `images/`, логотип попал бы в
+# ротацию фонов и однажды встал бы фоном обложки.
+STICKERS = "design/assets/stickers"
+STICKER_SLOTS: dict[str, tuple[str, int]] = {
+    "sticker": ("картинка-плашка внизу обложки, ставит код", 0),
+    "mascot":  ("маскот бренда в углу обложки, ставит код", 0),
+}
+
+# Один реестр на все шаблоны: по нему считаются потолки и по нему же код
+# отличает свой слот от выдуманного.
+ALL_SLOTS = {**SLOTS, **COVER_SLOTS, **STICKER_SLOTS}
+
+
+def slots_of(tpls: list[tuple[str, str]]) -> tuple[dict[str, tuple[str, int]],
+                                                   tuple[str, ...]]:
+    """Контракт слотов под этот набор шаблонов: описания и доля модели.
+
+    Шаблон с собственным контрактом идёт один: карусель и обложка в
+    одном ответе не встречаются, а смешивать два словаря значило бы
+    показать модели слоты, которых в её шаблоне нет.
+    """
+    for stem, _ in tpls:
+        if stem in OWN_SLOTS:
+            return OWN_SLOTS[stem]
+    return SLOTS, MODEL_SLOTS
+
 # На правке фото возвращается модели: «поставь другое фото» — просьба
 # человека, и отвечать на неё ротацией нельзя.
 PATCH_SLOTS = MODEL_SLOTS + ("photo",)
+
+
+def patch_slots(tpls: list[tuple[str, str]]) -> tuple[str, ...]:
+    """Что можно править точечно: слоты модели плюс фото.
+
+    На правке фото возвращается модели: «поставь другое фото» — просьба
+    человека, и отвечать на неё ротацией нельзя.
+    """
+    return slots_of(tpls)[1] + ("photo",)
 
 # Правило выбора фото. Лежит у бренда, а не в коде продукта: `cover-red`
 # и `speaking` — имена файлов одного клиента, у следующего их нет.
@@ -249,7 +315,9 @@ def _schema(keys: tuple[str, ...]) -> dict[str, Any]:
 
 
 TEMPLATE_DIR = ROOT / "design-pack" / "templates"
-SLOT_RX = re.compile(r"\{\{([a-z_]+)\}\}")
+# Цифра в имени слота нужна лесенке обложки (`line1`…`line4`). Без неё
+# `{{line1}}` не считался слотом вовсе и уезжал в HTML как есть.
+SLOT_RX = re.compile(r"\{\{([a-z0-9_]+)\}\}")
 
 ABSOLUTE = re.compile(r'(?:href|src)\s*=\s*["\'](?:file://|/|[a-z]+://)', re.I)
 LITERAL_COLOR = re.compile(r":\s*#[0-9A-Fa-f]{3,8}\b")
@@ -368,6 +436,20 @@ def _copy(b, theme: dict[str, Any]) -> str:
     text = raw.split("-->", 1)[-1].strip() if raw.startswith("<!--") \
         else raw.strip()
     return desk.split_caption(text)[0] or text
+
+
+def _stickers(b) -> list[str]:
+    """Картинки-стикеры бренда. Нет папки — нет стикеров, и это не сбой."""
+    root = b.path(STICKERS)
+    if not root.is_dir():
+        return []
+    return sorted(f.name for f in root.iterdir()
+                  if f.suffix.lower() in (".png", ".svg", ".webp"))
+
+
+def _sticker(b, like: str) -> str:
+    """Стикер по куску имени: логотип — `logo`, маскот — `mascot`."""
+    return next((n for n in _stickers(b) if like in n.lower()), "")
 
 
 def _mark(b) -> str:
@@ -537,9 +619,15 @@ def _derive(b, theme: dict[str, Any], photos: list[str],
                          f"«{rubric}» из ТЗ бренда")
     if photo and photo not in photos:
         raise NoWork(f"фото «{photo}» нет в папке бренда")
-    return {"rubric": rubric.upper(),
-            "photo": photo or _pick_photo(b, theme, photos),
-            "handle": _mark(b)}
+    slots = {"rubric": rubric.upper(),
+             "photo": photo or _pick_photo(b, theme, photos),
+             "handle": _mark(b),
+             "sticker": _sticker(b, "logo"),
+             "mascot": _sticker(b, "mascot")}
+    if notes is not None and takes_theme_words(theme) and not slots["mascot"]:
+        notes.append("маскота нет в <code>design/assets/stickers/</code> — "
+                     "угол обложки остался пустым")
+    return slots
 
 
 def _spare_rubric(b, theme: dict[str, Any]) -> str:
@@ -707,6 +795,22 @@ def _accented(value: str) -> str:
         _html.escape(value, quote=True)).replace("\n", "<br>")
 
 
+def _computed(tpl: str) -> set[str]:
+    """Слоты, которые модель не заполняет: их считает `_fill` сам."""
+    return {"headline_size"} | {f"{n}_size" for n in COVER_MODEL_SLOTS}
+
+
+# Ступени кегля для строки лесенки. Отдельные от `_fit`: там заголовок в
+# несколько слов на всю ширину, здесь одно-три слова, и стартовать надо
+# заметно крупнее — иначе обложка перестаёт быть обложкой.
+def _cover_fit(line: str) -> int:
+    n = len(line.strip())
+    for limit, size in ((8, 200), (12, 168), (17, 136), (23, 108)):
+        if n <= limit:
+            return size
+    return 88
+
+
 def _fill(tpl: str, slots: dict[str, str], photos: list[str]) -> str:
     """Собрать HTML из шаблона. Значения экранируются, а не доверяются.
 
@@ -718,7 +822,7 @@ def _fill(tpl: str, slots: dict[str, str], photos: list[str]) -> str:
     Незнакомый слот и пропущенный слот — отказ, а не тихая дырка в
     макете: `{{headline}}`, доехавший до PNG как есть, выглядит рабочим.
     """
-    need = set(SLOT_RX.findall(tpl)) - {"headline_size"}
+    need = set(SLOT_RX.findall(tpl)) - _computed(tpl)
     unknown = set(slots) - need
     if unknown:
         raise NoWork("лишние слоты: " + ", ".join(sorted(unknown)))
@@ -729,7 +833,7 @@ def _fill(tpl: str, slots: dict[str, str], photos: list[str]) -> str:
 
     for name in need:
         val = (slots.get(name) or "").strip()
-        limit = SLOTS.get(name, ("", 0))[1]
+        limit = ALL_SLOTS.get(name, ("", 0))[1]
         # Звёздочки акцента в потолок не считаются: они разметка, а
         # человек на макете видит слово без них.
         if name == "headline":
@@ -738,20 +842,34 @@ def _fill(tpl: str, slots: dict[str, str], photos: list[str]) -> str:
             val_len = len(val)
         if limit and val_len > limit:
             raise NoWork(f"слот «{name}» длиннее {limit} знаков: {val_len}")
-        # Пустыми бывают двое: хвост акцента (его может не быть) и
-        # подпись бренда (её может не быть у бренда вовсе).
-        if not val and name not in ("headline_accent", "handle"):
+        # Пустыми бывают хвостовые строки лесенки, хвост акцента,
+        # подпись бренда и стикеры: ничего из этого может не быть.
+        if not val and name not in MAY_BE_EMPTY:
             raise NoWork(f"слот «{name}» пустой")
+
+    # Лесенка обложки: строк должно остаться хотя бы две, иначе это уже
+    # не обложка бренда, а титр во всю ширину.
+    if "line1" in need:
+        alive = [n for n in COVER_MODEL_SLOTS
+                 if n in need and (slots.get(n) or "").strip()]
+        if len(alive) < 2:
+            raise NoWork("в лесенке обложки осталась одна строка: "
+                         "так набирают титр, а не обложку бренда")
 
     head = (slots.get("headline") or "") + (slots.get("headline_accent") or "")
     ready = dict(slots, headline_size=str(_fit(head)))
+    # Кегль каждой строки лесенки: чем короче строка, тем крупнее. Ту же
+    # арифметику ведёт монтаж на своём пути (`montage.cover_lines`), и
+    # ступени у неё общие — `_fit`.
+    for name in COVER_MODEL_SLOTS:
+        ready[f"{name}_size"] = str(_cover_fit((slots.get(name) or "").strip()))
 
     def sub(m: re.Match[str]) -> str:
         name = m.group(1)
         val = ready.get(name, "")
         # Кегль это число от кода, экранировать нечего; текст от модели —
         # всегда экранируется: одна кавычка в заголовке иначе рвёт стиль.
-        if name == "headline_size":
+        if name in _computed(tpl):
             return val
         if name == "headline":
             return _accented(val)
@@ -790,9 +908,9 @@ def _cards_from_slots(data: dict[str, Any], tpls: list[tuple[str, str]],
         # падать от того, что `fixed` принёс фото для обложки, — но
         # выбрасывается только слот, известный коду. Выдуманный доезжает
         # до `_fill` и получает отказ, как и раньше.
-        need = set(SLOT_RX.findall(tpl)) - {"headline_size"}
+        need = set(SLOT_RX.findall(tpl)) - _computed(tpl)
         clean = {k: str(v) for k, v in slots.items()
-                 if k not in (fixed or {}) and (k in need or k not in SLOTS)}
+                 if k not in (fixed or {}) and (k in need or k not in ALL_SLOTS)}
         clean.update({k: v for k, v in (fixed or {}).items() if k in need})
         out.append({"name": name, "slots": clean,
                     "html": _fill(tpl, clean, photos)})
@@ -814,7 +932,7 @@ def _slot_brief(names: tuple[str, ...]) -> str:
     lines = ["## Слоты, которые ты заполняешь", "",
              "Разметку собирает код. Ты возвращаешь только значения.", ""]
     for name in names:
-        what, limit = SLOTS[name]
+        what, limit = ALL_SLOTS[name]
         cap = f", не длиннее {limit} знаков" if limit else ""
         lines.append(f"- `{name}` — {what}{cap}")
     lines += ["", "Больше в ответе нет ничего. Холст, цвета, кегль, рубрику "
@@ -840,7 +958,8 @@ def inspect(html: str, copy: str, size: tuple[int, int],
         if src.startswith("data:"):
             continue
         name = src.rsplit("/", 1)[-1]
-        if name and name not in photos and "assets" in src:
+        if name and name not in photos and "assets" in src \
+                and "/stickers/" not in src:
             out.append(f"фото {name} нет в папке бренда")
 
     w, h = size
@@ -1015,8 +1134,8 @@ async def build(chat_id: int, ask: str, *, say=None,
             _brief(theme, copy, photos, size, n, markup=False) +
             "\n\nЗаполни слоты.",
             brand_name=b.name(),
-            stable=_slots_stable(spec, MODEL_SLOTS),
-            max_tokens=MAX_TOKENS, schema=_schema(MODEL_SLOTS))
+            stable=_slots_stable(spec, slots_of(tpls)[1]),
+            max_tokens=MAX_TOKENS, schema=_schema(slots_of(tpls)[1]))
     else:
         answer = await agent.ask(
             "design", chat_id,
@@ -1667,9 +1786,9 @@ async def _patch_slots(reg, chat_id: int, lay: Layout, htmls: list[Path],
             "не поменять — её ставит Стратег; просят её — скажи строкой "
             "в `notes`.",
         ]),
-        brand_name=b.name(), stable=_slot_brief(PATCH_SLOTS),
+        brand_name=b.name(), stable=_slot_brief(patch_slots(tpls)),
         max_tokens=MAX_TOKENS, effort=PATCH_EFFORT,
-        schema=_schema(PATCH_SLOTS))
+        schema=_schema(patch_slots(tpls)))
 
     data = agent.parse_json(answer, who="дизайнер")
     got = {re.sub(r"[^a-z0-9-]", "", str(c.get("name") or "").lower()): c

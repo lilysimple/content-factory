@@ -728,5 +728,56 @@ async def main() -> None:
         check("без запаса отказ", "запасной нет" in str(e), str(e))
 
 
+    # ── 14. обложка ролика говорит языком бренда ──────────────────────
+    print("\n14. Лесенка обложки, а не заголовок")
+    reels_tpl = design._templates("instagram", "reels")
+    own, model_slots = design.slots_of(reels_tpl)
+    check("у обложки свои слоты модели",
+          model_slots == ("line1", "line2", "line3", "line4"),
+          str(model_slots))
+    check("карусель осталась при своих",
+          design.slots_of(design._templates("instagram", "карусель"))[1]
+          == design.MODEL_SLOTS)
+
+    # Кегль считает код, и чем короче строка, тем она крупнее: из этого
+    # берётся лесенка, ради которой всё затевалось.
+    check("короткая строка крупнее длинной",
+          design._cover_fit("Сначала") > design._cover_fit("задай мне вопросы"),
+          f"{design._cover_fit('Сначала')} против "
+          f"{design._cover_fit('задай мне вопросы')}")
+
+    stem, tpl = reels_tpl[0]
+    base = design._derive(b, reel, design._photos(b), "author.jpg", notes=[])
+    need = set(design.SLOT_RX.findall(tpl)) - design._computed(tpl)
+    ready = {k: v for k, v in base.items() if k in need}
+    ready.update(line1="Сначала", line2="задай мне", line3="несколько",
+                 line4="вопросов")
+    html = design._fill(tpl, ready, design._photos(b))
+    check("цифра в имени слота больше не теряется",
+          "{{line1}}" not in html and "СНАЧАЛА" not in html
+          and "Сначала" in html, html[:0] or "")
+    check("кегль подставлен числом", "font-size:200px" in html
+          or "font-size:168px" in html, "")
+    check("затемнения на обложке нет", "linear-gradient" not in html)
+
+    # Одна строка — это титр, а не обложка бренда.
+    try:
+        design._fill(tpl, dict(ready, line2="", line3="", line4=""),
+                     design._photos(b))
+        check("на одной строке отказ", False, "исключения не было")
+    except NoWork as e:
+        check("на одной строке отказ", "титр" in str(e), str(e))
+
+    # Стикеры живут вне фотобанка: знак бренда не должен попасть в
+    # ротацию фонов.
+    check("стикер не в списке фото",
+          all(not n.endswith("logo.png") for n in design._photos(b)),
+          str(design._photos(b))[:80])
+    check("инспекция не считает стикер пропавшим фото",
+          not any("нет в папке бренда" in f for f in
+                  design.inspect(html, words, (1080, 1920), design._photos(b))),
+          str(design.inspect(html, words, (1080, 1920), design._photos(b))))
+
+
 asyncio.run(main())
 raise SystemExit(report())
