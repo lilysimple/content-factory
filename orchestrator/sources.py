@@ -7,8 +7,9 @@ Telegram отдаётся бесплатно и полно: `t.me/s/<канал>
 и токенов. Это закрывает и распаковку, и конкурентный анализ.
 
 Instagram публичного доступа не даёт: страница отдаётся пустой оболочкой,
-контент подгружается скриптом. Честно возвращаем «не открылось» вместо
-попыток обойти — правило «отсутствие данных это тоже результат».
+контент подгружается скриптом. Отсюда за ним не ходят вовсе — профили
+снимает `tools/instagram_pull.py` через залогиненный Chrome, а читает их
+`orchestrator/instagram.py` из кэша папки бренда.
 """
 from __future__ import annotations
 
@@ -174,6 +175,10 @@ class Post:
     text: str
     views: int | None = None
     date: datetime | None = None
+    # Лайки и комментарии есть у Instagram и нет у ленты Telegram. Поля
+    # необязательные: прочерк означает «площадка не отдаёт», а не ноль.
+    likes: int | None = None
+    comments: int | None = None
 
     @property
     def length(self) -> int:
@@ -208,6 +213,17 @@ class Source:
                     f"средняя длина {avg} знаков"
                     + (f", медиана просмотров {sorted(seen)[len(seen)//2]}"
                        if seen else "")
+                    + (f", {self.subscribers}" if self.subscribers else ""))
+        if self.kind == "instagram":
+            # Медиана тут по лайкам: просмотры Instagram отдаёт только у
+            # видео, и подписать ими сетку значило бы соврать читателю.
+            liked = [p.likes for p in self.posts if p.likes]
+            dated = [p.date for p in self.posts if p.date]
+            return (f"{self.title or self.url}: "
+                    f"{len(self.posts)} постов в кэше"
+                    + (f", свежий {max(dated):%d.%m}" if dated else "")
+                    + (f", медиана лайков {sorted(liked)[len(liked)//2]}"
+                       if liked else "")
                     + (f", {self.subscribers}" if self.subscribers else ""))
         return f"{self.title or self.url}: {len(self.text)} знаков текста"
 
@@ -244,8 +260,12 @@ async def fetch(url: str, *, limit: int = 40) -> Source:
     src = Source(url=norm, kind=kind)
 
     if kind == "instagram":
-        src.error = ("публичного доступа нет, страница отдаётся пустой. "
-                     "Попроси прислать посты вручную")
+        # Сеть тут не при чём: страница отдаётся пустой оболочкой, а
+        # `api/v1` без залогиненной сессии — пустотой или капчей. Профили
+        # снимает `tools/instagram_pull.py` в кэш папки бренда, читает
+        # `orchestrator/instagram.py`. Отсюда за ними не ходят.
+        src.error = ("публичного доступа нет: профиль читается из кэша, "
+                     "который снимает `tools/instagram_pull.py`")
         return src
 
     try:

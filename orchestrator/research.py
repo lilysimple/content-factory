@@ -26,7 +26,7 @@ from statistics import median
 from typing import Any
 
 from config import cfg
-from orchestrator import agent, desk, sources
+from orchestrator import agent, desk, instagram, sources
 from storage import brand as brand_store
 
 log = logging.getLogger("research")
@@ -54,8 +54,13 @@ class Stats:
     title: str = ""
     subscribers: str = ""
     posts: int = 0
-    with_views: int = 0
+    with_views: int = 0        # постов, у которых метрика есть
     median: int = 0
+    # Чем меряем. У ленты Telegram это просмотры, у профиля Instagram —
+    # лайки: сетка отдаёт лайки у всего, просмотры только у видео.
+    # Подпись едет вместе с числом, иначе лайки в сводке прочитаются
+    # просмотрами и уедут в план как охват.
+    metric: str = "просмотров"
     best: list[tuple[int, str]] = field(default_factory=list)
     worst: list[tuple[int, str]] = field(default_factory=list)
 
@@ -145,15 +150,26 @@ def last_week(today: date | None = None) -> Window:
     return Window(monday, sunday, f"{monday:%G-W%V}")
 
 
-def measure(src: sources.Source, *, window: Window | None = None) -> Stats:
-    """Что видно по числам. Без интерпретаций — их даёт модель."""
-    st = Stats(channel=src.url, title=src.title, subscribers=src.subscribers)
+METRICS = {"views": "просмотров", "likes": "лайков"}
+
+
+def measure(src: sources.Source, *, window: Window | None = None,
+            metric: str = "views") -> Stats:
+    """Что видно по числам. Без интерпретаций — их даёт модель.
+
+    `metric` это имя поля у поста: `views` у ленты, `likes` у профиля
+    Instagram. Считается одной арифметикой, подписывается разными
+    словами — второго дома у медианы не появляется.
+    """
+    st = Stats(channel=src.url, title=src.title, subscribers=src.subscribers,
+               metric=METRICS.get(metric, metric))
     posts = src.posts
     if window is not None:
         posts, st.outside, st.undated = window.split(posts)
         st.window = str(window)
         st.covered = window.reaches(src.posts)
-    seen = [(p.views, p.text) for p in posts if p.views is not None]
+    seen = [(getattr(p, metric), p.text) for p in posts
+            if getattr(p, metric, None) is not None]
     st.posts = len(posts)
     st.with_views = len(seen)
     if not seen:
@@ -217,8 +233,11 @@ def stash_stats(b, blob: bytes, name: str) -> Path:
 def _line(p: sources.Post) -> str:
     # Просмотров у фида нет и не будет: их не отдают. Прочерк на этом месте
     # читается как «ноль просмотров», а это разные вещи — колонка просто
-    # исчезает.
+    # исчезает. У Instagram по той же причине пишутся лайки: просмотры
+    # там есть только у видео, и подписать ими фото значило бы соврать.
     seen = f"{p.views} просм. · " if p.views is not None else ""
+    if not seen and p.likes is not None:
+        seen = f"{p.likes} лайк. · "
     when = f"{p.date:%d.%m}" if p.date else "дата?"
     return f"- {seen}{when} · {_cut(p.text, SNAP_CUT)}"
 
@@ -275,12 +294,17 @@ async def snapshot(b, *, window: Window | None = None) -> tuple[str, list[str]]:
         gaps.append("своего канала в настройках нет: PUBLISH_CHANNEL пуст")
 
     urls = watchlist(b)
+    # Профили Instagram идут не в сеть, а в кэш: за них ходит
+    # `tools/instagram_pull.py`. Разводим здесь, иначе `fetch_all` вернёт
+    # на каждый профиль «не открылось» и дыра назовёт причиной сеть.
+    profiles = [u for u in urls if instagram.is_profile(u)]
+    feeds = [u for u in urls if u not in profiles]
     if not urls:
         gaps.append(f"списка чужих источников нет: заведи `{WATCHLIST}` "
                     "в папке бренда")
-    else:
+    elif feeds:
         try:
-            others = await sources.fetch_all(urls, limit=20)
+            others = await sources.fetch_all(feeds, limit=20)
         except Exception as e:                   # noqa: BLE001
             others = []
             gaps.append(f"чужие источники не открылись: {type(e).__name__}")
@@ -330,6 +354,42 @@ async def snapshot(b, *, window: Window | None = None) -> tuple[str, list[str]]:
                     "Окно покрыто |",
                     "|---|---|---|---|---|"] + rows + [""]
             out += ["Верх и низ каждого канала внутри окна:", ""] + blocks
+
+    if profiles:
+        igs, ig_gaps = instagram.collect(b, profiles)
+        gaps += ig_gaps
+        rows, blocks = [], []
+        for src in igs:
+            st = measure(src, window=window, metric="likes")
+            name = src.title or src.url
+            subs = src.subscribers.split()[0] if src.subscribers else "—"
+            rows.append(f"| {name.replace('|', '/')} | {subs} | {st.posts} | "
+                        f"{st.median or '—'} | {'да' if st.covered else 'нет'} |")
+            if not st.covered:
+                gaps.append(f"{name}: кэш не дотянулся до начала окна, "
+                            "срез по профилю неполон")
+            inside, _, _ = window.split(src.posts)
+            if not inside:
+                gaps.append(f"{name}: в окне нет ни одного поста — "
+                            "сравнивать нечего")
+                continue
+            rank = sorted(inside, key=lambda p: p.likes or 0, reverse=True)
+            blocks += [f"### {name}", ""]
+            blocks += [_line(p) for p in rank[:SNAP_TOP]]
+            if len(rank) > SNAP_TOP * 2:
+                blocks.append("- …")
+            if len(rank) > SNAP_TOP:
+                blocks += [_line(p) for p in rank[-SNAP_TOP:]]
+            blocks.append("")
+        if rows:
+            out += ["## Instagram-профили", "",
+                    "Медиана здесь по **лайкам**, а не по просмотрам: сетка "
+                    "отдаёт лайки у всего, просмотры — только у видео. С "
+                    "числами Telegram эти не сравниваются.", "",
+                    "| Профиль | Подписчиков | Постов в окне | Медиана лайков | "
+                    "Окно покрыто |",
+                    "|---|---|---|---|---|"] + rows + [""]
+            out += ["Верх и низ каждого профиля внутри окна:", ""] + blocks
 
     shots, tables = stashed(b)
     out += ["## Скрины статистики", ""]
@@ -424,7 +484,14 @@ def _brief(st: Stats, others: list[sources.Source]) -> str:
             continue
         lines += ["", f"### {s.title or s.url}", s.summary(), ""]
         for p in s.posts[:12]:
-            head = f"[{p.views} просм.] " if p.views is not None else ""
+            if p.views is not None:
+                head = f"[{p.views} просм.] "
+            elif p.likes is not None:
+                # Профиль Instagram: лайки. Подписаны словом, чтобы не
+                # прочитались охватом и не уехали в план как просмотры.
+                head = f"[{p.likes} лайк.] "
+            else:
+                head = ""
             lines.append(f"- {head}{_cut(p.text, 200)}")
     return "\n".join(lines)
 
@@ -459,7 +526,15 @@ async def build(chat_id: int, ask: str, *, say=None) -> Digest:
         else:
             dg.failed.append(f"свой канал {own}: {src.error}")
 
-    others = await sources.fetch_all(others_urls, limit=20) if others_urls else []
+    profiles = [u for u in others_urls if instagram.is_profile(u)]
+    feeds = [u for u in others_urls if u not in profiles]
+    others = await sources.fetch_all(feeds, limit=20) if feeds else []
+    if profiles:
+        # Профили читаются из кэша: за ними ходит `tools/instagram_pull.py`,
+        # а не эта корутина. Дальше они идут тем же списком, что каналы.
+        igs, ig_gaps = instagram.collect(b, profiles)
+        others += igs
+        dg.gaps += ig_gaps
     for s in others:
         (dg.watched if s.ok else dg.failed).append(s.summary())
     if not others_urls:
