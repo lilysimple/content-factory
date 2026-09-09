@@ -4,6 +4,7 @@ import {loadFont as loadManrope} from '@remotion/google-fonts/Manrope';
 import {loadFont as loadMontserrat} from '@remotion/google-fonts/Montserrat';
 import {loadFont as loadUnbounded} from '@remotion/google-fonts/Unbounded';
 import {loadFont as loadGolos} from '@remotion/google-fonts/GolosText';
+import {loadFont as loadFiraCondensed} from '@remotion/google-fonts/FiraSansCondensed';
 import type {ReelProps} from './props';
 
 // Шрифт обложки называется в ТЗ бренда, а не зашит здесь: сменить его —
@@ -32,6 +33,10 @@ const FONTS: Record<string, string> = {
     subsets: [...SUBSETS],
   }).fontFamily,
   GolosText: loadGolos('normal', {
+    weights: ['500', '900'],
+    subsets: [...SUBSETS],
+  }).fontFamily,
+  FiraSansCondensed: loadFiraCondensed('normal', {
     weights: ['500', '900'],
     subsets: [...SUBSETS],
   }).fontFamily,

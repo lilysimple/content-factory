@@ -131,6 +131,23 @@ def main() -> None:
     check("файла нет — не обложка, а не падение",
           montage._png_size(posts / "нет.png") is None)
 
+    print("\n9б. Обложка Дизайнера идёт первым кадром целиком")
+    # Она уже свёрстана: фото из фотобанка, рубрика, заголовок. Свои
+    # строки монтаж клал бы поверх чужих слов — до 07.09 так и было.
+    png("reel-01-cover.png", 1080, 1920)
+    dressed = montage.Reel(
+        theme={"id": "reel-01", "plat": "instagram", "format": "reels"},
+        video=posts / "нет.mov", hook="Я перестала писать посты руками")
+    asyncio.run(montage._intro(dressed, _brand(), (1080, 1920)))
+    check("обложка взята", dressed.cover is not None
+          and dressed.cover.name == "reel-01-cover.png", str(dressed.cover))
+    check("своих строк на неё не кладём", dressed.lines == [],
+          str(dressed.lines))
+    check("и заголовка тоже", dressed.dressed)
+    check("человеку сказано, чья обложка",
+          any("Дизайнер" in f for f in dressed.findings),
+          str(dressed.findings))
+
     print("\n10. Порог тишины меряется по записи")
     js = '{ "input_i" : "-19.5", "input_thresh" : "-31.42" }'
     check("порог взят из loudnorm",

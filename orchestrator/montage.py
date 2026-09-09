@@ -152,6 +152,9 @@ class Reel:
     crop: tuple[float, float] = (0.5, 0.5)
     anchor: str = "bottom"
     inset: int = 0
+    # Обложка пришла от Дизайнера свёрстанной целиком. Тогда свой текст
+    # на первый кадр монтаж не кладёт: слова там уже есть.
+    dressed: bool = False
     pages: list[dict[str, Any]] = field(default_factory=list)
     out: Path | None = None
     findings: list[str] = field(default_factory=list)
@@ -378,6 +381,7 @@ COVER_FONTS = {
     "Montserrat": 0.68,
     "Unbounded": 0.86,
     "GolosText": 0.62,
+    "FiraSansCondensed": 0.50,
 }
 
 COVER_DEFAULTS = {
@@ -869,14 +873,16 @@ async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
         "coverFocus": {"x": reel.crop[0], "y": reel.crop[1]},
         "coverAnchor": reel.anchor,
         "coverInset": reel.inset or round(h * COVER_INSET),
-        "title": (reel.title if 0 < len(reel.title) <= TITLE_LIMIT else None),
+        "title": (None if reel.dressed
+                  else reel.title if 0 < len(reel.title) <= TITLE_LIMIT
+                  else None),
         "hook": reel.hook or None,
         "coverLines": reel.lines,
         "coverFont": reel.spec.get("font") or "Manrope",
         "coverWeight": int(reel.spec.get("weight") or 800),
         "titleColor": reel.spec.get("title-color") or "#FFFFFF",
         "titleSize": title_size(reel.title or "", w, reel.spec),
-        "scrim": float(reel.spec.get("scrim") or 0.28),
+        "scrim": 0.0 if reel.dressed else float(reel.spec.get("scrim") or 0.28),
         "cta": reel.cta or None,
         "brandColor": reel.color,
         "accentColor": reel.accent,
@@ -1008,10 +1014,26 @@ async def _intro(reel: Reel, b, size: tuple[int, int]) -> None:
     обрубки спорят с нашим текстом — такую не берём вовсе. Остаётся кадр
     из самого дубля: нарисовать обложку монтажу нечем, зато снятое
     человеком видео у него есть.
+
+    Обложка Дизайнера приходит **свёрстанной целиком**: фото из
+    фотобанка, рубрика, заголовок, подзаголовок. Своих слов монтаж на
+    неё не кладёт — они легли бы поверх чужих, — и затемнение тоже не
+    рисует: свой скрим у неё уже есть. Текст монтажа остаётся для
+    запасного пути, где под ним голый кадр дубля.
     """
     tid = reel.theme["id"]
     plat = reel.theme.get("plat") or "instagram"
     fmt = reel.theme.get("format") or "reels"
+
+    cover = _cover(b, tid)
+    if cover and _cover_fits(cover, size):
+        # ТЗ обложки тут не спрашиваем и строк не считаем: всё, что оно
+        # решает, — как монтаж набирает свой текст, а его не будет.
+        reel.cover = cover
+        reel.dressed = True
+        reel.findings.append(
+            f"первый кадр — обложка Дизайнера <code>{cover.name}</code>")
+        return
 
     reel.spec, gap = _cover_spec(b, plat, fmt)
     if gap:
@@ -1021,11 +1043,6 @@ async def _intro(reel: Reel, b, size: tuple[int, int]) -> None:
         reel.findings.append(
             f"заголовок темы длиннее {TITLE_LIMIT} знаков — на обложку "
             "не поставлен, там остался хук")
-
-    cover = _cover(b, tid)
-    if cover and _cover_fits(cover, size):
-        reel.cover = cover
-        return
 
     if cover:
         reel.findings.append(
@@ -1478,6 +1495,12 @@ async def refit(reel: Reel, b, *, say=None) -> Reel:
     lost = "кадр обложки не сохранился — первый кадр собран без него"
     if reel.cover and not reel.cover.exists():
         reel.cover = None
+        if reel.dressed:
+            # Обложку Дизайнера унесли между рендерами: свой текст на
+            # первый кадр монтаж не клал, и без него кадр остался бы
+            # пустым. Набираем его заново, как на запасном пути.
+            reel.dressed = False
+            reel.lines = cover_lines(reel.hook, size, reel.spec)
         if lost not in reel.findings:       # правок может быть несколько
             reel.findings.append(lost)
 
