@@ -444,6 +444,26 @@ def _copy(b, theme: dict[str, Any]) -> str:
     return desk.split_caption(text)[0] or text
 
 
+def cover_source(theme: dict[str, Any], slots: dict[str, str]) -> str:
+    """Откуда роль взяла слова обложки: `hook`, `title` или пусто.
+
+    Обещание в ТЗ тут не гарантия. Роль вправе взять заголовок вместо
+    хука, когда хук не читается с одного взгляда, — но человек должен
+    узнать об этом от кода, а не от её доброй воли: обложка, разошедшаяся
+    с первой фразой ролика, молча выглядит как задуманная.
+
+    Считаем по словам, а не по строке: лесенка ломает фразу переносами,
+    и склеивать её обратно значит зависеть от того, где именно.
+    """
+    got = _words(" ".join((slots.get(n) or "") for n in COVER_MODEL_SLOTS))
+    if not got:
+        return ""
+    near = {k: len(got & _words(str(theme.get(k) or "")))
+            for k in ("hook", "title")}
+    best = max(near, key=lambda k: near[k])
+    return best if near[best] else ""
+
+
 def _stickers(b) -> list[str]:
     """Картинки-стикеры бренда. Нет папки — нет стикеров, и это не сбой."""
     root = b.path(STICKERS)
@@ -1159,6 +1179,8 @@ async def build(chat_id: int, ask: str, *, say=None,
                  if isinstance(c, dict) and str(c.get("html") or "").strip()]
     if not cards:
         raise NoWork("Дизайнер не вернул ни одного макета")
+    if tpls:
+        _say_source(theme, cards, gaps)
 
     lay = Layout(theme=theme, cards=cards,
                  accent=str(data.get("accent") or ""),
@@ -1232,6 +1254,16 @@ def size_of(theme: dict[str, Any]) -> tuple[int, int]:
         or CANVAS[(plat, None)]
 
 
+def _say_source(theme: dict[str, Any], cards: list[dict[str, str]],
+                notes: list[str]) -> None:
+    """Сказать строкой, если на обложке заголовок, а не хук."""
+    if not cards or not str(theme.get("hook") or "").strip():
+        return
+    if cover_source(theme, cards[0].get("slots") or {}) == "title":
+        notes.append("на обложке заголовок темы, а не хук: хук с одного "
+                     "взгляда не прочитывался")
+
+
 async def land(chat_id: int, data: dict[str, Any]) -> Layout:
     """Посадить макет, собранный субагентом через мост.
 
@@ -1268,6 +1300,7 @@ async def land(chat_id: int, data: dict[str, Any]) -> Layout:
     if tpls:
         cards = _cards_from_slots(data, tpls, photos,
                                   _derive(b, theme, photos, notes=notes))
+        _say_source(theme, cards, notes)
     else:
         cards = [c for c in (data.get("cards") or [])
                  if isinstance(c, dict) and str(c.get("html") or "").strip()]
