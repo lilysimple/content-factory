@@ -166,7 +166,7 @@ class Registry:
         from aiogram.types import BufferedInputFile
 
         await self._throttle(chat_id)
-        thread = db.topic_id(chat_id, topic)
+        thread = await self._thread(chat_id, topic)
         kw: dict = {"chat_id": chat_id, "caption": caption or None,
                     "reply_markup": kb}
         if thread is not None:
@@ -181,10 +181,29 @@ class Registry:
                                         **kw)
         return await bot.send_document(document=file, **kw)
 
+    async def _thread(self, chat_id: int, topic: str) -> int | None:
+        """message_thread_id топика по ключу.
+
+        Ключа нет в базе у чата, который топики уже собрал, — значит он
+        появился в `topics.TOPICS` позже, чем группа. Заводим на месте:
+        иначе сообщение молча уезжает в General, и человек ищет свой
+        текст не там, где его обещали. Пустая таблица — другое дело, там
+        группа ещё не размечена, и один топик из одиннадцати тут рано.
+        """
+        if db.has_topic(chat_id, topic) or not db.topics_ready(chat_id):
+            return db.topic_id(chat_id, topic)
+
+        from bots import topics
+        try:
+            return await topics.recreate(self, chat_id, topic)
+        except TelegramBadRequest as e:
+            log.error("не завёлся топик %s: %s", topic, e)
+            return None
+
     async def _send(self, role: str, chat_id: int, text: str, topic: str,
                     kb: InlineKeyboardMarkup | None):
         body = text
-        thread = db.topic_id(chat_id, topic)
+        thread = await self._thread(chat_id, topic)
 
         for attempt in range(3):
             await self._throttle(chat_id)

@@ -220,6 +220,13 @@ def topic_id(chat_id: int, key: str) -> int | None:
     return row["topic_id"] if row else None
 
 
+def has_topic(chat_id: int, key: str) -> bool:
+    """Заведён ли ключ вообще. Отличается от `topic_id`: у General там
+    осмысленный NULL, и по `is None` новый ключ от General не отличить."""
+    return one("SELECT 1 FROM topics WHERE chat_id = ? AND key = ?",
+               chat_id, key) is not None
+
+
 def topics_ready(chat_id: int) -> bool:
     row = one("SELECT COUNT(*) n FROM topics WHERE chat_id = ?", chat_id)
     return bool(row and row["n"] > 0)

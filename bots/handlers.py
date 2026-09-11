@@ -28,7 +28,7 @@ from storage import db
 log = logging.getLogger("handlers")
 
 # Куда отвечать, если команду дали в General: у каждой задачи свой топик.
-TOPIC = {"plan": "review", "post": "review", "reels": "reels",
+TOPIC = {"plan": "review", "post": "texts", "reels": "reels",
          "research": "research", "design": "design", "idea": "strategy"}
 
 # Роль, которую распознал старый маршрутизатор, → workflow моста.
@@ -158,11 +158,16 @@ async def _deliver(chat_id: int, tkey: str, res) -> None:
         strategy.remember(chat_id, res.plan_ids)
         await strategy.show_draft(registry, chat_id, res.text,
                                   role="assistant", prefix="bplan")
+    elif res.post_ids:
+        # Текст уходит в «📝 Тексты» тем же порядком и по той же причине,
+        # что план в «✍️ На ревью»: топик у результата свой, независимо
+        # от того, где его попросили и кто его собрал.
+        kb = editor.kb(res.post_ids[0], "bpost") if len(res.post_ids) == 1 \
+            else None
+        await editor.show(registry, chat_id, res.text, role="assistant",
+                          kb=kb, asked_in=tkey)
     else:
-        kb = (editor.kb(res.post_ids[0], "bpost")
-              if len(res.post_ids) == 1 else None)
-        await registry.say("assistant", chat_id, res.text, topic=tkey,
-                           kb=kb)
+        await registry.say("assistant", chat_id, res.text, topic=tkey)
 
     # Макет уезжает человеку картинками и файлами, а не строкой в
     # чате: показывает его тот же `design.show`, что и у старого
@@ -179,7 +184,7 @@ async def _deliver(chat_id: int, tkey: str, res) -> None:
                 "assistant", chat_id,
                 f"Текст по теме <code>{tid}</code> записан, "
                 "тема в статусе draft.",
-                topic=tkey, kb=editor.kb(tid, "bpost"))
+                topic=editor.TEXT_TOPIC, kb=editor.kb(tid, "bpost"))
 
     tail = [f"Задача <code>{task_id}</code>, {res.secs} с"]
     if res.cost is not None:
@@ -611,7 +616,7 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
 
         if editor.wants_fix(chat_id):
             await editor.revise(registry, chat_id, raw,
-                                topic=tkey or "review")
+                                topic=tkey or "texts")
             return
 
         if reels.wants_fix(chat_id):
@@ -685,7 +690,7 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             return
 
         if route.role == "editor":
-            await editor.run(registry, chat_id, raw, topic=tkey or "review")
+            await editor.run(registry, chat_id, raw, topic=tkey or "texts")
             return
 
         if route.role == "reels":
@@ -793,7 +798,7 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
 
         if kind == "bpost":
             tkey = (topic_key_of(chat_id, cb.message.message_thread_id)
-                    or "review")
+                    or "texts")
             act, _, tid = action.partition(":")
             theme = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
                            tid, chat_id)
@@ -830,7 +835,7 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         if kind == "post":
             tkey = topic_key_of(chat_id, cb.message.message_thread_id)
             await editor.on_callback(registry, chat_id, action,
-                                     topic=tkey or "review")
+                                     topic=tkey or "texts")
             return
         if kind == "reel":
             tkey = topic_key_of(chat_id, cb.message.message_thread_id)

@@ -541,7 +541,29 @@ def handoff(theme: dict[str, Any]) -> str:
     return "Публикатор покажет превью в «Очередь», когда придёт дата."
 
 
-async def run(reg, chat_id: int, ask: str, topic: str = "review") -> None:
+# Готовый текст живёт в одном месте, а не там, где его попросили.
+# «✍️ На ревью» держит черновик плана, «📝 Тексты» — то, что написано:
+# посты, карусели, адаптации. Разложенные по разным топикам тексты
+# невозможно перечитать подряд, а именно так их и читают перед неделей.
+TEXT_TOPIC = "texts"
+
+
+async def show(reg, chat_id: int, text: str, *, role: str = "editor",
+               kb: InlineKeyboardMarkup | None = None,
+               asked_in: str = TEXT_TOPIC) -> None:
+    """Карточка текста в «📝 Тексты», строка-окрик там, где просили.
+
+    Окрик не дублирует текст, а зовёт: топики в супергруппе свёрнуты, и
+    ответ, ушедший в соседний топик молча, человек ищет как поломку.
+    """
+    await reg.say(role, chat_id, text, kb=kb, topic=TEXT_TOPIC)
+    if asked_in and asked_in != TEXT_TOPIC:
+        await reg.say(role, chat_id,
+                      "✍️ Текст готов, он в «📝 Тексты» и ждёт приёмки.",
+                      topic=asked_in)
+
+
+async def run(reg, chat_id: int, ask: str, topic: str = "texts") -> None:
     table.clear(chat_id)
 
     async def say(text: str) -> None:
@@ -570,12 +592,12 @@ async def run(reg, chat_id: int, ask: str, topic: str = "review") -> None:
 
     log.info("%s: hold=%s | breaks=%s", draft.theme["id"], draft.hold,
              draft.breaks)
-    await reg.say("editor", chat_id, card(draft),
-                  kb=kb(draft.theme["id"]), topic=topic)
+    await show(reg, chat_id, card(draft), kb=kb(draft.theme["id"]),
+               asked_in=topic)
 
 
 async def revise(reg, chat_id: int, instruction: str,
-                 topic: str = "review") -> None:
+                 topic: str = "texts") -> None:
     """Пересобрать текст по правке человека."""
     draft = table.take(chat_id)
     if draft is None:
@@ -590,7 +612,7 @@ async def revise(reg, chat_id: int, instruction: str,
 
 
 async def on_callback(reg, chat_id: int, action: str,
-                      topic: str = "review") -> None:
+                      topic: str = "texts") -> None:
     action, _, theme_id = action.partition(":")
 
     async def say(text: str) -> None:
