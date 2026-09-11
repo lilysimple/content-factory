@@ -25,6 +25,11 @@ export type CaptionStyle = {
   // На шве градиент не работает: он затемняет низ панели, и склейка
   // двух картинок превращается в грязное пятно.
   plate?: boolean;
+  // Строка висит **над** линией `top`, а не под ней. Нужно на сплите:
+  // под швом начинается дубль, и в вертикальном кадре лицо стоит ровно
+  // там — слова ложились человеку на лицо. Над швом у панели пустое
+  // поле, и строка живёт на нём, ничего не закрывая.
+  above?: boolean;
 };
 
 const CaptionPage: React.FC<{
@@ -39,13 +44,19 @@ const CaptionPage: React.FC<{
   const now = page.start + frame / fps;
   const anchored = look.top !== undefined;
 
+  const above = anchored && look.above;
+
   return (
     <AbsoluteFill
       style={{
-        justifyContent: anchored ? 'flex-start' : 'flex-end',
+        justifyContent: anchored && !above ? 'flex-start' : 'flex-end',
         alignItems: 'center',
-        paddingTop: anchored ? look.top : undefined,
-        paddingBottom: anchored ? undefined : height * 0.16,
+        paddingTop: anchored && !above ? look.top : undefined,
+        paddingBottom: above
+          ? height - (look.top ?? 0)
+          : anchored
+            ? undefined
+            : height * 0.16,
       }}
     >
       {/* Тень под словом спасает на тёмном кадре и не спасает на светлом:

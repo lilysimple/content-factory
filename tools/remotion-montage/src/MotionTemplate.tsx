@@ -144,6 +144,10 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
                         ...it,
                         at: it.at - b.start,
                       })),
+                      valueAt:
+                        b.valueAt === undefined
+                          ? undefined
+                          : b.valueAt - b.start,
                     },
                   ]}
                   panelColor={props.panelColor}
@@ -164,7 +168,11 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
           Поверх всего, включая блоки на весь кадр: речь идёт непрерывно,
           и пропадающий на полном кадре субтитр читается как сбой. Шов
           держит строку и там: карточка на полном кадре стоит на своём
-          месте, и под ней ровно то же пустое поле. */}
+          месте, и под ней ровно то же пустое поле.
+
+          Строка висит **над** швом. Под ним начинается дубль, а в
+          вертикальном кадре лицо стоит ровно под швом — слова ложились
+          человеку на лицо. */}
       <Sequence from={0} durationInFrames={bodyFrames} name="Слова">
         {props.pages.length > 0 ? (
           <Captions
@@ -172,6 +180,7 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
             accent={props.accentColor}
             look={{
               top: seam,
+              above: true,
               fontSize: Math.round(height * 0.032),
               uppercase: true,
               plate: true,

@@ -983,6 +983,31 @@ def main() -> None:
     check("кривой цвет не режется молча на куски",
           montage._rgba("#12345", 0.1) == "#12345", montage._rgba("#12345", 0.1))
 
+    print("\n43. Блок говорит, чем он занят")
+    rich = [montage.Block(start=0.0, end=4.0, kind="counter", value=3,
+                          value_at=1.5, lines=["бизнес-модели"]),
+            montage.Block(start=4.0, end=8.0, kind="scale",
+                          items=[("low — быстро", 4.4),
+                                 ("high — рассуждение", 6.2)]),
+            montage.Block(start=8.0, end=9.0, kind="counter", value=5)]
+    rp = montage.motion_props(split_reel, rich, (1080, 1920))["blocks"]
+    check("тип блока доезжает до шаблона",
+          [b["kind"] for b in rp] == ["counter", "scale", "counter"], str(rp))
+    check("счётчик набирается на своём слове",
+          rp[0]["value"] == 3 and rp[0]["valueAt"] == 1.5, str(rp[0]))
+    check("счётчик без слова набирается с началом блока",
+          rp[2]["valueAt"] == 8.0, str(rp[2]))
+    check("обычный блок остаётся карточкой",
+          props["blocks"][0]["kind"] == "card", str(props["blocks"][0]["kind"]))
+    try:
+        montage.motion_props(split_reel,
+                             [montage.Block(start=0.0, end=1.0, kind="диаграмма")],
+                             (1080, 1920))
+        check("неизвестный тип блока — отказ, а не молчание", False, "прошло")
+    except ValueError as e:
+        check("неизвестный тип блока — отказ, а не молчание",
+              "диаграмма" in str(e), str(e))
+
 
 main()
 raise SystemExit(report())

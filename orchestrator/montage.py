@@ -1003,6 +1003,10 @@ async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
 
 MOTION_SPLIT = 0.448        # замер с кадра примера: 860 из 1920
 MOTION_HEADS = ("top", "bottom")
+# Чем блок занят. `card` — карточка со скрином или строками; остальные
+# три двигаются сами: знак прилетает пружиной, число набирается от нуля,
+# бегунок едет по ступеням. Картинка себя анимировать не умеет.
+MOTION_KINDS = ("card", "icon", "counter", "scale")
 GLOW_ALPHA = 0.13           # свечение под карточкой
 CARD_ALPHA = 0.06           # подложка карточки: молоко, почти прозрачное
 
@@ -1026,6 +1030,10 @@ class Block:
     # пункт едет с началом блока, а не пропадает с панели.
     items: list[tuple[str, float | None]] = field(default_factory=list)
     full: bool = False
+    kind: str = "card"
+    # `counter`: до какого числа считать и на каком слове набирать.
+    value: int | None = None
+    value_at: float | None = None
 
 
 def speak_at(reel: Reel, phrase: str) -> float | None:
@@ -1067,6 +1075,9 @@ def _block_props(b: Block, image: str | None) -> dict[str, Any]:
     пропущенный `items` приезжал не пустым списком, а `undefined` —
     рендер падал на `.map` первого же блока без списка.
     """
+    if b.kind not in MOTION_KINDS:
+        raise ValueError(f"блок бывает {', '.join(MOTION_KINDS)}, "
+                         f"а не «{b.kind}»")
     out: dict[str, Any] = {
         "start": round(b.start, 3),
         "end": round(b.end, 3),
@@ -1074,11 +1085,17 @@ def _block_props(b: Block, image: str | None) -> dict[str, Any]:
         "items": [{"text": text, "at": round(b.start if at is None else at, 3)}
                   for text, at in b.items],
         "full": b.full,
+        "kind": b.kind,
     }
     if b.kicker:
         out["kicker"] = b.kicker
     if image:
         out["imagePath"] = image
+    if b.value is not None:
+        out["value"] = b.value
+        # Не названа секунда — число набирается с началом блока: счётчик,
+        # который так и не тронулся, хуже счётчика не на том слове.
+        out["valueAt"] = round(b.start if b.value_at is None else b.value_at, 3)
     return out
 
 
