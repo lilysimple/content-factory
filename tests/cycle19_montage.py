@@ -901,5 +901,88 @@ def main() -> None:
           montage._cap(1) == montage.RENDER_CAP_MIN, str(montage._cap(1)))
 
 
+    # ── 41. сплит ─────────────────────────────────────────────────────
+    print("\n41. Панель сплита привязана к речи, а не к таймеру")
+    words = [{"text": "Просто", "start": 1.0, "end": 1.4},
+             {"text": "опиши,", "start": 1.5, "end": 2.0},
+             {"text": "что", "start": 2.1, "end": 2.3},
+             {"text": "нужно", "start": 2.4, "end": 2.9},
+             {"text": "—", "start": 3.0, "end": 3.05},
+             {"text": "опиши", "start": 3.1, "end": 3.5}]
+    check("фраза находит свою секунду",
+          footage.anchor(words, "опиши что") == 1.5,
+          str(footage.anchor(words, "опиши что")))
+    check("знак препинания поиску не мешает",
+          footage.anchor(words, "нужно") == 2.4, str(footage.anchor(words, "нужно")))
+    check("берётся первое вхождение, а не последнее",
+          footage.anchor(words, "опиши") == 1.5, str(footage.anchor(words, "опиши")))
+    check("несказанного нет", footage.anchor(words, "ремоушен") is None)
+    check("дубль без расшифровки не ломает поиск",
+          footage.anchor([], "опиши") is None)
+
+    print("\n42. Props сплита собираются кодом")
+    split_reel = montage.Reel(theme={"id": "t-split"},
+                              video=harness.TMP / "нет.mp4",
+                              color="#1F1F1F", accent="#C6DE48",
+                              text="#F8F5F1", cta="Подписывайтесь")
+    split_reel.probe = footage.Probe(duration=20.0, width=1920, height=1080,
+                                     fps=30.0, has_audio=True)
+    split_reel.cuts = footage.timeline(20.0, [(8.0, 11.0)])
+    split_reel.subs = words
+    shot = harness.TMP / "panel.png"
+    shot.write_bytes(b"png")
+    blocks = [
+        montage.Block(start=0.0, end=3.0, kicker="БЕЗ КОДА", full=True,
+                      lines=["Google Opal"]),
+        montage.Block(start=3.0, end=9.0, image=shot,
+                      items=[("опиши что", montage.speak_at(split_reel, "опиши что")),
+                             ("этого не говорили", None)]),
+    ]
+    props = montage.motion_props(split_reel, blocks, (1080, 1920))
+
+    check("композиция получает имя дубля, а не путь",
+          props["videoPath"] == "input-t-split.mp4", props["videoPath"])
+    check("куски те же, что у ролика",
+          len(props["segments"]) == len(split_reel.cuts.keep),
+          str(props["segments"]))
+    check("скрин панели назван по номеру блока",
+          props["blocks"][1]["imagePath"] == "panel-t-split-1.png",
+          str(props["blocks"][1]))
+    check("блок без картинки её и не получает",
+          "imagePath" not in props["blocks"][0], str(props["blocks"][0]))
+    # Дефолты схемы Remotion подставляет в props целиком, а не внутрь
+    # элементов массива: пропущенный список приезжал `undefined`, и
+    # рендер падал на первом же блоке без пунктов.
+    check("пустой список едет пустым списком, а не пропадает",
+          props["blocks"][0]["items"] == [], str(props["blocks"][0]))
+    check("пункт списка встаёт на секунду своего слова",
+          props["blocks"][1]["items"][0]["at"] == 1.5,
+          str(props["blocks"][1]["items"]))
+    check("несказанный пункт едет с началом блока, а не пропадает",
+          props["blocks"][1]["items"][1]["at"] == 3.0,
+          str(props["blocks"][1]["items"]))
+    check("панель говорит цветами бренда",
+          props["panelColor"] == "#1F1F1F" and props["accentColor"] == "#C6DE48"
+          and props["textColor"] == "#F8F5F1", str(props["panelColor"]))
+    check("свечение взято прозрачностью от акцента",
+          props["glowColor"] == "rgba(198, 222, 72, 0.13)", props["glowColor"])
+    check("аутро есть только под CTA",
+          props["outroSeconds"] == 1.8
+          and montage.motion_props(
+              montage.Reel(theme={"id": "t2"}, video=harness.TMP / "нет.mp4",
+                           probe=split_reel.probe, cuts=split_reel.cuts),
+              [], (1080, 1920))["outroSeconds"] == 0.0,
+          str(props["outroSeconds"]))
+
+    try:
+        montage.motion_props(split_reel, blocks, (1080, 1920), head="сбоку")
+        check("голова бывает только сверху или снизу", False, "прошло")
+    except ValueError as e:
+        check("голова бывает только сверху или снизу", "сбоку" in str(e), str(e))
+
+    check("кривой цвет не режется молча на куски",
+          montage._rgba("#12345", 0.1) == "#12345", montage._rgba("#12345", 0.1))
+
+
 main()
 raise SystemExit(report())

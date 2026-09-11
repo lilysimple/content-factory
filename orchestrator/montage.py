@@ -101,8 +101,10 @@ def _got(last: str) -> str:
 # порядок строк в файле — совпадение.
 DEFAULT_COLOR = "#111111"
 DEFAULT_ACCENT = "#C97C5D"
+DEFAULT_TEXT = "#F8F5F1"
 TOKEN_BG = "graphite"
 TOKEN_ACCENT = "terracotta"
+TOKEN_TEXT = "milk"
 
 HOOK_TITLE = "Хук"
 CTA_TITLE = "CTA"
@@ -133,6 +135,7 @@ class Reel:
     cta: str = ""
     color: str = DEFAULT_COLOR
     accent: str = DEFAULT_ACCENT
+    text: str = DEFAULT_TEXT
     probe: footage.Probe | None = None
     cuts: footage.Timeline | None = None
     focus: list[footage.Focus] = field(default_factory=list)
@@ -731,11 +734,16 @@ def _token(css: str, name: str, fallback: str) -> str:
     return m.group(1) if m else fallback
 
 
-def _colors(b) -> tuple[str, str]:
-    """Фон карточек и цвет активного слова караоке."""
+def _colors(b) -> tuple[str, str, str]:
+    """Фон карточек, цвет активного слова караоке и цвет слов на панели.
+
+    Третий нужен сплиту: панель светлая по графиту, и белый «на глаз»
+    рядом с молоком бренда читается как другой белый.
+    """
     css = b.read("design/tokens.css")
     return (_token(css, TOKEN_BG, DEFAULT_COLOR),
-            _token(css, TOKEN_ACCENT, DEFAULT_ACCENT))
+            _token(css, TOKEN_ACCENT, DEFAULT_ACCENT),
+            _token(css, TOKEN_TEXT, DEFAULT_TEXT))
 
 
 # ── рендер: npx remotion render подпроцессом ─────────────────────────
@@ -841,30 +849,99 @@ async def _watch(cmd: list[str], cwd: str, *,
     return proc.returncode or 0, last, " | ".join(list(err)[-8:])
 
 
-async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
+async def _ready() -> None:
+    """Remotion установлен и браузер для него доставлен."""
     if not _installed():
         raise NotInstalled(
             "Remotion не установлен. Один раз в Terminal.app на Mac: "
             f"cd {TOOLS} && npm install")
-
     await _ensure_browser()
+
+
+@contextlib.contextmanager
+def _staged(files: dict[str, Path]):
+    """Отдать рендеру чужие файлы и унести их за собой.
+
+    Remotion в этой версии не отдаёт файлы вне tools/remotion-montage/public
+    ни голым абсолютным путём (сервер сборки резолвит его неверно), ни через
+    file:// (загрузчик ассетов принимает только http/https) — единственный
+    рабочий способ отдать внешний файл, это положить его в public/ и
+    передать в композицию только имя файла через staticFile().
+
+    Уборка идёт и на упавшем рендере: в public/ лежит рабочий материал
+    репозитория, и дубль на 35 МБ, оставшийся там от сорванного монтажа,
+    однажды уедет в коммит.
+    """
+    public = TOOLS / "public"
+    public.mkdir(exist_ok=True)
+    done: list[Path] = []
+    try:
+        for name, src in files.items():
+            shutil.copy2(src, public / name)
+            done.append(public / name)
+        yield
+    finally:
+        for path in done:
+            path.unlink(missing_ok=True)
+
+
+async def _render(composition: str, props: dict[str, Any], *,
+                  key: str, frames: int) -> Path:
+    """Позвать Remotion и отдать готовый файл.
+
+    Общее у ролика и сплита: разница между ними целиком в props, а не в
+    том, как рендер сторожат и что делают с оборванным файлом.
+    """
+    props_path = TOOLS / f".props-{key}.json"
+    props_path.write_text(json.dumps(props, ensure_ascii=False),
+                          encoding="utf-8")
+
+    out_path = TOOLS / f".out-{key}.mp4"
+    out_path.unlink(missing_ok=True)
+
+    # Потолок на один кадр: по умолчанию тридцать секунд, и на тяжёлом
+    # исходнике рендер падал не потому, что завис, а потому что не успел
+    # перемотать. Минуты хватает с запасом.
+    cmd = ["npx", "remotion", "render", "src/index.ts", composition,
+           str(out_path), f"--props={props_path}", "--timeout=60000"]
+
+    try:
+        code, _, err = await _watch(cmd, str(TOOLS), cap=_cap(frames),
+                                    stall=RENDER_STALL)
+    except NoRenderer:
+        # Оборванный рендер оставляет за собой mp4 без последних кадров.
+        # Такой файл никому не нужен, а лежать он будет до следующего
+        # монтажа этой же темы: имя у него от id, а не от прогона.
+        out_path.unlink(missing_ok=True)
+        raise
+    finally:
+        props_path.unlink(missing_ok=True)
+
+    if code != 0 or not out_path.exists():
+        out_path.unlink(missing_ok=True)
+        raise NoRenderer("Remotion не отдал файл: " + err)
+
+    return out_path
+
+
+def _video_name(reel: Reel) -> str:
+    """Имя дубля внутри public/. Одно на все композиции: имя от id темы,
+    а не от прогона, и второй монтаж той же темы кладёт файл поверх."""
+    return f"input-{reel.theme['id']}{reel.video.suffix}"
+
+
+async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
+    await _ready()
 
     assert reel.probe is not None and reel.cuts is not None
     w, h = size
 
-    # Remotion в этой версии не отдаёт файлы вне tools/remotion-montage/public
-    # ни голым абсолютным путём (сервер сборки резолвит его неверно), ни через
-    # file:// (загрузчик ассетов принимает только http/https) — единственный
-    # рабочий способ отдать внешний файл, это положить его в public/ и
-    # передать в композицию только имя файла через staticFile().
-    public = TOOLS / "public"
-    public.mkdir(exist_ok=True)
-    video_name = f"input-{reel.theme['id']}{reel.video.suffix}"
-    shutil.copy2(reel.video, public / video_name)
+    video_name = _video_name(reel)
+    files = {video_name: reel.video}
     cover_name = None
     if reel.cover:
         cover_name = f"cover-{reel.theme['id']}{reel.cover.suffix}"
-        shutil.copy2(reel.cover, public / cover_name)
+        files[cover_name] = reel.cover
 
     props = {
         "videoPath": video_name,
@@ -900,42 +977,179 @@ async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
         "outroSeconds": 1.8 if reel.cta else 0.0,
     }
     props = {k: v for k, v in props.items() if v is not None}
-
-    props_path = TOOLS / f".props-{reel.theme['id']}.json"
-    props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
-
-    out_path = TOOLS / f".out-{reel.theme['id']}.mp4"
-    out_path.unlink(missing_ok=True)
-
-    # Потолок на один кадр: по умолчанию тридцать секунд, и на тяжёлом
-    # исходнике рендер падал не потому, что завис, а потому что не успел
-    # перемотать. Минуты хватает с запасом.
-    cmd = ["npx", "remotion", "render", "src/index.ts", "Reel", str(out_path),
-          f"--props={props_path}", "--timeout=60000"]
     frames = max(1, round((props["introSeconds"] + reel.cuts.total
                            + props["outroSeconds"]) * fps))
 
-    try:
-        code, _, err = await _watch(cmd, str(TOOLS), cap=_cap(frames),
-                                    stall=RENDER_STALL)
-    except NoRenderer:
-        # Оборванный рендер оставляет за собой mp4 без последних кадров.
-        # Такой файл никому не нужен, а лежать он будет до следующего
-        # монтажа этой же темы: имя у него от id, а не от прогона.
-        out_path.unlink(missing_ok=True)
-        raise
-    finally:
-        props_path.unlink(missing_ok=True)
-        (public / video_name).unlink(missing_ok=True)
-        if cover_name:
-            (public / cover_name).unlink(missing_ok=True)
+    with _staged(files):
+        return await _render("Reel", props, key=reel.theme["id"],
+                             frames=frames)
 
-    if code != 0 or not out_path.exists():
-        out_path.unlink(missing_ok=True)
-        raise NoRenderer("Remotion не отдал файл: " + err)
 
-    return out_path
 
+# ── сплит: инфографика и говорящая голова в одном кадре ──────────────
+#
+# Вторая композиция Remotion (`Motion`), а не флаг у ролика: вход другой.
+# Холст делится швом — на одной половине дубль, на другой панель, и
+# панель тут не иллюстрация к ролику, а вторая дорожка: пока человек
+# говорит «просто опиши», на панели набирается та самая строка.
+#
+# Арифметику делает питон, ровно как для ролика: куски отобраны, слова
+# разложены по страницам, блоки расставлены по секундам **готового**
+# ролика — уже после выброшенных пауз. Remotion только рисует.
+#
+# Откуда берутся сами блоки — чья это работа и в каком файле она лежит —
+# ещё не решено. Придумывать формат здесь нельзя: заведённый молча, он
+# переживёт то решение, поэтому блоки приходят входом и точка.
+
+MOTION_SPLIT = 0.448        # замер с кадра примера: 860 из 1920
+MOTION_HEADS = ("top", "bottom")
+GLOW_ALPHA = 0.13           # свечение под карточкой
+CARD_ALPHA = 0.06           # подложка карточки: молоко, почти прозрачное
+
+
+@dataclass
+class Block:
+    """Один экран панели.
+
+    Живёт от `start` до `end` в секундах готового ролика; дырка между
+    блоками — пустая панель, а не ошибка: на вдохе показывать нечего.
+    `full` разворачивает панель на весь кадр, и дубль на это время
+    уходит целиком — так сделан разгон в начале, где голова не нужна.
+    """
+    start: float
+    end: float
+    kicker: str = ""
+    image: Path | None = None
+    lines: list[str] = field(default_factory=list)
+    # Список, который набирается под речь: пункт выезжает в ту секунду,
+    # когда человек его называет. Секунду ищет `speak_at`; не нашлась —
+    # пункт едет с началом блока, а не пропадает с панели.
+    items: list[tuple[str, float | None]] = field(default_factory=list)
+    full: bool = False
+
+
+def speak_at(reel: Reel, phrase: str) -> float | None:
+    """Секунда готового ролика, в которой человек произносит `phrase`.
+
+    Дубль без расшифровки — это `None` на любую фразу, и панель тогда
+    идёт по секундам блоков, без набора под речь.
+    """
+    return footage.anchor(reel.subs, phrase)
+
+
+def _rgba(color: str, alpha: float) -> str:
+    """`#RRGGBB` → `rgba(...)`. Подложки панели задаются прозрачностью от
+    цвета бренда, а не вторым списком hex: второй список разъедется."""
+    h = color.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    # Длину проверяем до разбора: `#12345` режется на куски молча и
+    # уезжает в рендер третьим цветом, а не отказом.
+    if not re.fullmatch(r"[0-9A-Fa-f]{6}", h):
+        return color
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+def _panel_files(tid: str, blocks: list[Block]) -> dict[int, str]:
+    """Имена скринов панели внутри public/. Индекс блока в имени, а не
+    имя исходного файла: один и тот же скрин на двух блоках — обычное
+    дело, а перетереть чужой файл чужим именем хватит одного раза."""
+    return {i: f"panel-{tid}-{i}{b.image.suffix}"
+            for i, b in enumerate(blocks) if b.image}
+
+
+def _block_props(b: Block, image: str | None) -> dict[str, Any]:
+    """Блок в JSON.
+
+    Списки отдаются всегда, даже пустыми: дефолты схемы Remotion
+    подставляет в props целиком, а не внутрь элементов массива, и
+    пропущенный `items` приезжал не пустым списком, а `undefined` —
+    рендер падал на `.map` первого же блока без списка.
+    """
+    out: dict[str, Any] = {
+        "start": round(b.start, 3),
+        "end": round(b.end, 3),
+        "lines": list(b.lines),
+        "items": [{"text": text, "at": round(b.start if at is None else at, 3)}
+                  for text, at in b.items],
+        "full": b.full,
+    }
+    if b.kicker:
+        out["kicker"] = b.kicker
+    if image:
+        out["imagePath"] = image
+    return out
+
+
+def motion_props(reel: Reel, blocks: list[Block], size: tuple[int, int], *,
+                 fps: int = 30, head: str = "bottom",
+                 split: float = MOTION_SPLIT) -> dict[str, Any]:
+    """JSON для композиции `Motion`.
+
+    Чистая функция, и это нарочно: рендер в стенд не входит, а
+    разъехавшийся props приезжает молча — пустой панелью на готовом
+    видео. Проверяется здесь то, что можно проверить без Remotion.
+    """
+    assert reel.probe is not None and reel.cuts is not None
+    if head not in MOTION_HEADS:
+        raise ValueError(f"голова бывает сверху или снизу, а не «{head}»")
+
+    w, h = size
+    names = _panel_files(reel.theme["id"], blocks)
+    props = {
+        "videoPath": _video_name(reel),
+        "videoWidth": reel.probe.width,
+        "videoHeight": reel.probe.height,
+        "segments": [{"from": round(a, 3), "to": round(b, 3)}
+                     for a, b in reel.cuts.keep],
+        "pan": reel.pan,
+        "headAnchor": head,
+        "split": split,
+        # Панель говорит теми же цветами, что и ролик: один дом у
+        # палитры — `design/tokens.css` бренда, прочитанный `_colors`.
+        "panelColor": reel.color,
+        "glowColor": _rgba(reel.accent, GLOW_ALPHA),
+        "cardColor": _rgba(reel.text, CARD_ALPHA),
+        "accentColor": reel.accent,
+        "textColor": reel.text,
+        "blocks": [_block_props(b, names.get(i))
+                   for i, b in enumerate(blocks)],
+        "pages": reel.pages,
+        "cta": reel.cta or None,
+        "brandName": reel.theme.get("brand_name") or None,
+        "width": w,
+        "height": h,
+        "fps": fps,
+        # Первого кадра у сплита нет: обложка это отдельная работа
+        # Дизайнера, а панель начинается с первого слова.
+        "outroSeconds": 1.8 if reel.cta else 0.0,
+    }
+    return {k: v for k, v in props.items() if v is not None}
+
+
+async def render_motion(reel: Reel, blocks: list[Block],
+                        size: tuple[int, int], *, fps: int = 30,
+                        head: str = "bottom",
+                        split: float = MOTION_SPLIT) -> Path:
+    """Сплит от props до файла. Отличается от `render` только props и
+    именем композиции — сторож рендера и уборка общие."""
+    await _ready()
+
+    props = motion_props(reel, blocks, size, fps=fps, head=head, split=split)
+    assert reel.cuts is not None
+
+    files: dict[str, Path] = {_video_name(reel): reel.video}
+    for i, name in _panel_files(reel.theme["id"], blocks).items():
+        image = blocks[i].image
+        assert image is not None
+        files[name] = image
+
+    frames = max(1, round((reel.cuts.total + props["outroSeconds"]) * fps))
+
+    with _staged(files):
+        return await _render("Motion", props, key=reel.theme["id"],
+                             frames=frames)
 
 # ── сборка ────────────────────────────────────────────────────────────
 
@@ -1183,7 +1397,7 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
         video = _footage(b)
 
     beats = _beats(b, theme["id"]) if theme else {}
-    color, accent = _colors(b)
+    color, accent, text = _colors(b)
 
     plat = (theme or {}).get("plat") or "instagram"
     fmt = (theme or {}).get("format") or "reels"
@@ -1195,6 +1409,7 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
     # файлов рендера. Заведённая заранее пустышка пережила бы неудачный
     # монтаж строкой в базе без единого артефакта.
     reel = Reel(theme=theme or {}, video=video, color=color, accent=accent,
+                text=text,
                 hook=beats.get(HOOK_TITLE, ""), cta=beats.get(CTA_TITLE, ""))
 
     if say:
@@ -1355,7 +1570,7 @@ async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]
 
     plat, fmt = "instagram", "reels"
     size = design.CANVAS.get(design._key(plat, fmt)) or (1080, 1920)
-    color, accent = _colors(b)
+    color, accent, text = _colors(b)
     spec, spec_gap = _cover_spec(b, plat, fmt)
 
     if say:
@@ -1393,7 +1608,8 @@ async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]
         cuts = footage.window(whole, frag.start, frag.end)
 
         reel = Reel(theme=theme, video=video, hook=frag.hook, color=color,
-                    accent=accent, probe=probe, cuts=cuts, spec=spec)
+                    accent=accent, text=text, probe=probe, cuts=cuts,
+                    spec=spec)
         reel.focus = track
         reel.pan = footage.cut_track(track, cuts)
         reel.subs = footage.cut_words(words, cuts)
