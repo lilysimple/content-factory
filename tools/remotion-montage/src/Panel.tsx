@@ -21,12 +21,72 @@ const FONT = 'system-ui, -apple-system, Helvetica, sans-serif';
 
 const EASE = Easing.bezier(0.16, 1, 0.3, 1);
 
+// Список набирается под речь: пункт выезжает в ту секунду, когда человек
+// его называет, а не вместе со всей карточкой. Список, показанный стеной,
+// читается быстрее речи — зритель дочитал и ушёл раньше, чем автор дошёл
+// до второго пункта.
+const Items: React.FC<{
+  items: MotionBlock['items'];
+  start: number;
+  accentColor: string;
+  textColor: string;
+  panelHeight: number;
+}> = ({items, start, accentColor, textColor, panelHeight}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+
+  return (
+    <div style={{display: 'flex', flexDirection: 'column', width: '100%'}}>
+      {items.map((item, i) => {
+        // Секунды пункта — секунды готового ролика, а отсчёт внутри
+        // блока идёт от его начала. Полный кадр приходит уже сдвинутым.
+        const at = Math.max(0, (item.at - start) * fps);
+        const show = interpolate(frame, [at, at + fps * 0.22], [0, 1], {
+          extrapolateLeft: 'clamp',
+          extrapolateRight: 'clamp',
+          easing: EASE,
+        });
+        return (
+          <div
+            key={`${item.text}-${i}`}
+            style={{
+              display: 'flex',
+              alignItems: 'baseline',
+              gap: panelHeight * 0.025,
+              marginTop: i === 0 ? 0 : panelHeight * 0.028,
+              fontFamily: FONT,
+              fontSize: panelHeight * 0.056,
+              fontWeight: 600,
+              lineHeight: 1.25,
+              color: textColor,
+              opacity: show,
+              // Пункт приезжает слева, как строка списка, а не
+              // проявляется на месте: проявление читается как подмена
+              // предыдущего пункта.
+              translate: `${interpolate(show, [0, 1], [-panelHeight * 0.03, 0])}px 0`,
+            }}
+          >
+            <span style={{color: accentColor, fontWeight: 700}}>—</span>
+            <span>{item.text}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
 const Card: React.FC<{
   block: MotionBlock;
   cardColor: string;
+  accentColor: string;
+  textColor: string;
   panelHeight: number;
-}> = ({block, cardColor, panelHeight}) => {
-  if (!block.imagePath && block.lines.length === 0) {
+  // Сколько высоты карточке оставлено. Скрин приходит любой формы, и
+  // высокий залезал на надзаголовок: карточка стоит по центру панели, а
+  // надзаголовок — на своей замеренной высоте, и спорят они молча.
+  maxHeight: number;
+}> = ({block, cardColor, accentColor, textColor, panelHeight, maxHeight}) => {
+  if (!block.imagePath && block.lines.length === 0 && block.items.length === 0) {
     return null;
   }
 
@@ -39,16 +99,35 @@ const Card: React.FC<{
       <div
         style={{
           width: '82%',
+          maxHeight,
           borderRadius: radius,
           overflow: 'hidden',
           background: cardColor,
           display: 'flex',
+          flexDirection: 'column',
         }}
       >
         <CanvasImage
           src={staticFile(block.imagePath)}
-          style={{width: '100%', height: 'auto', display: 'block'}}
+          style={{
+            width: '100%',
+            height: 'auto',
+            minHeight: 0,
+            objectFit: 'contain',
+            display: 'block',
+          }}
         />
+        {block.items.length > 0 ? (
+          <div style={{padding: `${panelHeight * 0.05}px ${panelHeight * 0.06}px`}}>
+            <Items
+              items={block.items}
+              start={block.start}
+              accentColor={accentColor}
+              textColor={textColor}
+              panelHeight={panelHeight}
+            />
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -62,7 +141,7 @@ const Card: React.FC<{
         padding: `${panelHeight * 0.075}px ${panelHeight * 0.06}px`,
         boxSizing: 'border-box',
         fontFamily: FONT,
-        color: '#fff',
+        color: textColor,
         textAlign: 'center',
       }}
     >
@@ -83,6 +162,22 @@ const Card: React.FC<{
           {line}
         </div>
       ))}
+      {block.items.length > 0 ? (
+        <div
+          style={{
+            marginTop: block.lines.length ? panelHeight * 0.05 : 0,
+            textAlign: 'left',
+          }}
+        >
+          <Items
+            items={block.items}
+            start={block.start}
+            accentColor={accentColor}
+            textColor={textColor}
+            panelHeight={panelHeight}
+          />
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -92,7 +187,8 @@ const BlockView: React.FC<{
   panelHeight: number;
   accentColor: string;
   cardColor: string;
-}> = ({block, panelHeight, accentColor, cardColor}) => {
+  textColor: string;
+}> = ({block, panelHeight, accentColor, cardColor, textColor}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
 
@@ -140,6 +236,7 @@ const BlockView: React.FC<{
           display: 'flex',
           justifyContent: 'center',
           marginTop: block.kicker ? panelHeight * 0.12 : 0,
+          maxHeight: panelHeight * (block.kicker ? 0.6 : 0.84),
           scale: interpolate(enter, [0, 1], [0.965, 1], {
             output: 'perceptual-scale',
           }),
@@ -148,7 +245,10 @@ const BlockView: React.FC<{
         <Card
           block={block}
           cardColor={cardColor}
+          accentColor={accentColor}
+          textColor={textColor}
           panelHeight={panelHeight}
+          maxHeight={panelHeight * (block.kicker ? 0.6 : 0.84)}
         />
       </div>
     </AbsoluteFill>
@@ -161,6 +261,7 @@ export const Panel: React.FC<{
   glowColor: string;
   cardColor: string;
   accentColor: string;
+  textColor: string;
   panelHeight: number;
   // Секунда готового ролика, в которой панель начинается. Блоки живут в
   // абсолютных секундах, а Sequence отсчитывает от своего начала.
@@ -171,6 +272,7 @@ export const Panel: React.FC<{
   glowColor,
   cardColor,
   accentColor,
+  textColor,
   panelHeight,
   offset,
 }) => {
@@ -208,6 +310,7 @@ export const Panel: React.FC<{
               panelHeight={panelHeight}
               accentColor={accentColor}
               cardColor={cardColor}
+              textColor={textColor}
             />
           </Sequence>
         );

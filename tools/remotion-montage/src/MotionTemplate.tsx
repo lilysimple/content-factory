@@ -92,6 +92,7 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
           glowColor={props.glowColor}
           cardColor={props.cardColor}
           accentColor={props.accentColor}
+          textColor={props.textColor}
           panelHeight={panelHeight}
           offset={0}
         />
@@ -115,11 +116,22 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
             name={`Панель целиком ${i + 1}`}
           >
             <Panel
-              blocks={[{...b, start: 0, end: b.end - b.start}]}
+              blocks={[
+                {
+                  ...b,
+                  start: 0,
+                  end: b.end - b.start,
+                  // Пункты списка приходят в секундах ролика, а блок тут
+                  // начинается заново с нуля — сдвигаем вместе с ним,
+                  // иначе список на полном кадре не выедет вовсе.
+                  items: b.items.map((it) => ({...it, at: it.at - b.start})),
+                },
+              ]}
               panelColor={props.panelColor}
               glowColor={props.glowColor}
               cardColor={props.cardColor}
               accentColor={props.accentColor}
+              textColor={props.textColor}
               panelHeight={height}
               offset={0}
             />

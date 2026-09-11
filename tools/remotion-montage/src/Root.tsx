@@ -76,25 +76,16 @@ export const Root: React.FC = () => {
       fps={30}
       width={1080}
       height={1920}
-      defaultProps={{
+      // Палитра здесь не повторяется вторым списком: дефолты живут в
+      // `motionProps.ts`, `parse` достаёт их оттуда. Повторённый список
+      // hex уже разъехался — в Studio ехали графит с неоном из схемы, а
+      // здесь лежали синий с терракотой, снятые с чужого аккаунта.
+      defaultProps={motionPropsSchema.parse({
         videoPath: '',
         videoWidth: 1920,
         videoHeight: 1080,
         segments: [{from: 0, to: 25}],
-        pan: [],
-        headAnchor: 'bottom',
-        split: 0.448,
-        panelColor: '#020203',
-        glowColor: '#1B2A6B',
-        cardColor: '#1E1F29',
-        accentColor: '#C3865F',
-        blocks: [],
-        pages: [],
-        width: 1080,
-        height: 1920,
-        fps: 30,
-        outroSeconds: 1.8,
-      } satisfies MotionProps}
+      }) satisfies MotionProps}
       calculateMetadata={async ({props}) => {
         const fps = props.fps ?? 30;
         const body = (props.segments ?? []).reduce(
