@@ -243,7 +243,9 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
     seconds = seconds_from(ask)
     stop = b.stopwords()
 
-    profile = desk.profile(b, SECTIONS)
+    # `hooks.md` поверх секций: первые две секунды ролика это механика
+    # площадки, и живёт она отдельно от ЯДРА — её переписывают по замерам.
+    profile = desk.profile(b, SECTIONS, files=("hooks",))
 
     reel = Reel(theme=theme, seconds=seconds)
     extra = ""

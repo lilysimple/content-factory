@@ -315,7 +315,9 @@ async def build(chat_id: int, ask: str, *, say=None) -> Draft:
     facts = research.facts_for(b, theme["id"])
     stop = b.stopwords()
 
-    profile = desk.profile(b, SECTIONS)
+    # `hooks.md` поверх секций: правило «обещание до ссылки» и первая
+    # строка описания это механика площадки, а не голос бренда.
+    profile = desk.profile(b, SECTIONS, files=("hooks",))
     samples = desk.voice_samples(b)
     stable = _voice_stable(samples, table.learned(b))
 
