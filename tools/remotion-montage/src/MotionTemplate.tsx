@@ -99,9 +99,15 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
       </div>
 
       {/* ── блоки на весь кадр ──
-          Тот же компонент поверх обеих половин: панель не подменяется
-          другой вёрсткой, она просто становится больше. Поэтому кегли в
-          `Panel` и считаются от высоты панели. */}
+          Тот же компонент поверх обеих половин: фон закрывает холст
+          целиком, а карточка остаётся на своём месте и своего размера.
+
+          Больше она не становится, и это правка по двум рендерам:
+          кегли считаются от высоты панели, на полном кадре высота
+          вчетверо больше — «Модель сама решает, насколько глубоко
+          думать» уезжала за нижний край карточки обрезанной. Заодно
+          пропал прыжок: блок на весь кадр отличается от соседнего тем,
+          что дубль ушёл, а не тем, что вёрстка другая. */}
       {fullBlocks.map((b, i) => {
         const from = Math.round(b.start * fps);
         const durationInFrames = Math.round((b.end - b.start) * fps);
@@ -115,33 +121,50 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
             durationInFrames={durationInFrames}
             name={`Панель целиком ${i + 1}`}
           >
-            <Panel
-              blocks={[
-                {
-                  ...b,
-                  start: 0,
-                  end: b.end - b.start,
-                  // Пункты списка приходят в секундах ролика, а блок тут
-                  // начинается заново с нуля — сдвигаем вместе с ним,
-                  // иначе список на полном кадре не выедет вовсе.
-                  items: b.items.map((it) => ({...it, at: it.at - b.start})),
-                },
-              ]}
-              panelColor={props.panelColor}
-              glowColor={props.glowColor}
-              cardColor={props.cardColor}
-              accentColor={props.accentColor}
-              textColor={props.textColor}
-              panelHeight={height}
-              offset={0}
-            />
+            <AbsoluteFill style={{backgroundColor: props.panelColor}}>
+              <div
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  top: panelOnTop ? 0 : videoHeight,
+                  width,
+                  height: panelHeight,
+                }}
+              >
+                <Panel
+                  blocks={[
+                    {
+                      ...b,
+                      start: 0,
+                      end: b.end - b.start,
+                      // Пункты списка приходят в секундах ролика, а блок
+                      // тут начинается заново с нуля — сдвигаем вместе с
+                      // ним, иначе список на полном кадре не выедет.
+                      items: b.items.map((it) => ({
+                        ...it,
+                        at: it.at - b.start,
+                      })),
+                    },
+                  ]}
+                  panelColor={props.panelColor}
+                  glowColor={props.glowColor}
+                  cardColor={props.cardColor}
+                  accentColor={props.accentColor}
+                  textColor={props.textColor}
+                  panelHeight={panelHeight}
+                  offset={0}
+                />
+              </div>
+            </AbsoluteFill>
           </Sequence>
         );
       })}
 
       {/* ── слова ──
           Поверх всего, включая блоки на весь кадр: речь идёт непрерывно,
-          и пропадающий на полном кадре субтитр читается как сбой. */}
+          и пропадающий на полном кадре субтитр читается как сбой. Шов
+          держит строку и там: карточка на полном кадре стоит на своём
+          месте, и под ней ровно то же пустое поле. */}
       <Sequence from={0} durationInFrames={bodyFrames} name="Слова">
         {props.pages.length > 0 ? (
           <Captions

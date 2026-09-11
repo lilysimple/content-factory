@@ -190,7 +190,17 @@ const BlockView: React.FC<{
   textColor: string;
 }> = ({block, panelHeight, accentColor, cardColor, textColor}) => {
   const frame = useCurrentFrame();
-  const {fps} = useVideoConfig();
+  const {fps, width} = useVideoConfig();
+
+  // Надзаголовок идёт одной строкой и в разрядку, поэтому кегль ему
+  // ставит ширина кадра, а не только высота панели: на полном кадре
+  // высота вчетверо больше, и «КОНТЕНТ-ПЛАН» уезжал за оба края
+  // обрезанным. Ширина буквы капсом с трекингом 0.22em — примерно
+  // 0.85 кегля, и этого хватает: строка всё равно стоит по центру.
+  const kickerSize = Math.min(
+    panelHeight * 0.062,
+    (width * 0.86) / Math.max(1, (block.kicker ?? '').length * 0.85),
+  );
 
   // Блок приезжает за четверть секунды. Дольше — и панель начинает жить
   // своей жизнью, отвлекая от речи; мгновенно — и склейка читается как
@@ -216,7 +226,7 @@ const BlockView: React.FC<{
             top: panelHeight * 0.185,
             fontFamily: FONT,
             fontWeight: 700,
-            fontSize: panelHeight * 0.062,
+            fontSize: kickerSize,
             letterSpacing: '0.22em',
             // Разрядка добавляет пробел и справа от последней буквы,
             // из-за чего строка стоит левее центра. Возвращаем половину.
