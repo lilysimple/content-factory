@@ -884,8 +884,12 @@ def card(dg: Digest) -> str:
         out += ["", "<b>Приёмы, которые можно повторить</b>", ""]
         out += [_mech_line(m, st.channel) for m in dg.mechanics[:CARD_MECH]]
     if dg.singles:
-        out += ["", f"Ещё {len(dg.singles)} приёма встретились по одному "
-                    "разу — в выводы не пошли."]
+        n = len(dg.singles)
+        # Согласование по числу: «1 приёма встретились» читалось сбоем.
+        what = _plural(n, "приём встретился", "приёма встретились",
+                       "приёмов встретились")
+        out += ["", f"Ещё {n} {what} по одному разу — в выводы не "
+                    f"{'пошёл' if n % 10 == 1 and n % 100 != 11 else 'пошли'}."]
 
     holes = [_anon(g, st.channel) for g in dg.gaps + dg.failed]
     if holes:

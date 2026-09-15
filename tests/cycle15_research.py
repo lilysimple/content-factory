@@ -234,8 +234,9 @@ async def main() -> None:
     await research.run(reg, CHAT, "дай сводку")
     check("в карточке нет ложной механики",
           "Механики недели" not in reg.last().text, reg.last().text[:200])
-    check("единичный случай посчитан",
-          "Единичных случаев: 1" in reg.last().text, reg.last().text[-200:])
+    check("единичный случай посчитан и назван человеческим числом",
+          "Ещё 1 приём встретился по одному разу" in reg.last().text,
+          reg.last().text[-300:])
 
     # ── 7. список чужих каналов ───────────────────────────────────────
     print("\n7. Список чужих каналов")
@@ -292,7 +293,7 @@ async def main() -> None:
     agent.ask = broken
     reg.clear()
     await research.run(reg, CHAT, "дай сводку")
-    check("сводка всё равно пришла", "медиана 30" in reg.last().text,
+    check("сводка всё равно пришла", "медиана <b>30" in reg.last().text,
           reg.last().text[:200])
     check("причина названа", "средства" in reg.last().text,
           reg.last().text[-200:])

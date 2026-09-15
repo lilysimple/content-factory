@@ -101,7 +101,18 @@ async def main() -> None:
     p = CALLS["prompts"][-1]
     check("свободные даты переданы", win[0] in p)
     check("сказано, что дайджеста нет", "дайджеста нет" in p.lower())
-    check("запасная пропорция названа", "60/20/20" in p)
+    # Откуда пропорция, решает профиль бренда, а не тест: стенд копирует
+    # живой бренд, и `goals.md` там однажды появился — жёсткое «60/20/20»
+    # падало на верном коде. Проверяется договор: пропорция названа и
+    # названо, запасная она или правило бренда.
+    from orchestrator import research                             # noqa: E402
+    from storage.brand import Brand                               # noqa: E402
+    prof = research.profile_digest(
+        Brand("lily-space", harness.TMP / "brands" / "lily-space"))
+    check("пропорция воронки названа", prof.ratio in p, prof.ratio)
+    check("сказано, откуда пропорция",
+          ("запасная" in p) if prof.backup else ("из `goals.md`" in p),
+          "запасная" if prof.backup else "из goals.md")
     check("площадка ограничена telegram", "только Telegram" in p)
 
     # ── 4. выгрузка в папку бренда ────────────────────────────────────
