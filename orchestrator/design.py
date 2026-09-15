@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import html as _html
 import json as _json
@@ -247,6 +248,45 @@ GEN = imagegen.PREFIX  # префикс сгенерированного, см. 
 # ставит их молча ни ротацией, ни правилом «*». Выбрать их можно только
 # кнопкой человека или вписав имя файла в `design/photos.md` руками.
 NOT_OWN = (STOCK, GEN)
+
+# ── кто в кадре и когда он там был ────────────────────────────────────
+#
+# Род кадра лежит у бренда прозой: в `design/photos.md` есть раздел «Кто
+# в кадре» со списками «с автором», «фон без людей», «люди есть, автора
+# нет». По имени файла этого не видно, а картинку код не откроет.
+#
+# До 11.09 списки читала только модель на свободном пути — и брала из них
+# одно и то же: список фото ехал в бриф алфавитом и целиком, а выбор
+# карточки был её делом. Пропорция промптом не держится, поэтому теперь
+# те же списки разбирает код.
+
+# Раздел начинается жирной строкой, и любая другая жирная строка его
+# закрывает. Это не педантизм: абзац «Имена `daisies.jpg` и `pink.jpg`
+# врут» стоит сразу за списком целей и сам несёт два имени файлов —
+# без закрытия они уехали бы в предыдущую категорию.
+KIND_HEADS = (("self", "с автором в кадре"),
+              ("nature", "фон без людей"),
+              ("other", "люди есть, автора нет"))
+KIND_SKIP = "не брать"
+FILE_RX = re.compile(r"[\w-]+\.(?:jpe?g|png|webp)", re.I)
+
+# Пропорция кадров: тридцать процентов с автором, сорок стоком,
+# остальное — фон без людей. Считается от числа карточек, округляется по
+# наибольшему остатку, поэтому на шести карточках это 2/2/2, а на трёх
+# вариантах фона — по одному каждого рода.
+MIX = (("self", 0.3), ("stock", 0.4), ("nature", 0.3))
+WORD = {"self": "кадров с автором", "stock": "стоковых",
+        "nature": "фона без людей"}
+
+# Сколько дней фото отдыхает после обложки. Повтор человек замечает
+# раньше, чем читает текст, а фотобанк конечный: месяц — это компромисс,
+# и на банке в два десятка кадров он выбирает банк целиком.
+COOLDOWN_DAYS = 30
+
+# Журнал «какое фото когда стояло на макете». Слоты (`*.slots.json`)
+# помнят это только на шаблонном пути: на свободном фото ставит модель
+# прямо в разметку, и карусель до 11.09 не помнила о себе ничего.
+PHOTO_LOG = "design/assets/photo-log.json"
 
 # Рубрики, где фон генерируется, а не снимается. Список у кода, а не у
 # бренда, потому что это правило продукта: «Разбор ошибки» — это чужая
@@ -581,25 +621,203 @@ def _photo_rules(b) -> dict[str, list[str]]:
     return out
 
 
-def _recent_photos(b, keep: int) -> list[str]:
-    """Фото последних обложек, свежие первыми. Против повтора через день."""
-    if keep <= 0:
-        return []
-    folder = b.path("posts")
-    if not folder.is_dir():
-        return []
-    seen: list[str] = []
-    for f in sorted(folder.glob("*.slots.json"),
-                    key=lambda x: x.stat().st_mtime, reverse=True):
-        try:
-            name = str(_json.loads(f.read_text(encoding="utf-8")).get("photo"))
-        except (ValueError, OSError):
+def _photo_kinds(b) -> dict[str, str]:
+    """Имя файла → род кадра: `self`, `stock`, `nature`, `other`.
+
+    Разбирается раздел «Кто в кадре» в `design/photos.md`. Чего в нём
+    нет, того нет и в пропорции: такой кадр остаётся запасным и идёт в
+    дело, только когда своего рода не хватило. Пустой род — это «не
+    брать»: человек назвал файл негодным, и молчаливого возврата через
+    префикс `stock-` у него быть не должно.
+    """
+    kinds: dict[str, str] = {}
+    skip: set[str] = set()
+    kind = ""
+    for block in re.split(r"\n\s*\n", b.read(PHOTO_RULES) or ""):
+        head = block.strip().lower()
+        if head.startswith("#"):
+            kind = ""
+        if head.startswith("**"):
+            kind = next((k for k, mark in KIND_HEADS
+                         if head.startswith(f"**{mark}")), "")
+        if head.startswith(KIND_SKIP):
+            # «Не брать: …» — человек назвал файл негодным. Он остаётся в
+            # папке, чтобы не притащить его вторым разом тем же запросом.
+            skip |= set(FILE_RX.findall(block))
             continue
-        if name and name not in seen:
-            seen.append(name)
-        if len(seen) >= keep:
+        if not kind:
+            continue
+        for name in FILE_RX.findall(block):
+            kinds.setdefault(
+                name, "stock" if name.startswith(STOCK) else kind)
+    return {**kinds, **{n: "" for n in skip}}
+
+
+def _photo_log(b) -> dict[str, str]:
+    """Журнал «фото → когда стояло». Битый файл это пустой журнал."""
+    try:
+        got = _json.loads(b.path(PHOTO_LOG).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in got.items()} \
+        if isinstance(got, dict) else {}
+
+
+def _log_photos(b, names) -> None:
+    """Отметить кадры сегодняшним днём. Зовётся после рендера, а не до.
+
+    До рендера отмечать нельзя: упавшая вёрстка увела бы кадр в карантин,
+    не показав человеку ничего.
+    """
+    fresh = [n for n in dict.fromkeys(names) if n]
+    if not fresh:
+        return
+    kept = _photo_log(b)
+    today = dt.datetime.now().isoformat(timespec="seconds")
+    kept.update({n: today for n in fresh})
+    b.artifact(PHOTO_LOG, _json.dumps(kept, ensure_ascii=False, indent=2,
+                                      sort_keys=True))
+
+
+def _used_photos(html: str) -> list[str]:
+    """Какие кадры из банка стоят в этой разметке."""
+    return [src.rsplit("/", 1)[-1]
+            for src in re.findall(r'src\s*=\s*["\']([^"\']+)["\']', html)
+            if "assets/images/" in src]
+
+
+def _recent_photos(b, days: int = COOLDOWN_DAYS) -> list[str]:
+    """Кадры, стоявшие на макетах за окно карантина, свежие первыми.
+
+    Источников два. Журнал (`PHOTO_LOG`) пишет `emit` по обоим путям;
+    слоты готовых макетов лежали в папке до журнала, и терять эту память
+    на выкатке незачем — иначе в первый месяц карантин пуст.
+    """
+    if days <= 0:
+        return []
+    edge = (dt.datetime.now() - dt.timedelta(days=days)).timestamp()
+    seen: dict[str, float] = {}
+
+    def mark(name: str, when: float) -> None:
+        if name and when >= edge:
+            seen[name] = max(seen.get(name, 0.0), when)
+
+    for name, when in _photo_log(b).items():
+        try:
+            mark(name, dt.datetime.fromisoformat(when).timestamp())
+        except ValueError:
+            continue
+    folder = b.path("posts")
+    if folder.is_dir():
+        for f in folder.glob("*.slots.json"):
+            stamp = f.stat().st_mtime
+            if stamp < edge:
+                continue
+            try:
+                got = _json.loads(f.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            mark(str(got.get("photo") or ""), stamp)
+    return sorted(seen, key=lambda n: seen[n], reverse=True)
+
+
+def _quota(n: int) -> dict[str, int]:
+    """Сколько кадров какого рода на `n` карточек.
+
+    Округление по наибольшему остатку: доли считаются от одного и того же
+    `n`, поэтому сумма сходится ровно, а не «примерно».
+    """
+    raw = {k: n * share for k, share in MIX}
+    out = {k: int(v) for k, v in raw.items()}
+    for k, _ in sorted(MIX, key=lambda kv: raw[kv[0]] % 1, reverse=True):
+        if sum(out.values()) >= n:
             break
-    return seen
+        out[k] += 1
+    return out
+
+
+def _pools(b, theme: dict[str, Any], photos: list[str]) -> dict[str, list[str]]:
+    """Фотобанк по родам кадра; внутри рода — порядок правила бренда.
+
+    Отдохнувшие идут впереди, побывавшие на макете за месяц — в хвост.
+    Выбросить их насовсем нельзя: у бренда с десятком кадров это значит
+    остаться без фона вовсе, а пустая обложка хуже повторной.
+
+    `rest` — то, чего человек не разнёс по родам. В пропорции такой кадр
+    не участвует и берётся только на нехватку.
+    """
+    kinds = _photo_kinds(b)
+    rules = _photo_rules(b)
+    goal = str(theme.get("goal") or "").strip().lower()
+    liked = [p for p in (rules.get(goal) or rules.get("*") or []) if p in photos]
+    order = liked + [p for p in photos if p not in liked]
+    recent = set(_recent_photos(b))
+    order = [p for p in order if p not in recent] + \
+            [p for p in order if p in recent]
+
+    out: dict[str, list[str]] = {k: [] for k, _ in MIX}
+    out["rest"] = []
+    for name in order:
+        if name.startswith(GEN):
+            continue
+        kind = kinds.get(name, "stock" if name.startswith(STOCK) else "rest")
+        if not kind:
+            continue
+        out[kind if kind in out else "rest"].append(name)
+    return out
+
+
+def _mix(pools: dict[str, list[str]], n: int,
+         taken: set[str] | None = None) -> tuple[list[str], list[str]]:
+    """`n` кадров по пропорции. Вторым — чего не хватило, строкой человеку.
+
+    Нехватку не молчим и не подменяем: пропорция это обещание бренду, а
+    банк без стока или без своих кадров — обычное дело у нового клиента.
+    """
+    got: set[str] = set(taken or ())
+    if not any(pools.get(k) for k, _ in MIX):
+        # Роды не разнесены вовсе: у бренда нет раздела «Кто в кадре».
+        # Пропорцию собирать не из чего, и три строки «не хватило» на
+        # каждом макете были бы шумом, а не дырой. Так работает новый
+        # клиент, у которого в папке просто лежат фотографии.
+        return [p for p in pools.get("rest", []) if p not in got][:n], []
+    want = _quota(n)
+    out: list[str] = []
+    short: list[str] = []
+    for k, _ in MIX:
+        free = [p for p in pools.get(k, []) if p not in got]
+        out += free[:want[k]]
+        got |= set(free[:want[k]])
+        if len(free) < want[k]:
+            short.append(f"{WORD[k]} в банке меньше, чем просит пропорция: "
+                         f"{len(free)} вместо {want[k]}")
+    if len(out) < n:
+        rest = [p for key in ("rest", *(k for k, _ in MIX))
+                for p in pools.get(key, []) if p not in got]
+        out += rest[:n - len(out)]
+    return out, short
+
+
+def _mix_findings(b, used: list[str]) -> list[str]:
+    """Пропорция и повторы в собранном комплекте. Гейт, а не просьба."""
+    if len(used) < 2:
+        return []
+    out = [f"фото {n} стоит на {used.count(n)} карточках"
+           for n in dict.fromkeys(used) if used.count(n) > 1]
+    kinds = _photo_kinds(b)
+    if not kinds:
+        return out
+    got = {k: 0 for k, _ in MIX}
+    for name in used:
+        kind = kinds.get(name, "stock" if name.startswith(STOCK) else "")
+        if kind in got:
+            got[kind] += 1
+    want = _quota(len(used))
+    off = [f"{WORD[k]} {got[k]} вместо {want[k]}"
+           for k, _ in MIX if got[k] != want[k]]
+    if off:
+        out.append("пропорция кадров разъехалась: " + ", ".join(off))
+    return out
 
 
 def _pick_photo(b, theme: dict[str, Any], photos: list[str]) -> str:
@@ -617,7 +835,9 @@ def _pick_photo(b, theme: dict[str, Any], photos: list[str]) -> str:
         # на обложке личного бренда читается как AI-контент, и выбрать
         # её молча код не должен.
         order = [p for p in photos if not p.startswith(NOT_OWN)] or photos
-    recent = _recent_photos(b, len(order) - 1)
+    # Карантин тут не пропорция, а память: одно фото — одна обложка, и
+    # выбирать род кадра не из чего.
+    recent = set(_recent_photos(b))
     return next((p for p in order if p not in recent), order[0])
 
 
@@ -1010,14 +1230,24 @@ def inspect(html: str, copy: str, size: tuple[int, int],
 # ── рендер ────────────────────────────────────────────────────────────
 
 async def render(html_path: Path, size: tuple[int, int]) -> Path:
-    """HTML в PNG через headless Chrome. Масштаб 2×, как в спеке.
+    """HTML в PNG через headless Chrome. Масштаб 2×, как в спеке."""
+    return await capture(html_path.as_uri(), html_path.with_suffix(".png"), size)
+
+
+async def capture(target: str, png: Path, size: tuple[int, int], *,
+                  budget_ms: int = 8000) -> Path:
+    """Снять кадром то, что Chrome покажет по адресу `target`.
+
+    Адресом бывает и свой макет (`file://`), и чужая страница в сети:
+    Chrome разницы не делает, а монтажу нужен скрин продукта, о котором
+    идёт речь, — это единственная картинка, которая попадает **в тему**,
+    а не рядом с ней.
 
     Ждём **файл, а не выход процесса**. Chrome со свежим профилем
     записывает скриншот и остаётся висеть: ожидание `proc.wait()`
     упирается в таймаут при уже готовом PNG. Поэтому опрашиваем файл и
     гасим процесс сами.
     """
-    png = html_path.with_suffix(".png")
     png.unlink(missing_ok=True)
     w, h = size
     # Профиль Chrome — во временную папку, а не рядом с макетом.
@@ -1038,9 +1268,9 @@ async def render(html_path: Path, size: tuple[int, int]) -> Path:
         f"--window-size={w},{h}",
         # Шрифты приходят с CDN. Без бюджета времени Chrome снимает кадр
         # раньше, чем они доедут, и макет уходит системным шрифтом.
-        "--virtual-time-budget=8000",
+        f"--virtual-time-budget={budget_ms}",
         f"--user-data-dir={profile}",
-        f"--screenshot={png}", html_path.as_uri(),
+        f"--screenshot={png}", target,
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
 
     try:
@@ -1058,7 +1288,7 @@ async def render(html_path: Path, size: tuple[int, int]) -> Path:
             if proc.returncode is not None and png.exists():
                 break
         else:
-            raise NoRenderer(f"рендер {html_path.name} не уложился в "
+            raise NoRenderer(f"рендер {png.name} не уложился в "
                              f"{RENDER_TIMEOUT} секунд")
     finally:
         if proc.returncode is None:
@@ -1067,7 +1297,7 @@ async def render(html_path: Path, size: tuple[int, int]) -> Path:
         shutil.rmtree(profile, ignore_errors=True)
 
     if not png.exists() or png.stat().st_size == 0:
-        raise NoRenderer(f"Chrome не отдал PNG для {html_path.name}")
+        raise NoRenderer(f"Chrome не отдал PNG для {png.name}")
     return png
 
 
@@ -1119,7 +1349,9 @@ def _brief(theme: dict[str, Any], copy: str, photos: list[str],
     if markup:
         lines += ["## Доступные фото", "",
                   "Путь вида `../design/assets/images/<файл>`. Чего нет в "
-                  "списке, того не существует:", ""]
+                  "списке, того не существует. Список уже собран под "
+                  "пропорцию бренда и под то, что не примелькалось, — "
+                  "**каждое фото ставь ровно один раз**:", ""]
         lines += [f"- {p}" for p in photos] or ["- фото нет"]
     return "\n".join(lines)
 
@@ -1153,6 +1385,13 @@ async def build(chat_id: int, ask: str, *, say=None,
                   "Сборка и рендер займут до минуты.")
 
     gaps: list[str] = []
+    # На свободном пути (карусель) фото выбирает модель, и до 11.09 ей
+    # ехал весь банк алфавитом — отсюда одни и те же кадры из макета в
+    # макет. Теперь список ровно на число карточек и в пропорции, а
+    # нехватка называется строкой, а не подменяется молча.
+    offer_photos, short = (photos, []) if tpls else _mix(
+        _pools(b, theme, photos), n)
+    gaps += short
     if tpls:
         fixed = _derive(b, theme, photos, photo, notes=gaps)
         answer = await agent.ask(
@@ -1165,7 +1404,7 @@ async def build(chat_id: int, ask: str, *, say=None,
     else:
         answer = await agent.ask(
             "design", chat_id,
-            _brief(theme, copy, photos, size, n, markup=True) +
+            _brief(theme, copy, offer_photos, size, n, markup=True) +
             "\n\nСобери макет. Ответь одним JSON-объектом в формате из твоей "
             "секции «Формат выдачи».",
             brand_name=b.name(), stable=_stable(spec, refs),
@@ -1219,8 +1458,10 @@ async def emit(b, lay: Layout, size: tuple[int, int], copy: str,
     субагенту на слово не верит.
     """
     theme = lay.theme
+    used: list[str] = []
     for i, c in enumerate(lay.cards, 1):
         html = str(c["html"]).strip()
+        used += _used_photos(html)
         # Имя карточки идёт в имя файла, поэтому чистится до латиницы.
         # Вычистилось до пустого — берём порядковый номер.
         name = re.sub(r"[^a-z0-9-]", "", str(c.get("name") or "").lower()) \
@@ -1241,6 +1482,14 @@ async def emit(b, lay: Layout, size: tuple[int, int], copy: str,
             b.artifact(f"posts/{theme['id']}-{name}.slots.json",
                        _json.dumps(c.get("slots") or {}, ensure_ascii=False,
                                    indent=2))
+
+    # Пропорцию и повтор кадра проверяем по всему комплекту: `inspect`
+    # видит карточку поодиночке и «одно и то же фото на всех пяти» для
+    # него выглядит нормальным макетом пять раз подряд.
+    lay.findings += _mix_findings(b, used)
+    # Журнал пишется после рендера: упавшая вёрстка не должна уводить
+    # кадр в карантин, не показав человеку ничего.
+    _log_photos(b, used)
 
     log.info("%s: карточек %s, находок %s, заметок %s", theme["id"],
              len(lay.cards), len(lay.findings), len(lay.notes))
@@ -1340,18 +1589,21 @@ def _needs_bg(plat: str, fmt: str) -> bool:
                for _, tpl in _templates(plat, fmt))
 
 
-def _own(b, theme: dict[str, Any], photos: list[str]) -> list[str]:
-    """Свои фото в порядке правила бренда: подходящие и не вчерашние."""
-    rules = _photo_rules(b)
-    goal = str(theme.get("goal") or "").strip().lower()
-    order = [p for p in (rules.get(goal) or rules.get("*") or []) if p in photos]
-    order += [p for p in photos
-              if p not in order and not p.startswith(NOT_OWN)]
-    recent = _recent_photos(b, BG_CHOICES)
-    # Недавние не выбрасываются, а уезжают в конец: на маленьком
-    # фотобанке выбросить их значило бы остаться без вариантов вовсе.
-    return [p for p in order if p not in recent] + \
-           [p for p in order if p in recent]
+def _from_bank(b, theme: dict[str, Any], photos: list[str]) -> list[str]:
+    """Фотобанк в порядке показа: тройками по пропорции, отдохнувшие первыми.
+
+    Раньше здесь лежали только свои кадры, а сток подмешивался с Pexels
+    на нехватку. Теперь сток из банка стоит в пропорции наравне: человек
+    всё равно выбирает кнопкой, а тройка «свой кадр, сток, фон» — это
+    выбор, тогда как три портрета подряд им только притворяются.
+    """
+    pools = _pools(b, theme, photos)
+    out: list[str] = []
+    while True:
+        got, _ = _mix(pools, BG_CHOICES, set(out))
+        if not got:
+            return out
+        out += got
 
 
 async def _keywords(chat_id: int, theme: dict[str, Any]) -> str:
@@ -1450,10 +1702,10 @@ async def _gen_brief(chat_id: int, theme: dict[str, Any]) -> str:
     return line[:200]
 
 
-def _own_page(b, theme: dict[str, Any], photos: list[str],
-              page: int) -> list[str]:
+def _bank_page(b, theme: dict[str, Any], photos: list[str],
+               page: int) -> list[str]:
     start = page * BG_CHOICES
-    return _own(b, theme, photos)[start:start + BG_CHOICES]
+    return _from_bank(b, theme, photos)[start:start + BG_CHOICES]
 
 
 def _options(own: list[str], *, page: int, query: str,
@@ -1465,6 +1717,9 @@ def _options(own: list[str], *, page: int, query: str,
     фото, и кнопка остаётся за ним.
     """
     out: list[dict[str, Any]] = [gen] if gen else []
+    # `own` здесь значит «файл уже лежит в банке», а не «своя съёмка»:
+    # стоковый кадр из банка ставится тем же движением, скачивать его не
+    # надо. Качать с Pexels — это `stock`, и путь у него другой.
     out += [{"kind": "own", "name": n} for n in own][:BG_CHOICES - len(out)]
     if len(out) < BG_CHOICES and query and stock.ready():
         try:
@@ -1514,7 +1769,7 @@ async def offer(reg, chat_id: int, ask: str, *, topic: str = "design",
     if not photos:
         raise NoWork("в папке бренда нет ни одного фото")
 
-    own = _own_page(b, theme, photos, page)
+    own = _bank_page(b, theme, photos, page)
     saved = _bg_read(b, theme["id"])
     query = str(saved.get("query") or "") if saved else ""
 

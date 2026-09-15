@@ -48,12 +48,12 @@ async def main() -> None:
 
     # ── адрес профиля ────────────────────────────────────────────────
     check("ник из ссылки с хвостом",
-          instagram.handle("https://www.instagram.com/lily_space/reels/")
-          == "lily_space")
+          instagram.handle("https://www.instagram.com/lily_.space/reels/")
+          == "lily_.space")
     check("голое @имя это Telegram, а не профиль",
-          not instagram.is_profile("@lilyspace"))
+          not instagram.is_profile("@lily_.space"))
     check("ссылка на профиль узнаётся",
-          instagram.is_profile("instagram.com/lilyspace"))
+          instagram.is_profile("instagram.com/lily_.space"))
     check("канал Telegram профилем не считается",
           not instagram.is_profile("https://t.me/s/addmeto"))
 
@@ -64,7 +64,7 @@ async def main() -> None:
 
     # ── запись и чтение ──────────────────────────────────────────────
     instagram.stash(b, {
-        "profile": "lilyspace", "title": "Lily Space", "followers": 4200,
+        "profile": "lily_.space", "title": "Lily Space", "followers": 4200,
         # Дата сбора здесь относительная, а не вшитая: `read` меряет
         # возраст от сегодня, и вшитый день молча переезжает за порог
         # восьми суток — тест начинает падать по календарю, а не по коду.
@@ -77,7 +77,7 @@ async def main() -> None:
             {"code": "Cnone", "text": "", "date": None,
              "likes": 50, "comments": 0, "views": None, "video": False},
         ]})
-    src, gap = instagram.read(b, "lilyspace")
+    src, gap = instagram.read(b, "lily_.space")
     check("кэш прочитался", src.ok, src.error)
     check("кадр без подписи в срез не идёт", len(src.posts) == 4,
           str(len(src.posts)))
@@ -98,24 +98,24 @@ async def main() -> None:
           str(by_views.with_views))
 
     # ── возраст кэша ─────────────────────────────────────────────────
-    stale = instagram._aged("lilyspace", datetime(2026, 8, 20).isoformat(),
+    stale = instagram._aged("lily_.space", datetime(2026, 8, 20).isoformat(),
                             today=date(2026, 9, 7))
     check("старый кэш назван дырой", "не попали" in stale, stale)
-    fresh = instagram._aged("lilyspace", datetime(2026, 9, 5).isoformat(),
+    fresh = instagram._aged("lily_.space", datetime(2026, 9, 5).isoformat(),
                             today=date(2026, 9, 7))
     check("свежий кэш молчит", fresh == "", fresh)
     check("кэш без даты сбора свежим не считается",
-          "нет даты" in instagram._aged("lilyspace", None))
+          "нет даты" in instagram._aged("lily_.space", None))
 
     # ── завод в сеть за профилем не ходит ────────────────────────────
-    net = await sources.fetch("https://instagram.com/lilyspace")
+    net = await sources.fetch("https://instagram.com/lily_.space")
     check("сеть за профилем не идёт", not net.ok, str(net.ok))
     check("отказ показывает дорогу", "instagram_pull" in net.error, net.error)
 
     # ── срез в snapshot ──────────────────────────────────────────────
     b.artifact("research/sources.md",
                "# За чем следим\n\n"
-               "- instagram.com/lilyspace — свой профиль\n"
+               "- instagram.com/lily_.space — свой профиль\n"
                "- instagram.com/nobody — не снят\n")
     watch = research.watchlist(b)
     check("профили попали в список источников", len(watch) == 2, str(watch))

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 
 import harness
 from harness import CHAT, check, report
@@ -20,7 +21,8 @@ from harness import CHAT, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
-from orchestrator import agent, cut, desk, footage, grab, montage                   # noqa: E402
+from orchestrator import (agent, album, cut, desk, footage, grab,      # noqa: E402
+                          montage, panelshot)
 from storage import db                                            # noqa: E402
 from storage.brand import Brand                                   # noqa: E402
 
@@ -1009,5 +1011,245 @@ def main() -> None:
               "диаграмма" in str(e), str(e))
 
 
+def panel() -> None:
+    """44–45. Блоки панели: отбор у роли и посадка на слова."""
+    print("\n44. Роль отдаёт блоки, код отбирает")
+    raw = [
+        {"phrase": "просто опиши что нужно", "kind": "card",
+         "lines": ["Опиши задачу словами"], "items": ["первое", "второе"]},
+        {"phrase": "", "kind": "card", "lines": ["без фразы"]},
+        {"phrase": "три недели", "kind": "counter"},
+        {"phrase": "три недели", "kind": "counter", "value": 3},
+        {"phrase": "низкий уровень", "kind": "scale",
+         "items": ["low — быстро"]},
+        {"phrase": "низкий уровень", "kind": "scale",
+         "items": ["low — быстро", "high — рассуждение"]},
+        {"phrase": "пустая карточка", "kind": "card"},
+        {"phrase": "диаграмма", "kind": "диаграмма", "lines": ["что-то"]},
+        {"phrase": "первый разгон", "kind": "icon", "lines": ["Opal"],
+         "full": True},
+        {"phrase": "второй разгон", "kind": "icon", "lines": ["Claude"],
+         "full": True},
+    ]
+    good, lost = cut._slides(raw)
+    kinds = [(s.kind, s.phrase[:12]) for s in good]
+    check("взяты только собранные блоки", len(good) == 5, str(kinds))
+    check("блок без фразы отброшен: ставить не на что",
+          any("без фразы" in n for n in lost), str(lost))
+    check("счётчик без числа отброшен",
+          any("счётчик без числа" in n for n in lost), str(lost))
+    check("шкала из одной ступени отброшена",
+          any("ступеней в шкале" in n for n in lost), str(lost))
+    check("пустая карточка отброшена",
+          any("пустая карточка" in n for n in lost), str(lost))
+    check("выдуманный сорт блока отброшен, а не нарисован как карточка",
+          any("не бывает" in n for n in lost), str(lost))
+    # Второй блок на весь кадр это не разгон, а мигание: дубль уходит и
+    # возвращается несколько раз за ролик.
+    full = [s.full for s in good if s.kind == "icon"]
+    check("на весь кадр остаётся один блок, второй остаётся на половине",
+          full == [True, False], str(full))
+    check("отобранное человеку названо, а не выброшено молча",
+          len(lost) >= 5, str(lost))
+
+    print("\n45. Блок встаёт на слово, а не на секунду")
+    reel = montage.Reel(theme={"id": "t-lay"}, video=harness.TMP / "нет.mp4")
+    reel.probe = footage.Probe(duration=20.0, width=1920, height=1080,
+                               fps=30.0, has_audio=True)
+    reel.cuts = footage.timeline(20.0, [])
+    reel.subs = [{"text": "Просто", "start": 1.0, "end": 1.4},
+                 {"text": "опиши,", "start": 1.5, "end": 2.0},
+                 {"text": "что", "start": 2.1, "end": 2.3},
+                 {"text": "нужно", "start": 2.4, "end": 2.9},
+                 {"text": "за", "start": 9.0, "end": 9.2},
+                 {"text": "три", "start": 9.3, "end": 9.6},
+                 {"text": "недели", "start": 9.7, "end": 10.2},
+                 {"text": "первое", "start": 12.0, "end": 12.4}]
+
+    slides = [cut.Slide(phrase="опиши что", kind="card",
+                        lines=["Опиши задачу"], items=["первое", "второго"]),
+              cut.Slide(phrase="три недели", kind="counter", value=3,
+                        value_phrase="три недели"),
+              cut.Slide(phrase="этого никто не говорил", kind="card",
+                        lines=["мимо"])]
+    blocks, lost = montage.lay(reel, slides)
+
+    check("блок встал на секунду своей фразы", len(blocks) == 2
+          and blocks[1].start == 9.3, str([(b.start, b.end) for b in blocks]))
+    check("первый блок тянется к нулю: пустая панель в начале — поломка",
+          blocks[0].start == 0.0, str(blocks[0].start))
+    check("конец блока это начало следующего",
+          blocks[0].end == blocks[1].start, str(blocks[0].end))
+    check("последний блок живёт до конца ролика",
+          blocks[1].end == reel.cuts.total, str(blocks[1].end))
+    check("ненайденная фраза выбрасывает блок и называет его",
+          any("не нашлось" in n for n in lost), str(lost))
+    check("ненайденный пункт остаётся без секунды, а не пропадает",
+          blocks[0].items[1] == ("второго", None), str(blocks[0].items))
+    # Шаблон отсчитывает пункт от начала блока: сказанный после его
+    # конца не появился бы на панели вовсе.
+    check("пункт, сказанный вне своего блока, едет с карточкой и назван",
+          blocks[0].items[0] == ("первое", None)
+          and any("вне своего блока" in n for n in lost), str(lost))
+    check("счётчик набирается на своём слове",
+          blocks[1].value_at == 9.3, str(blocks[1].value_at))
+
+    # Порядок в ответе роли это её обещание, а не факт записи.
+    shuffled = montage.lay(reel, [slides[1], slides[0]])[0]
+    check("блоки идут по речи, а в каком порядке их назвали — неважно",
+          [b.start for b in shuffled] == [0.0, 9.3],
+          str([b.start for b in shuffled]))
+
+    # Блок, которому сосед не оставил времени, нарисовать нельзя.
+    tight = montage.lay(reel, [cut.Slide(phrase="опиши что", lines=["раз"]),
+                               cut.Slide(phrase="нужно", lines=["два"])])
+    check("блок короче потолка выброшен и назван",
+          len(tight[0]) == 1 and any("короче" in n for n in tight[1]),
+          str(tight[1]))
+
+    print("\n45а. Картинки панели: адрес от роли, знак и скрин от кода")
+    pics, pic_lost = cut._slides([
+        {"phrase": "назвал супабейс", "kind": "icon", "lines": ["Supabase"],
+         "url": "supabase.com"},
+        {"phrase": "адрес внутрь сети", "kind": "card", "lines": ["мимо"],
+         "url": "http://localhost:8000/admin"},
+        {"phrase": "адрес у счётчика", "kind": "counter", "value": 5,
+         "url": "https://example.com"},
+    ])
+    check("адрес продукта доезжает до слайда",
+          pics[0].url == "supabase.com", str(pics[0]))
+    check("адрес внутрь сети не пускается в Chrome и назван",
+          pics[1].url == "" and any("не годится" in n for n in pic_lost),
+          str(pic_lost))
+    check("у счётчика адреса не бывает — рисовать некуда",
+          pics[2].url == "", str(pics[2]))
+    check("голый хост становится https-адресом",
+          panelshot.safe_url("supabase.com") == "https://supabase.com/",
+          str(panelshot.safe_url("supabase.com")))
+    check("file://, IP и .local отбрасываются",
+          not any(panelshot.safe_url(u) for u in
+                  ("file:///etc/passwd", "http://192.168.1.5/", "printer.local",
+                   "javascript:alert(1)")), "guard")
+
+    html = """<head>
+      <link rel="icon" href="/favicon.ico">
+      <link rel="icon" sizes="32x32" href="/f32.png">
+      <link rel="apple-touch-icon" sizes="180x180" href="/apple.png">
+      <link rel="icon" type="image/svg+xml" href="https://cdn.x.com/logo.svg">
+    </head>"""
+    cands = panelshot.logo_candidates(html, "https://x.com/pricing")
+    check("вектор первым, apple-touch-icon следом, мелкий favicon и .ico мимо",
+          cands[:2] == ["https://cdn.x.com/logo.svg", "https://x.com/apple.png"]
+          and "https://x.com/f32.png" not in cands
+          and not any(c.endswith(".ico") for c in cands), str(cands))
+    check("необъявленный apple-touch-icon и сервис знаков — в хвосте",
+          cands[-2] == "https://x.com/apple-touch-icon.png"
+          and cands[-1].endswith("domain=x.com"), str(cands))
+
+    logo = harness.TMP / "logo.png"
+    logo.write_bytes(b"png")
+    reel_pic = [cut.Slide(phrase="опиши что", kind="icon", lines=["Opal"],
+                          url="opal.google", image=logo)]
+    laid = montage.lay(reel, reel_pic)[0]
+    check("картинка слайда переезжает на блок и переживает пересборку",
+          laid and laid[0].image == logo, str(laid))
+
+    print("\n45б. Альбом к дублю и картинки по теме")
+    blocks_raw = [
+        {"phrase": "просто пишешь ему", "kind": "media", "media": 1},
+        {"phrase": "материала нет", "kind": "media", "media": 4},
+        {"phrase": "стеклянный куб", "kind": "art",
+         "art": "a translucent glass cube", "lines": ["Куб"]},
+        {"phrase": "второй образ", "kind": "art", "art": "a brain"},
+        {"phrase": "третий образ", "kind": "art", "art": "a key"},
+        {"phrase": "четвёртый образ", "kind": "art", "art": "a lock",
+         "lines": ["Замок"]},
+        {"phrase": "без брифа", "kind": "art", "art": ""},
+    ]
+    got, why = cut._slides(blocks_raw, materials=2, art=True)
+    by = {s.phrase: s for s in got}
+    check("материал альбома встаёт своим номером",
+          by["просто пишешь ему"].media == 1, str(got))
+    check("номер, которого в альбоме нет, отброшен и назван",
+          "материала нет" not in by and any("№4" in n for n in why), str(why))
+    check("картинок по теме не больше потолка: лишняя со словами — карточка",
+          sum(s.kind == "art" for s in got) == cut.ART_MAX
+          and by["четвёртый образ"].kind == "card", str([s.kind for s in got]))
+    check("картинка без брифа и без слов выпадает",
+          "без брифа" not in by, str(why))
+    nokey, why2 = cut._slides(blocks_raw[2:3], art=False)
+    check("нет ключа Nano Banana — блок словами и это названо",
+          nokey[0].kind == "card" and any("ключа" in n for n in why2),
+          str(why2))
+    check("стиль картинки задаёт код: цвета бренда и запрет текста",
+          "#C6DE48" in panelshot.art_prompt("a cube.", "#1F1F1F", "#C6DE48")
+          and "no text" in panelshot.art_prompt("a cube", "#1F1F1F", "#C6DE48"),
+          "стиль")
+
+    class _B:
+        root = harness.TMP / "album-brand"
+        def path(self, rel):
+            return self.root / rel
+    ab = _B()
+    shutil.rmtree(ab.root, ignore_errors=True)
+    # Сообщения альбома приходят вразнобой: порядок — номер сообщения.
+    album.stage(ab, "g1", 12, b"img", ".JPG", "результат")
+    take, fresh = album.stage(ab, "g1", 10, b"take", ".mp4")
+    album.stage(ab, "g1", 11, b"rec", ".mov", "терминал")
+    check("первый файл альбома открывает его, остальные — нет",
+          not fresh, "fresh")
+    check("дубль альбома — первое видео по номеру сообщения",
+          album.takes(ab) == [take], str(album.takes(ab)))
+    mats = album.materials(ab, take)
+    check("материалы — остальное по порядку, с подписями",
+          [(m.kind, m.caption) for m in mats]
+          == [("video", "терминал"), ("image", "результат")], str(mats))
+    _, fresh2 = album.stage(ab, "g2", 20, b"take2", ".mp4")
+    check("новый альбом стирает прежний: чужие материалы на панель не едут",
+          fresh2 and not take.exists(), "стёрт")
+    check("дубль не из альбома материалов не получает",
+          album.materials(ab, harness.TMP / "pending.mp4") == [], "пусто")
+
+    vid = harness.TMP / "rec.mov"
+    vid.write_bytes(b"rec")
+    mblock = montage.Block(start=0.0, end=4.0, kind="media", video=vid,
+                           video_len=9.5, media_size=(1920, 1080))
+    mp = montage._block_props(mblock, "panel-t-0.mov")
+    check("запись из альбома едет видео с длиной и мерками, а не картинкой",
+          mp.get("videoPath") == "panel-t-0.mov" and "imagePath" not in mp
+          and mp["videoSeconds"] == 9.5 and mp["mediaWidth"] == 1920, str(mp))
+
+    print("\n46. Из режима правки выводит просьба смонтировать")
+    # Режим правки стоит раньше маршрутизации: пока он взведён, топик
+    # разбирает сообщение как замену слов, а неразобранная замена
+    # взводит его снова. Без своего выхода это ловушка — «смонтируй
+    # сплитом» получал справку про формат правки на каждый повтор.
+    montage.table.await_fix(-777, reel)
+    check("режим правки взведён", montage.wants_fix(-777))
+    check("просьба смонтировать сильнее режима правки",
+          montage.wants_new("смонтируй сплитом 2026-09-05-instagram-06"),
+          "выход есть")
+    check("замена слов правкой и остаётся",
+          not montage.wants_new("клод -> Claude"), "не выход")
+    montage.leave_fix(-777)
+    check("выход снимает режим правки", not montage.wants_fix(-777))
+    check("карточка при этом остаётся на столе: кнопки под ней живые",
+          montage.table.get(-777) is reel, "стол")
+    montage.table.clear(-777)
+
+    # Сплит и нарезка живут в одном топике, и путать их нельзя: одна
+    # просьба даёт ролик с панелью, другая — пачку роликов.
+    check("сплит просят своими словами",
+          montage.wants_motion("смонтируй сплитом")
+          and montage.wants_motion("собери с панелью")
+          and not montage.wants_motion("смонтируй"),
+          "триггер сплита")
+    check("нарезка сплитом не становится",
+          not montage.wants_split("смонтируй сплитом")
+          and not montage.wants_motion("нарежь на рилсы"),
+          "триггеры не пересекаются")
+
+
 main()
+panel()
 raise SystemExit(report())

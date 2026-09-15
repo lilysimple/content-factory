@@ -75,6 +75,9 @@ async def amain() -> None:
             dp_workers.start_polling(*workers,
                                      allowed_updates=WORKER_UPDATES),
             handlers.pump(),
+            # Часы: тик раз в минуту, автопубликация по времени слота.
+            # Тенант с выключенным автоматом не платит за них ничем.
+            handlers.clock(),
         )
     finally:
         await registry.close()

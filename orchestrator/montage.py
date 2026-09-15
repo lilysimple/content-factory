@@ -55,7 +55,8 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import ROOT, cfg
-from orchestrator import cut, desk, design, footage, grab, publisher
+from orchestrator import (album, cut, desk, design, footage, grab, imagegen,
+                          imagery, panelshot, publisher)
 from orchestrator.desk import NoWork
 from storage import db
 
@@ -159,6 +160,14 @@ class Reel:
     # на первый кадр монтаж не кладёт: слова там уже есть.
     dressed: bool = False
     pages: list[dict[str, Any]] = field(default_factory=list)
+    # Блоки панели до привязки ко времени. Живут на ролике, а не в
+    # аргументе рендера: правка субтитров пересобирает ролик заново,
+    # и панель обязана приехать та же — иначе человек, поправив имя,
+    # получит ролик с другой инфографикой.
+    slides: list[Any] = field(default_factory=list)
+    # Они же во времени готового ролика. Считаются из `slides`, а не
+    # хранятся вместо них: пересборка после правки режет запись заново.
+    blocks: list[Block] = field(default_factory=list)
     out: Path | None = None
     findings: list[str] = field(default_factory=list)
 
@@ -235,8 +244,11 @@ VIDEO_SUFFIX = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi")
 def _footage(b) -> Path:
     """Свежайшее видео из входящих. Имя любое, лишь бы это было видео."""
     d = incoming_dir(b)
-    files = sorted((f for f in d.iterdir()
-                    if f.is_file() and f.suffix.lower() in VIDEO_SUFFIX),
+    # Дубль из альбома — такой же кандидат, как присланный одним файлом:
+    # свежий побеждает, откуда бы он ни пришёл (`album`).
+    files = sorted([*(f for f in d.iterdir()
+                      if f.is_file() and f.suffix.lower() in VIDEO_SUFFIX),
+                    *album.takes(b)],
                    key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
         raise NoFootage("видео ещё не пришло. Снимите ролик по сценарию и "
@@ -1006,7 +1018,7 @@ MOTION_HEADS = ("top", "bottom")
 # Чем блок занят. `card` — карточка со скрином или строками; остальные
 # три двигаются сами: знак прилетает пружиной, число набирается от нуля,
 # бегунок едет по ступеням. Картинка себя анимировать не умеет.
-MOTION_KINDS = ("card", "icon", "counter", "scale")
+MOTION_KINDS = ("card", "icon", "counter", "scale", "media", "art")
 GLOW_ALPHA = 0.13           # свечение под карточкой
 CARD_ALPHA = 0.06           # подложка карточки: молоко, почти прозрачное
 
@@ -1034,6 +1046,10 @@ class Block:
     # `counter`: до какого числа считать и на каком слове набирать.
     value: int | None = None
     value_at: float | None = None
+    # `media`: запись из альбома, её длина и мерки кадра.
+    video: Path | None = None
+    video_len: float = 0.0
+    media_size: tuple[int, int] = (0, 0)
 
 
 def speak_at(reel: Reel, phrase: str) -> float | None:
@@ -1043,6 +1059,73 @@ def speak_at(reel: Reel, phrase: str) -> float | None:
     идёт по секундам блоков, без набора под речь.
     """
     return footage.anchor(reel.subs, phrase)
+
+
+# Короче этого блок не читается: полторы секунды на карточку со
+# строкой — это мигание, а не вторая дорожка.
+BLOCK_MIN = 1.5
+
+
+def lay(reel: Reel, slides: list[Any]) -> tuple[list[Block], list[str]]:
+    """Блоки панели во времени готового ролика.
+
+    Роль назвала фразы, код называет секунды: `speak_at` ищет фразу в
+    нарезанной расшифровке. Не нашлась — блок выбрасывается и называется
+    человеку. Угадывать нельзя: блок, поставленный наугад, приедет на
+    видео под чужими словами и выглядеть будет как ошибка монтажа, а не
+    как ненайденная фраза.
+
+    Конец блока это начало следующего: панель меняется, а не гаснет.
+    Последний блок живёт до конца ролика.
+    """
+    assert reel.cuts is not None
+    total = reel.cuts.total
+    found: list[tuple[float, Any]] = []
+    lost: list[str] = []
+
+    for s in slides:
+        at = speak_at(reel, s.phrase)
+        if at is None:
+            lost.append(f"на панель не встало: «{s.phrase[:40]}» "
+                        "в записи не нашлось")
+            continue
+        found.append((at, s))
+
+    # Роль выдаёт блоки по порядку речи, но порядок — это факт
+    # расшифровки, а не обещание промпта.
+    found.sort(key=lambda pair: pair[0])
+
+    blocks: list[Block] = []
+    for i, (at, s) in enumerate(found):
+        end = found[i + 1][0] if i + 1 < len(found) else total
+        if end - at < BLOCK_MIN:
+            lost.append(f"«{s.phrase[:40]}»: блок короче "
+                        f"{BLOCK_MIN:.1f} с — соседний занял его время")
+            continue
+        # Пункт, чьё слово звучит за пределами блока, на панели не
+        # появится вовсе: шаблон отсчитывает его от начала блока. Такой
+        # едет с началом, как ненайденный, и это называется человеку.
+        items: list[tuple[str, float | None]] = []
+        for text in s.items:
+            when = speak_at(reel, text)
+            if when is not None and not (at <= when < end):
+                lost.append(f"«{text[:40]}»: сказано вне своего блока — "
+                            "пункт выехал вместе с карточкой")
+                when = None
+            items.append((text, when))
+        blocks.append(Block(
+            start=at, end=end, kicker=s.kicker, lines=list(s.lines),
+            items=items, full=s.full, kind=s.kind, image=s.image,
+            video=s.video, video_len=s.video_len, media_size=s.media_size,
+            value=s.value,
+            value_at=speak_at(reel, s.value_phrase) if s.value_phrase
+            else None))
+
+    # Дырка в начале — пустая панель на первых секундах, и выглядит она
+    # поломкой. Тянем первый блок к нулю, а не заводим пустой.
+    if blocks and blocks[0].start > 0:
+        blocks[0].start = 0.0
+    return blocks, lost
 
 
 def _rgba(color: str, alpha: float) -> str:
@@ -1063,8 +1146,8 @@ def _panel_files(tid: str, blocks: list[Block]) -> dict[int, str]:
     """Имена скринов панели внутри public/. Индекс блока в имени, а не
     имя исходного файла: один и тот же скрин на двух блоках — обычное
     дело, а перетереть чужой файл чужим именем хватит одного раза."""
-    return {i: f"panel-{tid}-{i}{b.image.suffix}"
-            for i, b in enumerate(blocks) if b.image}
+    return {i: f"panel-{tid}-{i}{(b.video or b.image).suffix.lower()}"
+            for i, b in enumerate(blocks) if b.video or b.image}
 
 
 def _block_props(b: Block, image: str | None) -> dict[str, Any]:
@@ -1089,8 +1172,13 @@ def _block_props(b: Block, image: str | None) -> dict[str, Any]:
     }
     if b.kicker:
         out["kicker"] = b.kicker
-    if image:
+    if image and b.video:
+        out["videoPath"] = image
+        out["videoSeconds"] = round(b.video_len, 3)
+    elif image:
         out["imagePath"] = image
+    if b.media_size[0] and b.media_size[1]:
+        out["mediaWidth"], out["mediaHeight"] = b.media_size
     if b.value is not None:
         out["value"] = b.value
         # Не названа секунда — число набирается с началом блока: счётчик,
@@ -1158,9 +1246,9 @@ async def render_motion(reel: Reel, blocks: list[Block],
 
     files: dict[str, Path] = {_video_name(reel): reel.video}
     for i, name in _panel_files(reel.theme["id"], blocks).items():
-        image = blocks[i].image
-        assert image is not None
-        files[name] = image
+        src = blocks[i].video or blocks[i].image
+        assert src is not None
+        files[name] = src
 
     frames = max(1, round((reel.cuts.total + props["outroSeconds"]) * fps))
 
@@ -1394,7 +1482,131 @@ def _trim(reel: Reel, frag: "cut.Fragment", b) -> None:
         f"{max(tail, 0.0):.1f} с в конце, осталось {cuts.total:.0f} с")
 
 
-async def build(chat_id: int, ask: str, *, say=None) -> Reel:
+async def _panel(chat_id: int, reel: Reel, *, ask: str = "",
+                 say=None) -> None:
+    """Блоки панели от Монтажёра. Не вышло — говорим и монтируем обычным.
+
+    Мягко по делу, ровно как `bounds`: сплит это способ показать
+    сказанное, а не условие монтажа. Молча свалиться в обычный ролик
+    нельзя — человек просил панель и обязан узнать, что её не будет.
+    """
+    if not reel.subs:
+        reel.findings.append("панели не будет: речи в дубле не разобрано")
+        return
+    if say:
+        await say("Собираю панель: что показать рядом с речью.")
+    b = desk.brand(chat_id)
+    items = album.materials(b, reel.video) if b is not None else []
+    shown = await _describe(items)
+    art = imagegen.ready()
+    try:
+        slides, lost = await cut.panel(chat_id, reel.heard, ask=ask,
+                                       materials=[d for d, _ in shown],
+                                       art=art)
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("панель не пришла: %s", e)
+        reel.findings.append(f"панели не будет: блоки не пришли "
+                             f"({desk.reason(e)}) — смонтирован обычным")
+        return
+
+    # Материал альбома встаёт на слайд файлом: картинкой или записью.
+    for s in slides:
+        if s.kind != "media":
+            continue
+        item, meta = items[s.media - 1], shown[s.media - 1][1]
+        s.media_size = meta["size"]
+        if item.kind == "video":
+            s.video, s.video_len = item.path, meta["seconds"]
+        else:
+            s.image = item.path
+    used = {s.media for s in slides if s.kind == "media"}
+    idle = [str(i) for i in range(1, len(items) + 1) if i not in used]
+    if idle:
+        reel.findings.append(f"из альбома на панель не встали: "
+                             f"{', '.join(idle)} — речи под них не нашлось")
+    if not items and not art:
+        reel.findings.append("записей экрана нет, картинок по теме тоже: "
+                             "нет GEMINI_API_KEY — панель словами")
+
+    # Картинки до посадки на слова: `lay` переносит их со слайда на блок.
+    # Недоставшееся — своей строкой, а не хвостом `lost`: там его срезал
+    # бы потолок в три строки, и человек не узнал бы, почему окно пустое.
+    if b is not None and any(s.url for s in slides):
+        if say:
+            await say("Снимаю знаки и страницы продуктов для панели.")
+        reel.findings += (await panelshot.dress(b, slides))[:3]
+    if b is not None and any(s.kind == "art" for s in slides):
+        if say:
+            await say("Рисую картинки по теме для панели.")
+        reel.findings += (await panelshot.draw(
+            b, slides, color=reel.color, accent=reel.accent))[:3]
+    # Картинка не нарисовалась и слов у блока нет — ставить нечего.
+    slides = [s for s in slides
+              if s.kind != "card" or s.lines or s.items or s.image]
+
+    blocks, dropped = lay(reel, slides)
+    reel.findings += [str(n) for n in lost[:3]] + dropped[:3]
+    if not blocks:
+        reel.findings.append("панели не будет: ни один блок не встал на "
+                             "слова — смонтирован обычным")
+        return
+    reel.slides = slides
+    reel.blocks = blocks
+    if say:
+        await say(f"Панель: {len(blocks)} блока по речи.")
+
+
+async def _describe(items: list[album.Item]) -> list[tuple[str, dict[str, Any]]]:
+    """Материалы альбома строкой для Монтажёра и мерками для шаблона.
+
+    Длительность записи роли нужна, чтобы не ставить минутный скринкаст
+    на трёхсекундную фразу; мерки — шаблону, чтобы вписать кадр, не
+    растягивая его.
+    """
+    out: list[tuple[str, dict[str, Any]]] = []
+    for item in items:
+        meta: dict[str, Any] = {"size": (0, 0), "seconds": 0.0}
+        try:
+            if item.kind == "video":
+                pr = await footage.probe(item.path)
+                meta.update(size=(pr.width, pr.height), seconds=pr.duration)
+                what = f"запись экрана или видео, {pr.duration:.0f} с"
+            else:
+                meta["size"] = await asyncio.to_thread(imagery.measure,
+                                                       item.path)
+                what = "картинка"
+        except Exception as e:                               # noqa: BLE001
+            log.warning("материал альбома не прочитался: %s", e)
+            what = "видео" if item.kind == "video" else "картинка"
+        w, h = meta["size"]
+        if w and h:
+            what += ", вертикальная" if h > w else ", горизонтальная"
+        if item.caption:
+            what += f" — подпись: «{item.caption[:120]}»"
+        out.append((what, meta))
+    return out
+
+
+async def _draw(reel: Reel, size: tuple[int, int]) -> Path:
+    """Рендер тем шаблоном, который этому ролику положен.
+
+    Одно место, где выбирается композиция: и монтаж, и пересборка после
+    правки субтитров ходят сюда. Разойдись они — правка имени в сплите
+    вернула бы обычный ролик, и человек увидел бы это уже на видео.
+    """
+    if reel.blocks:
+        return await render_motion(reel, reel.blocks, size)
+    return await render(reel, size)
+
+
+async def build(chat_id: int, ask: str, *, say=None,
+                panel: bool = False) -> Reel:
+    """Смонтировать ролик из снятого.
+
+    `panel` — сплит: холст делится швом, на второй половине панель,
+    которая идёт за речью. Блоки панели пишет Монтажёр по той же
+    расшифровке, фразами, а не секундами (`cut.panel`).
+    """
     b = desk.brand(chat_id)
     if b is None:
         raise NoWork("профиля бренда ещё нет")
@@ -1412,6 +1624,15 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
         video = (await grab.fetch(url, incoming_dir(b))).video
     else:
         video = _footage(b)
+
+    # Материалы в альбоме нужны только панели: прислал человек запись
+    # экрана к дублю — значит, ролик сплитом, даже если слово не сказано.
+    extra = album.materials(b, video)
+    if extra and not panel:
+        panel = True
+        if say:
+            await say(f"К дублю в альбоме {len(extra)} материала — "
+                      "монтирую сплитом, они пойдут на панель.")
 
     beats = _beats(b, theme["id"]) if theme else {}
     color, accent, text = _colors(b)
@@ -1474,9 +1695,15 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
     if narrows:
         _trim(reel, frag, b)
 
+    if panel:
+        await _panel(chat_id, reel, ask=ask, say=say)
+
     piece = None
     try:
-        await _intro(reel, b, size)
+        # Первого кадра у сплита нет: панель начинается с первого слова,
+        # а обложка это отдельная работа Дизайнера.
+        if not panel:
+            await _intro(reel, b, size)
         if narrows:
             # Кусок рендерится отдельным файлом: перемотка к середине
             # записи на каждый кадр роняет браузер, и время внутри куска
@@ -1485,7 +1712,7 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
             await footage.clip(video, frag.start, frag.end, piece)
             reel.video = piece
             reel.cuts = reel.cuts.shift(frag.start)
-        reel.out = await render(reel, size)
+        reel.out = await _draw(reel, size)
     except Exception as e:                                   # noqa: BLE001
         # Тему завели мы — не оставлять её в `ready` без файла: такую
         # Публикатор возьмёт в очередь как готовую к публикации.
@@ -1530,6 +1757,19 @@ def _clock(sec: float) -> str:
     `:.0f` запись 2:16 показывалась как 1:16, и человек искал кусок не там.
     """
     return f"{int(sec // 60)}:{int(sec % 60):02d}"
+
+
+# Слова, которыми просят сплит. С нарезкой их путать нельзя: «нарежь»
+# делает из одной записи несколько роликов, «смонтируй сплитом» — один
+# ролик с панелью. Обе просьбы живут в одном топике, и пересечься их
+# спискам значит отдать человеку не ту работу после минут рендера.
+MOTION_WORDS = ("сплит", "с панелью", "панелью", "инфографик",
+                "с графикой", "пополам")
+
+
+def wants_motion(ask: str) -> bool:
+    low = (ask or "").lower()
+    return any(w in low for w in MOTION_WORDS)
 
 
 def wants_split(ask: str) -> bool:
@@ -1737,6 +1977,11 @@ async def refit(reel: Reel, b, *, say=None) -> Reel:
         if lost not in reel.findings:       # правок может быть несколько
             reel.findings.append(lost)
 
+    # Панель считается от фраз заново: слова те же, но секунды ролика
+    # после пересборки свои, и старые блоки встали бы мимо речи.
+    if reel.slides:
+        reel.blocks, _ = lay(reel, reel.slides)
+
     # Кусок нарезки рендерится сам по себе: `reel.cuts` у него считаются
     # от начала куска, а не от начала записи.
     clip = None
@@ -1747,7 +1992,7 @@ async def refit(reel: Reel, b, *, say=None) -> Reel:
                 await say("Вырезаю кусок заново и пересобираю субтитры.")
             await footage.clip(source, reel.piece[0], reel.piece[1], clip)
             reel.video = clip
-        reel.out = await render(reel, size)
+        reel.out = await _draw(reel, size)
     finally:
         reel.video = source
         if clip:
@@ -1797,6 +2042,7 @@ def _drop(b, reel: Reel) -> None:
     if b is None:
         return
     try:
+        album.drop(b, reel.video)
         if reel.video.parent == incoming_dir(b) and reel.video.exists():
             reel.video.unlink()
     except OSError as e:                                     # noqa: BLE001
@@ -1838,6 +2084,31 @@ table = desk.Desk("montage", corrections="montage-corrections.md",
 
 def wants_fix(chat_id: int) -> bool:
     return table.wants_fix(chat_id)
+
+
+# Слова, которыми просят монтаж заново. Нужны, чтобы выйти из режима
+# правки: пока он взведён, сообщение в топике разбирается как замена
+# слов, а неразобранная замена взводит его снова. Человек, попросивший
+# смонтировать, получал справку про формат правки — и получал её на
+# каждую следующую попытку, потому что выхода из режима не было вовсе.
+NEW_WORDS = ("смонтируй", "смонтировать", "собери ролик", "собери видео",
+             "сделай монтаж", "нареж", "нареза", "разрежь", "разбей",
+             "сплит", "с панелью", "инфографик")
+
+
+def wants_new(ask: str) -> bool:
+    """Просьба смонтировать заново, а не поправить слова."""
+    low = (ask or "").lower()
+    return any(w in low for w in NEW_WORDS)
+
+
+def leave_fix(chat_id: int) -> None:
+    """Выйти из режима правки, не трогая стол.
+
+    Ролик со стола не убираем: человек мог попросить новый монтаж и
+    вернуться к старой карточке кнопкой.
+    """
+    table.done_fix(chat_id)
 
 
 def wants_relex(chat_id: int, ask: str) -> bool:
@@ -1891,7 +2162,8 @@ async def show(reg, chat_id: int, reel: Reel, topic: str = "reels") -> None:
                   topic=topic)
 
 
-async def run(reg, chat_id: int, ask: str, topic: str = "reels") -> None:
+async def run(reg, chat_id: int, ask: str, topic: str = "reels",
+              panel: bool = False) -> None:
     table.clear(chat_id)
     _sweep()
 
@@ -1899,7 +2171,7 @@ async def run(reg, chat_id: int, ask: str, topic: str = "reels") -> None:
         await reg.say("reels", chat_id, text, topic=topic)
 
     try:
-        reel = await build(chat_id, ask, say=say)
+        reel = await build(chat_id, ask, say=say, panel=panel)
     except NoWork as e:
         await say(f"Монтировать нечего: {e}.")
         return

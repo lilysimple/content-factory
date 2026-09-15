@@ -1,8 +1,10 @@
 import React from 'react';
+import {Video} from '@remotion/media';
 import {
   AbsoluteFill,
-  CanvasImage,
   Easing,
+  Freeze,
+  Img,
   Sequence,
   interpolate,
   spring,
@@ -88,7 +90,9 @@ const IconCard: React.FC<{
   const {fps} = useVideoConfig();
   // Пружина, а не линейный вход: знак прилетает с перелётом, как штамп.
   const pop = spring({frame, fps, config: {damping: 13, mass: 0.5}});
-  const size = panelHeight * 0.38;
+  // С надзаголовком плитка мельче: иначе плитка с именем под ней не
+  // помещается между надзаголовком и полосой караоке и наезжает на него.
+  const size = panelHeight * (block.imagePath && block.kicker ? 0.27 : 0.38);
 
   return (
     <div
@@ -104,8 +108,13 @@ const IconCard: React.FC<{
           style={{
             width: size,
             height: size,
+            // Плитка белая, а не подложка панели: знаки рисуют под
+            // светлый фон, и тёмный логотип на графите пропадает. Так же
+            // сделано в референсе — знак в белой плитке, как иконка
+            // приложения.
             borderRadius: size * 0.24,
-            background: cardColor,
+            background: '#FFFFFF',
+            boxShadow: `0 ${size * 0.06}px ${size * 0.2}px rgba(0,0,0,0.35)`,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -113,11 +122,15 @@ const IconCard: React.FC<{
             scale: interpolate(pop, [0, 1], [0.7, 1], {
               output: 'perceptual-scale',
             }),
+            // Плитка не стоит мёртвой: еле заметно качается, пока блок
+            // на экране. Неподвижная картинка читается скрином, а не
+            // движением.
+            translate: `0 ${Math.sin(frame / fps * 1.6) * size * 0.015}px`,
           }}
         >
-          <CanvasImage
+          <Img
             src={staticFile(block.imagePath)}
-            style={{width: '78%', height: 'auto', objectFit: 'contain'}}
+            style={{width: '68%', height: '68%', objectFit: 'contain'}}
           />
         </div>
       ) : null}
@@ -344,6 +357,294 @@ const Scale: React.FC<{
   );
 };
 
+// Скрин страницы продукта — окном браузера, как в референсе: полоса с
+// тремя точками сверху, под ней страница. Окно едет, а не стоит: за время
+// блока оно медленно наезжает и прокручивает страницу вниз. Скрин,
+// который стоит на месте три секунды, читается слайдом презентации.
+const Window: React.FC<{
+  block: MotionBlock;
+  cardColor: string;
+  accentColor: string;
+  textColor: string;
+  panelHeight: number;
+  maxHeight: number;
+}> = ({block, accentColor, textColor, panelHeight, maxHeight}) => {
+  const frame = useCurrentFrame();
+  const {fps, width} = useVideoConfig();
+  const life = Math.max(1, (block.end - block.start) * fps);
+  const t = interpolate(frame, [0, life], [0, 1], {
+    extrapolateLeft: 'clamp',
+    extrapolateRight: 'clamp',
+  });
+  // Окно въезжает снизу с пружиной — тот же характер, что у знака.
+  const rise = spring({frame, fps, config: {damping: 16, mass: 0.6}});
+  const bar = panelHeight * 0.045;
+  const radius = panelHeight * 0.03;
+  const caption = block.lines[0];
+  // Окно не во всю отведённую высоту: оно ещё наезжает и въезжает снизу,
+  // и впритык к краю панели верх страницы срезало швом.
+  const winHeight = panelHeight * (block.kicker ? 0.4 : 0.58)
+    - (caption ? panelHeight * 0.1 : 0);
+  const winWidth = Math.min(width * 0.8, winHeight * 1.45);
+
+  return (
+    <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center'}}>
+      <div
+        style={{
+          width: winWidth,
+          height: winHeight,
+          borderRadius: radius,
+          overflow: 'hidden',
+          background: '#FFFFFF',
+          boxShadow: `0 ${panelHeight * 0.03}px ${panelHeight * 0.09}px rgba(0,0,0,0.45)`,
+          outline: `${Math.max(2, panelHeight * 0.004)}px solid ${accentColor}`,
+          display: 'flex',
+          flexDirection: 'column',
+          opacity: interpolate(rise, [0, 0.4], [0, 1], {
+            extrapolateLeft: 'clamp',
+            extrapolateRight: 'clamp',
+          }),
+          translate: `0 ${interpolate(rise, [0, 1], [panelHeight * 0.12, 0])}px`,
+          // Наезд на всё время блока, едва заметный: 4 процента.
+          scale: interpolate(t, [0, 1], [1, 1.04]),
+        }}
+      >
+        <div
+          style={{
+            height: bar,
+            flexShrink: 0,
+            background: '#EDEBE8',
+            display: 'flex',
+            alignItems: 'center',
+            gap: bar * 0.3,
+            paddingLeft: bar * 0.5,
+          }}
+        >
+          {['#FF5F57', '#FEBC2E', '#28C840'].map((c) => (
+            <div
+              key={c}
+              style={{width: bar * 0.32, height: bar * 0.32, borderRadius: bar, background: c}}
+            />
+          ))}
+        </div>
+        <div style={{flex: 1, overflow: 'hidden', position: 'relative'}}>
+          <Img
+            src={staticFile(block.imagePath!)}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              // Прокрутка: первая треть блока — верх страницы, где имя
+              // продукта, дальше страница медленно уходит вниз.
+              objectPosition: `50% ${interpolate(t, [0.3, 1], [0, 35], {
+                extrapolateLeft: 'clamp',
+                extrapolateRight: 'clamp',
+                easing: Easing.inOut(Easing.ease),
+              })}%`,
+            }}
+          />
+        </div>
+      </div>
+      {caption ? (
+        <div
+          style={{
+            marginTop: panelHeight * 0.035,
+            fontFamily: FONT,
+            fontWeight: 700,
+            fontSize: panelHeight * 0.058,
+            color: textColor,
+            textAlign: 'center',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {caption}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+// Размытая копия скрина за окном — подложка на всю панель. В референсе
+// окно стоит не на пустом фоне, а на своём же расфокусе: панель берёт
+// цвет продукта, и склейка со следующим блоком не выглядит дырой.
+const Backdrop: React.FC<{src: string; panelColor?: string}> = ({src}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  return (
+    <AbsoluteFill style={{overflow: 'hidden'}}>
+      <Img
+        src={staticFile(src)}
+        style={{
+          width: '100%',
+          height: '100%',
+          objectFit: 'cover',
+          filter: 'blur(40px) saturate(1.2)',
+          opacity: 0.2,
+          scale: String(1.25 + (frame / fps) * 0.01),
+        }}
+      />
+    </AbsoluteFill>
+  );
+};
+
+// Материал из альбома: запись экрана или картинка, которую автор снял
+// сам. В референсе это главное на панели — промпт печатается в окне, пока
+// автор про него говорит. Кадр вписывается целиком со скруглением, без
+// рамки браузера: это не сайт, а экран автора.
+const Screen: React.FC<{
+  block: MotionBlock;
+  textColor: string;
+  panelHeight: number;
+  maxHeight: number;
+}> = ({block, textColor, panelHeight, maxHeight}) => {
+  const frame = useCurrentFrame();
+  const {fps, width, height} = useVideoConfig();
+  const rise = spring({frame, fps, config: {damping: 16, mass: 0.6}});
+  const life = Math.max(1, (block.end - block.start) * fps);
+  const t = Math.min(1, frame / life);
+
+  const caption = block.lines[0];
+  const boxW = width * (block.full ? 0.9 : 0.84);
+  const boxH = (block.full ? height * 0.62 : maxHeight)
+    - (caption ? panelHeight * 0.1 : 0);
+  const mw = block.mediaWidth || 16;
+  const mh = block.mediaHeight || 10;
+  const k = Math.min(boxW / mw, boxH / mh);
+  const w = mw * k;
+  const h = mh * k;
+  const radius = panelHeight * 0.03;
+
+  // Длиннее блока — ускоряем, но не больше чем вдвое: быстрее интерфейс
+  // уже не читается. Короче — последний кадр стоит до конца блока.
+  const blockSec = block.end - block.start;
+  const len = block.videoSeconds ?? blockSec;
+  const rate = Math.min(2, Math.max(1, len / Math.max(0.1, blockSec)));
+  const lastFrame = Math.max(0, Math.floor((len / rate) * fps) - 2);
+
+  return (
+    <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center'}}>
+      <div
+        style={{
+          width: w,
+          height: h,
+          borderRadius: radius,
+          overflow: 'hidden',
+          position: 'relative',
+          background: '#000',
+          boxShadow: `0 ${panelHeight * 0.03}px ${panelHeight * 0.09}px rgba(0,0,0,0.5)`,
+          opacity: interpolate(rise, [0, 0.4], [0, 1], {
+            extrapolateLeft: 'clamp',
+            extrapolateRight: 'clamp',
+          }),
+          translate: `0 ${interpolate(rise, [0, 1], [panelHeight * 0.1, 0])}px`,
+          scale: interpolate(t, [0, 1], [1, 1.035]),
+        }}
+      >
+        {block.videoPath ? (
+          <Freeze frame={lastFrame} active={(f) => f >= lastFrame}>
+            <Video
+              src={staticFile(block.videoPath)}
+              muted
+              playbackRate={rate}
+              objectFit="cover"
+              style={{position: 'absolute', inset: 0, width: '100%', height: '100%'}}
+            />
+          </Freeze>
+        ) : block.imagePath ? (
+          <Img
+            src={staticFile(block.imagePath)}
+            style={{width: '100%', height: '100%', objectFit: 'cover'}}
+          />
+        ) : null}
+      </div>
+      {caption ? (
+        <div
+          style={{
+            marginTop: panelHeight * 0.035,
+            fontFamily: FONT,
+            fontWeight: 700,
+            fontSize: panelHeight * 0.058,
+            color: textColor,
+            textAlign: 'center',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {caption}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+// Картинка по теме, когда записи экрана нет. Нарисованное стоит на месте,
+// поэтому движение даёт шаблон: предмет парит — медленный наезд, дрейф и
+// лёгкое покачивание, а края уходят в цвет панели, чтобы картинка не
+// читалась прямоугольником, вставленным поверх.
+const Art: React.FC<{
+  block: MotionBlock;
+  panelColor: string;
+  textColor: string;
+  panelHeight: number;
+}> = ({block, panelColor, textColor, panelHeight}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const sec = frame / fps;
+  const life = Math.max(0.1, block.end - block.start);
+  const t = Math.min(1, sec / life);
+  const pop = spring({frame, fps, config: {damping: 18, mass: 0.8}});
+  const caption = block.lines[0];
+
+  return (
+    <AbsoluteFill style={{overflow: 'hidden'}}>
+      <AbsoluteFill
+        style={{
+          scale: String(interpolate(pop, [0, 1], [1.18, 1.06]) + t * 0.08),
+          translate: `${Math.sin(sec * 0.7) * panelHeight * 0.012}px ${
+            Math.sin(sec * 1.1) * panelHeight * 0.018
+          }px`,
+          rotate: `${Math.sin(sec * 0.5) * 0.8}deg`,
+        }}
+      >
+        <Img
+          src={staticFile(block.imagePath!)}
+          style={{width: '100%', height: '100%', objectFit: 'cover'}}
+        />
+      </AbsoluteFill>
+      <AbsoluteFill
+        style={{
+          background: `radial-gradient(ellipse at 50% 45%, rgba(0,0,0,0) 55%, ${panelColor} 100%)`,
+        }}
+      />
+      {caption ? (
+        <AbsoluteFill
+          style={{
+            justifyContent: 'flex-end',
+            alignItems: 'center',
+            paddingBottom: panelHeight * 0.2,
+          }}
+        >
+          <div
+            style={{
+              fontFamily: FONT,
+              fontWeight: 700,
+              fontSize: panelHeight * 0.07,
+              color: textColor,
+              textShadow: '0 2px 18px rgba(0,0,0,0.6)',
+              opacity: interpolate(pop, [0.4, 1], [0, 1], {
+                extrapolateLeft: 'clamp',
+                extrapolateRight: 'clamp',
+              }),
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {caption}
+          </div>
+        </AbsoluteFill>
+      ) : null}
+    </AbsoluteFill>
+  );
+};
+
 const Card: React.FC<{
   block: MotionBlock;
   cardColor: string;
@@ -365,39 +666,14 @@ const Card: React.FC<{
 
   if (block.imagePath) {
     return (
-      <div
-        style={{
-          width: '82%',
-          maxHeight,
-          borderRadius: radius,
-          overflow: 'hidden',
-          background: cardColor,
-          display: 'flex',
-          flexDirection: 'column',
-        }}
-      >
-        <CanvasImage
-          src={staticFile(block.imagePath)}
-          style={{
-            width: '100%',
-            height: 'auto',
-            minHeight: 0,
-            objectFit: 'contain',
-            display: 'block',
-          }}
-        />
-        {block.items.length > 0 ? (
-          <div style={{padding: `${panelHeight * 0.05}px ${panelHeight * 0.06}px`}}>
-            <Items
-              items={block.items}
-              start={block.start}
-              accentColor={accentColor}
-              textColor={textColor}
-              panelHeight={panelHeight}
-            />
-          </div>
-        ) : null}
-      </div>
+      <Window
+        block={block}
+        cardColor={cardColor}
+        accentColor={accentColor}
+        textColor={textColor}
+        panelHeight={panelHeight}
+        maxHeight={maxHeight}
+      />
     );
   }
 
@@ -454,10 +730,11 @@ const Card: React.FC<{
 const BlockView: React.FC<{
   block: MotionBlock;
   panelHeight: number;
+  panelColor: string;
   accentColor: string;
   cardColor: string;
   textColor: string;
-}> = ({block, panelHeight, accentColor, cardColor, textColor}) => {
+}> = ({block, panelHeight, panelColor, accentColor, cardColor, textColor}) => {
   const frame = useCurrentFrame();
   const {fps, width} = useVideoConfig();
 
@@ -492,6 +769,18 @@ const BlockView: React.FC<{
         paddingBottom: panelHeight * 0.17,
       }}
     >
+      {block.imagePath && block.kind === 'card' ? (
+        <Backdrop src={block.imagePath} />
+      ) : null}
+      {/* Картинка по теме занимает панель целиком, под надзаголовком. */}
+      {block.kind === 'art' && block.imagePath ? (
+        <Art
+          block={block}
+          panelColor={panelColor}
+          textColor={textColor}
+          panelHeight={panelHeight}
+        />
+      ) : null}
       {block.kicker ? (
         <div
           style={{
@@ -518,14 +807,26 @@ const BlockView: React.FC<{
           width: '100%',
           display: 'flex',
           justifyContent: 'center',
-          marginTop: block.kicker ? panelHeight * 0.12 : 0,
+          // С надзаголовком содержимое сдвинуто ниже центра: при 0.12
+          // плитка знака и окно сайта вставали вплотную под него.
+          marginTop: block.kicker ? panelHeight * 0.2 : 0,
           maxHeight: panelHeight * (block.kicker ? 0.6 : 0.84),
           scale: interpolate(enter, [0, 1], [0.965, 1], {
             output: 'perceptual-scale',
           }),
         }}
       >
-        {block.kind === 'icon' ? (
+        {block.kind === 'art' ? null : block.kind === 'media' ? (
+          <Screen
+            block={block}
+            textColor={textColor}
+            panelHeight={panelHeight}
+            // Ниже отведённого карточкам: запись ещё въезжает снизу и
+            // наезжает, и на 0.76 горизонтальный скринкаст упирался в
+            // верхний край панели.
+            maxHeight={panelHeight * (block.kicker ? 0.5 : 0.62)}
+          />
+        ) : block.kind === 'icon' ? (
           <IconCard
             block={block}
             cardColor={cardColor}
@@ -614,6 +915,7 @@ export const Panel: React.FC<{
             <BlockView
               block={b}
               panelHeight={panelHeight}
+              panelColor={panelColor}
               accentColor={accentColor}
               cardColor={cardColor}
               textColor={textColor}

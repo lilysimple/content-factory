@@ -35,6 +35,7 @@ PROFILE = {
     "platforms": "platforms.md",
     "rubrics":   "rubrics.md",
     "hooks":     "hooks.md",
+    "canon":     "canon.md",
     "sources":   "sources.md",
 }
 

@@ -245,7 +245,9 @@ async def build(chat_id: int, ask: str, *, say=None) -> Reel:
 
     # `hooks.md` поверх секций: первые две секунды ролика это механика
     # площадки, и живёт она отдельно от ЯДРА — её переписывают по замерам.
-    profile = desk.profile(b, SECTIONS, files=("hooks",))
+    # `canon.md` — та же опора на первоисточник, что у Редактора: ролик
+    # объясняет понятие, а не пересказывает релиз.
+    profile = desk.profile(b, SECTIONS, files=("hooks", "canon"))
 
     reel = Reel(theme=theme, seconds=seconds)
     extra = ""

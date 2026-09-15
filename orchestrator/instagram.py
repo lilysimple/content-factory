@@ -45,7 +45,7 @@ HANDLE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
 
 
 def handle(url: str) -> str:
-    """`https://instagram.com/lily/reels?x=1` → `lily`. Не профиль — пусто.
+    """`https://instagram.com/lily_.space/reels?x=1` → `lily_.space`. Не профиль — пусто.
 
     Адреса в `sources.md` человек пишет как придётся: с `www`, с хвостом
     `/reels`, со слэшем и без. Ник это первый сегмент пути, и только он.

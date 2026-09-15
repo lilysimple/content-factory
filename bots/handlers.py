@@ -20,8 +20,9 @@ from bots import topics
 from bots.registry import registry
 from bots.router import is_footage, resolve
 from config import cfg
-from orchestrator import (bridge, design, desk, editor, montage, onboarding,
-                          publisher, reels, refresh, reply, research, strategy)
+from orchestrator import (album, bridge, design, desk, editor, montage,
+                          onboarding, publisher, reels, refresh, reply,
+                          research, strategy)
 from orchestrator.desk import NoWork
 from storage import db
 
@@ -99,7 +100,7 @@ async def bridge_task(chat_id: int, ask: str, workflow: str,
         return
 
     try:
-        _, spot = bridge.enqueue(chat_id, ask, workflow=workflow, topic=tkey)
+        qid, spot = bridge.enqueue(chat_id, ask, workflow=workflow, topic=tkey)
     except bridge.QueueFull as e:
         await registry.say("assistant", chat_id,
                            f"Больше не беру: {e}. Дождись, пока разберу "
@@ -108,7 +109,10 @@ async def bridge_task(chat_id: int, ask: str, workflow: str,
         return
 
     what = bridge.WORKFLOWS[workflow]
-    if spot == 1 and not bridge.running():
+    # Место в общей очереди человеку больше не отвечает на вопрос «когда»:
+    # работы разного рода идут вместе, и сводка, вставшая третьей за двумя
+    # планами, начнётся первой. Ждут только свою полосу.
+    if bridge.starts_now(qid, workflow):
         # Ждать молча минуты нельзя: молчание неотличимо от поломки.
         await registry.say("assistant", chat_id,
                            f"Приняла задачу: {what}. Собираю команду и "
@@ -116,12 +120,12 @@ async def bridge_task(chat_id: int, ask: str, workflow: str,
                            topic=tkey)
         return
 
-    ahead = spot - 1
+    ahead = bridge.ahead_in_lane(qid, workflow)
     await registry.say(
         "assistant", chat_id,
-        f"Приняла задачу: {what}. Работаю по одной за раз, поэтому она "
-        f"{spot}-я в очереди — впереди {_tasks(ahead)}. Возьмусь сама, "
-        "отвечать не нужно.", topic=tkey)
+        f"Приняла задачу: {what}. Работу такого рода делаю по одной за "
+        f"раз, поэтому жду: впереди {_tasks(ahead)} того же рода. "
+        "Возьмусь сама, отвечать не нужно.", topic=tkey)
 
 
 def _tasks(n: int) -> str:
@@ -254,24 +258,69 @@ async def _serve(row) -> None:
 
 
 async def pump(period: float = 3.0) -> None:
-    """Разбирать очередь по одной задаче. Живёт всё время работы завода.
+    """Разбирать очередь. Живёт всё время работы завода.
 
     Отдельная корутина, а не работа внутри обработчика сообщения: пока
     обработчик ждал прогон, aiogram не разбирал следующие апдейты, и
     вторая просьба человека доходила до завода через двадцать минут —
     после того, как первая закончилась.
+
+    **Прогон уходит своей задачей, а насос идёт дальше.** Ждать его тут
+    значит держать одну полосу, сколько бы их ни было: `bridge.take`
+    отдаёт задачу другого рода, но забирать её некому — насос стоит на
+    `await`. Полосы считает `bridge`, а не длина этого цикла.
+
+    Сорвавшийся прогон не должен уносить с собой разбор очереди, поэтому
+    исход пишется внутри `_serve`, а не здесь.
     """
-    log.info("разбор очереди запущен")
+    log.info("разбор очереди запущен, полос %s", bridge.LANES)
+    live: set[asyncio.Task] = set()
     while True:
         try:
             row = bridge.take()
             if row is not None:
-                await _serve(row)
+                # Ссылку держим до конца: задача без ссылки собирается
+                # сборщиком мусора посреди прогона, и исход пропадает.
+                task = asyncio.create_task(_serve(row))
+                live.add(task)
+                task.add_done_callback(live.discard)
                 continue
         except asyncio.CancelledError:
             raise
         except Exception:                                    # noqa: BLE001
             log.exception("разбор очереди споткнулся")
+        await asyncio.sleep(period)
+
+
+async def clock(period: float = 60.0) -> None:
+    """Часы завода: раз в минуту спрашивать Публикатора, не пора ли.
+
+    Отдельная корутина рядом с `pump` по той же причине, по какой отдельно
+    живёт она: тик не должен ждать получасовой прогон моста, а прогон не
+    должен ждать тика.
+
+    Минута это точность расписания. Секунда была бы точнее и не нужна:
+    слот «в десять утра» человек имеет в виду с точностью до минуты, а
+    шестьдесят лишних обходов базы в минуту стоят ровно столько же,
+    сколько один.
+
+    Тикает только у тенантов с включённым автоматом. Выключенный завод
+    не платит за расписание ничем, кроме одного запроса в минуту.
+    """
+    log.info("часы запущены, тик %.0f с", period)
+    while True:
+        try:
+            for row in db.q("SELECT chat_id FROM tenants WHERE auto = 1"):
+                chat_id = row["chat_id"]
+                if not cfg.chat_allowed(chat_id):
+                    continue
+                await publisher.autopost(registry, chat_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:                                    # noqa: BLE001
+            # Упасть тут значит остановить расписание до перезапуска, а
+            # выглядеть это будет как «завод почему-то не публикует».
+            log.exception("тик часов споткнулся")
         await asyncio.sleep(period)
 
 
@@ -362,9 +411,10 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
 
         if arg in {"clear", "стоп", "отмена", "сними", "очисти"}:
             dropped = bridge.drop_waiting(chat_id)
-            now = bridge.running()
-            tail = (f" Задача <code>{now}</code> уже идёт, её не снимаю — "
-                    "она доработает." if now else "")
+            live = bridge.running_rows()
+            names = ", ".join(f"<code>{r['task_id']}</code>" for r in live)
+            tail = (f" Уже идёт: {names} — не снимаю, доработает."
+                    if live else "")
             await registry.say(
                 "assistant", chat_id,
                 (f"Сняла из очереди {_tasks(dropped)}." if dropped
@@ -372,10 +422,13 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             return
 
         rows = bridge.waiting(chat_id)
-        now = bridge.running()
+        # Идущих бывает несколько: работы разного рода идут вместе.
+        # Показывать одну значит врать про две.
+        live = bridge.running_rows()
         out = []
-        if now:
-            out.append(f"Сейчас идёт: <code>{now}</code>.")
+        if live:
+            out.append("Сейчас идёт: " + ", ".join(
+                f"<code>{r['task_id']}</code>" for r in live) + ".")
         elif not rows:
             out.append("Очередь пуста, ничего не идёт.")
         for i, r in enumerate(rows, 1):
@@ -387,6 +440,74 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             out.append("")
             out.append("Снять всё, что ещё не началось: <code>/queue clear</code>")
         await registry.say("assistant", chat_id, "\n".join(out), topic=tkey)
+
+    # ── автопубликация по времени ─────────────────────────────────────
+    # Включается здесь и только здесь: автомат, включённый правкой кода
+    # или строкой в .env, это автомат, про который человек не знает.
+    @dp_assistant.message(F.text.regexp(r"^/auto(@\S+)?(\s|$)"))
+    async def on_auto(msg: Message) -> None:
+        chat_id = msg.chat.id
+        if not cfg.chat_allowed(chat_id) or not db.topics_ready(chat_id):
+            return
+        db.ensure_tenant(chat_id, cfg.default_tz)
+        tkey = topic_key_of(chat_id, msg.message_thread_id) or "queue"
+        arg = (msg.text or "").partition(" ")[2].strip().lower()
+        on, at = publisher.settings(chat_id)
+
+        if arg in {"off", "выкл", "стоп"}:
+            publisher.arm(chat_id, False)
+            await registry.say("assistant", chat_id,
+                               "Автопубликация выключена. Публикую только "
+                               "по кнопке.", topic=tkey)
+            return
+
+        want_on = arg.startswith(("on", "вкл"))
+        new_at = publisher.parse_at(arg.split()[-1]) if arg else None
+
+        if not arg:
+            n, days = publisher.approvals(chat_id)
+            blockers = publisher.gate(chat_id)
+            state = (f"включена, слот {at}" if on else "выключена")
+            tail = ("\n\nВключить нельзя: " + "; ".join(blockers)
+                    if blockers else
+                    "\n\nВключить: <code>/auto on</code>, время слота — "
+                    "<code>/auto 10:00</code>.")
+            await registry.say(
+                "assistant", chat_id,
+                f"Автопубликация {state}.\nУтверждений {n}, дней с первой "
+                f"публикации {days}. Порог автомата — "
+                f"{publisher.AUTO_MIN_PUBS} и {publisher.AUTO_MIN_DAYS}."
+                + tail, topic=tkey)
+            return
+
+        if not want_on and new_at is None:
+            await registry.say("assistant", chat_id,
+                               "Не разобрала. <code>/auto</code> — как дела, "
+                               "<code>/auto on</code> — включить, "
+                               "<code>/auto 10:00</code> — время слота, "
+                               "<code>/auto off</code> — выключить.",
+                               topic=tkey)
+            return
+
+        if blockers := publisher.arm(chat_id, True, new_at):
+            await registry.say(
+                "assistant", chat_id,
+                "Автомат не включаю: " + "; ".join(blockers) + ".\n\n"
+                "Порог из спеки: десять утверждений подряд и две недели с "
+                "первой публикации. До него публикуем по кнопке — и это не "
+                "формальность: канал живой, а автомат без наработанной "
+                "статистики утверждений отправит в него первую же ошибку.",
+                topic=tkey)
+            return
+
+        _, at = publisher.settings(chat_id)
+        await registry.say(
+            "assistant", chat_id,
+            f"Автопубликация включена. Готовый пост со сроком сегодня "
+            f"уйдёт в канал в {at} — сам, без кнопки. Опоздание завода "
+            f"прощаю {publisher.AUTO_GRACE_MIN} минут, дальше показываю "
+            "пропуск и жду руку. Выключить — <code>/auto off</code>.",
+            topic=tkey)
 
     # ── кто-то зашёл или вышел ────────────────────────────────────────
     @dp_assistant.chat_member()
@@ -430,6 +551,42 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             "reels", chat_id,
             "Видео принято. Напишите «смонтируй» — соберу ролик по "
             "ближайшему утверждённому сценарию.", topic=tkey)
+
+    async def handle_album(chat_id: int, msg: Message, tkey: str) -> None:
+        """Файл альбома к дублю: первое видео — дубль, остальное — панель.
+
+        Сообщения альбома приходят по одному, поэтому говорим один раз, на
+        первом файле нового альбома, а порядок `album` восстановит по
+        номеру сообщения.
+        """
+        b = desk.brand(chat_id)
+        if b is None:
+            return
+        media = msg.video or msg.document or (msg.photo[-1] if msg.photo
+                                              else None)
+        if media is None:
+            return
+        if media.file_size and media.file_size > MAX_VIDEO_MB * 1024 * 1024:
+            await registry.say(
+                "reels", chat_id,
+                f"Файл альбома больше {MAX_VIDEO_MB} МБ — обычный Bot API "
+                "такие не отдаёт, он не попадёт в монтаж. Сожмите и "
+                "пришлите альбом снова.", topic=tkey)
+            return
+        if msg.photo:
+            suffix = ".jpg"
+        else:
+            suffix = Path(getattr(media, "file_name", "") or "").suffix \
+                or (".mp4" if msg.video else ".jpg")
+        buf = await registry.bot("reels").download(media.file_id)
+        _, fresh = album.stage(b, msg.media_group_id, msg.message_id,
+                               buf.read(), suffix, msg.caption or "")
+        if fresh:
+            await registry.say(
+                "reels", chat_id,
+                "Принимаю альбом: первое видео — дубль, остальное — записи "
+                "экрана и картинки на панель, по порядку. Когда всё "
+                "загрузится, напишите «смонтируй».", topic=tkey)
 
     # ── статистика в топике Метрики ───────────────────────────────────
     MAX_STATS_MB = 20        # тот же потолок скачивания у Bot API
@@ -558,6 +715,14 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         raw = msg.text or msg.caption or ""
         tkey = topic_key_of(chat_id, msg.message_thread_id)
 
+        # Альбом в 🎬 Reels: дубль и материалы панели одним сообщением.
+        # Раньше ветки видео: иначе каждое видео альбома перетирало бы
+        # дубль, а картинки уходили бы в распаковку профиля.
+        if tkey == "reels" and msg.media_group_id and (
+                msg.video or msg.photo or msg.document):
+            await handle_album(chat_id, msg, tkey)
+            return
+
         if msg.video or (msg.document and (msg.document.mime_type or "")
                         .startswith("video/")):
             await handle_footage(chat_id, msg, tkey or "reels")
@@ -609,28 +774,44 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
         # Человек нажал «Правки» под планом и сейчас пишет, что поправить.
         # Это ответ Стратегу, а не новая задача: маршрутизировать заново
         # значит потерять правку в общем разборе.
-        if strategy.wants_fix(chat_id):
+        # Режим правки перехватывает сообщение до маршрутизации — иначе
+        # правка разбиралась бы как новая задача. Но просьба, которая
+        # правкой быть не может («смонтируй» под показанным текстом),
+        # сквозь него проходит: иначе человек получает правку вместо
+        # работы, о которой просил. Список узкий — `desk.OTHER_WORK`.
+        jump = desk.starts_other_work(raw)
+
+        if strategy.wants_fix(chat_id) and not jump:
             await strategy.revise(registry, chat_id, raw,
                                   topic=tkey or "general")
             return
 
-        if editor.wants_fix(chat_id):
+        if editor.wants_fix(chat_id) and not jump:
             await editor.revise(registry, chat_id, raw,
                                 topic=tkey or "texts")
             return
 
-        if reels.wants_fix(chat_id):
+        if reels.wants_fix(chat_id) and not jump:
             await reels.revise(registry, chat_id, raw, topic=tkey or "reels")
             return
 
-        if design.wants_fix(chat_id):
+        if design.wants_fix(chat_id) and not jump:
             await design.revise(registry, chat_id, raw,
                                 topic=tkey or "design")
             return
 
         if montage.wants_fix(chat_id):
-            await montage.revise(registry, chat_id, raw, topic=tkey or "reels")
-            return
+            # Просьба смонтировать заново сильнее режима правки. Иначе
+            # он ловушка: сообщение разбирается как замена слов, а
+            # неразобранная замена взводит режим снова — и «смонтируй
+            # сплитом» получает справку про формат правки, сколько бы
+            # раз человек её ни повторил.
+            if montage.wants_new(raw):
+                montage.leave_fix(chat_id)
+            else:
+                await montage.revise(registry, chat_id, raw,
+                                     topic=tkey or "reels")
+                return
 
         if publisher.wants_reason(chat_id):
             await publisher.take_reason(registry, chat_id, raw,
@@ -714,7 +895,12 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
                 await montage.run_split(registry, chat_id, raw,
                                         topic=tkey or "reels")
             else:
-                await montage.run(registry, chat_id, raw, topic=tkey or "reels")
+                # Сплит это тот же монтаж одного ролика, только холст
+                # поделён швом: на второй половине панель, которая идёт
+                # за речью. Просьба своя и с нарезкой не пересекается.
+                await montage.run(registry, chat_id, raw,
+                                  topic=tkey or "reels",
+                                  panel=montage.wants_motion(raw))
             return
 
         if route.role == "publisher":

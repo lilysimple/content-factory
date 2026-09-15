@@ -37,6 +37,8 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
   });
   const bodyFrames = pieces.reduce((n, p) => n + p.frames, 0);
 
+  const visual = (b: MotionProps['blocks'][number]) =>
+    b.kind === 'media' || b.kind === 'art';
   const splitBlocks = props.blocks.filter((b) => !b.full);
   const fullBlocks = props.blocks.filter((b) => b.full);
 
@@ -126,9 +128,13 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
                 style={{
                   position: 'absolute',
                   left: 0,
-                  top: panelOnTop ? 0 : videoHeight,
+                  // Запись и картинка по теме на весь кадр — это и есть
+                  // смысл блока: они занимают холст, а не верхнюю полосу
+                  // с пустым полем под ней. Словам высота остаётся
+                  // панельной — по причине выше.
+                  top: visual(b) ? 0 : panelOnTop ? 0 : videoHeight,
                   width,
-                  height: panelHeight,
+                  height: visual(b) ? height : panelHeight,
                 }}
               >
                 <Panel

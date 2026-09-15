@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import subprocess
 
@@ -826,6 +827,123 @@ async def main() -> None:
           not any("нет в папке бренда" in f for f in
                   design.inspect(html, words, (1080, 1920), design._photos(b))),
           str(design.inspect(html, words, (1080, 1920), design._photos(b))))
+
+    # ── 15. фото не повторяется и держит пропорцию ────────────────────
+    # Жалоба была простая: Дизайнер берёт одни и те же кадры. На
+    # свободном пути список фото ехал в бриф алфавитом и целиком, а
+    # защита от повтора считалась штуками обложек, не днями.
+    print("\n15. Карантин фото и пропорция кадров")
+
+    # Журнал пишет `emit`, и к этому месту макеты уже собирались.
+    check("собранный макет запомнил свой кадр",
+          "author.jpg" in design._photo_log(b),
+          str(sorted(design._photo_log(b))[:5]))
+
+    kinds = design._photo_kinds(b)
+    check("роды кадров разобраны из photos.md",
+          kinds.get("author.jpg") == "self"
+          and kinds.get("img-1371.jpg") == "nature"
+          and kinds.get("img-0055.jpg") == "other",
+          str({k: kinds.get(k) for k in
+               ("author.jpg", "img-1371.jpg", "img-0055.jpg")}))
+    # Абзац «Имена врут» стоит сразу за таблицей целей и несёт два имени
+    # файлов. Без закрытия раздела жирной строкой они уехали бы в род.
+    check("жирная строка закрывает раздел",
+          kinds.get("pink.jpg") == "self", str(kinds.get("pink.jpg")))
+    check("«не брать» сильнее префикса",
+          kinds.get("stock-notebook-and-pen-top-view-02.jpg") == "",
+          str(kinds.get("stock-notebook-and-pen-top-view-02.jpg")))
+
+    check("на шести карточках пропорция 2/2/2",
+          design._quota(6) == {"self": 2, "stock": 2, "nature": 2},
+          str(design._quota(6)))
+    check("на тройке фона по одному каждого рода",
+          design._quota(3) == {"self": 1, "stock": 1, "nature": 1},
+          str(design._quota(3)))
+    check("доли сходятся ровно, а не примерно",
+          all(sum(design._quota(n).values()) == n for n in range(1, 13)))
+
+    # Сток в песочнице вычищен как производное — возвращаем два кадра,
+    # иначе пропорцию проверять не на чем. Заодно это проверка, что род
+    # берётся по префиксу, когда в `photos.md` файла нет вовсе.
+    images = b.path("design/assets/images")
+    for n in ("stock-probe-01.jpg", "stock-probe-02.jpg"):
+        (images / n).write_bytes((images / "author.jpg").read_bytes())
+
+    photos = design._photos(b)
+    pools = design._pools(b, {"goal": "warm"}, photos)
+    check("сток опознан по префиксу без таблицы",
+          set(pools["stock"]) == {"stock-probe-01.jpg", "stock-probe-02.jpg"},
+          str(pools["stock"]))
+    check("негодный файл не попал ни в один род",
+          "stock-notebook-and-pen-top-view-02.jpg"
+          not in sum(pools.values(), []))
+
+    got, short = design._mix(pools, 6)
+    by_kind = [kinds.get(n, "stock" if n.startswith(design.STOCK) else "")
+               for n in got]
+    check("карусель собрана по пропорции",
+          sorted(by_kind) == ["nature", "nature", "self", "self",
+                              "stock", "stock"], str(list(zip(got, by_kind))))
+    check("одно фото — одна карточка", len(set(got)) == 6, str(got))
+    check("хватило всего, дыр нет", short == [], str(short))
+
+    # Банк без нужного рода — это строка человеку, а не молчаливая
+    # подмена: у нового клиента стока может не быть вовсе.
+    thin, short = design._mix({"self": ["a.jpg", "b.jpg"], "stock": [],
+                               "nature": [], "rest": ["c.jpg"]}, 3)
+    check("нехватка рода названа строкой",
+          any("стоковых" in x for x in short) and len(thin) == 3,
+          str((thin, short)))
+    # У нового клиента раздела «Кто в кадре» нет вовсе. Там пропорцию
+    # собирать не из чего, и три строки «не хватило» на каждом макете
+    # были бы шумом, а не дырой.
+    blank, short = design._mix({"rest": ["a.jpg", "b.jpg", "c.jpg"]}, 3)
+    check("бренд без родов кадра дыр не получает",
+          len(blank) == 3 and short == [], str((blank, short)))
+
+    # Карантин: месяц, а не «прошлая обложка».
+    day = dt.date.today()
+    b.artifact(design.PHOTO_LOG, json.dumps({
+        "couch.jpg": f"{day - dt.timedelta(days=1)}T10:00:00",
+        "hero.png": f"{day - dt.timedelta(days=10)}T10:00:00",
+        "casual1.jpg": f"{day - dt.timedelta(days=70)}T10:00:00"}))
+    recent = design._recent_photos(b)
+    check("вчерашний кадр в карантине", "couch.jpg" in recent, str(recent))
+    check("кадр десятидневной давности ещё отдыхает",
+          "hero.png" in recent, str(recent))
+    check("позапрошлый месяц отпущен", "casual1.jpg" not in recent,
+          str(recent))
+    # Окно меряется днями, а не числом прошлых обложек: на банке из
+    # четырёх имён прежний счёт штуками защищал от вчерашнего дня, и
+    # только от него.
+    short_window = design._recent_photos(b, days=5)
+    check("окно карантина — дни, а не штуки",
+          "couch.jpg" in short_window and "hero.png" not in short_window,
+          str(short_window))
+
+    order = design._from_bank(b, {"goal": "pers"}, photos)
+    check("отдохнувший кадр идёт раньше вчерашнего",
+          order.index("casual1.jpg") < order.index("couch.jpg"),
+          str(order[:6]))
+    check("слепая ротация тоже помнит месяц",
+          design._pick_photo(b, {"goal": "pers"}, photos) != "couch.jpg",
+          design._pick_photo(b, {"goal": "pers"}, photos))
+
+    # Повтор и перекос ловятся по всему комплекту: `inspect` видит
+    # карточку поодиночке, и «одно фото на всех пяти» для него выглядит
+    # нормальным макетом пять раз подряд.
+    found = design._mix_findings(b, ["author.jpg"] * 3)
+    check("повтор кадра назван находкой",
+          any("стоит на 3 карточках" in f for f in found), str(found))
+    check("перекос пропорции назван находкой",
+          any("пропорция" in f for f in found), str(found))
+    check("ровный комплект находок не даёт",
+          design._mix_findings(b, got) == [],
+          str(design._mix_findings(b, got)))
+
+    for n in ("stock-probe-01.jpg", "stock-probe-02.jpg"):
+        (images / n).unlink()
 
 
 asyncio.run(main())

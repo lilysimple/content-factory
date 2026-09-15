@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS tenants (
     tz            TEXT DEFAULT 'Europe/Moscow',
     plan          TEXT DEFAULT 'demo',
     status        TEXT DEFAULT 'new',      -- new | onboarding | ready | paused
+    auto          INTEGER DEFAULT 0,       -- автопубликация по времени
+    auto_at       TEXT,                    -- ЧЧ:ММ в поясе тенанта
     created_at    TEXT DEFAULT (datetime('now'))
 );
 
@@ -153,7 +155,33 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 );
 """
 
+# Колонки, добавленные к таблицам, которые в живых базах уже созданы.
+# `CREATE TABLE IF NOT EXISTS` их не добавит — он видит таблицу и уходит,
+# и новый код падает на `no such column` ровно там, где его труднее всего
+# ждать: в рабочей базе, а не на стенде, где база собирается с нуля.
+#
+# Это не механизм миграций, а его дешёвая часть: добавить колонку.
+# Переименования и переливки сюда не помещаются намеренно — как только
+# понадобится хоть одна, дешевле завести настоящие миграции, чем растить
+# этот список в подобие.
+ADDED_COLUMNS = (
+    ("tenants", "auto", "INTEGER DEFAULT 0"),
+    ("tenants", "auto_at", "TEXT"),
+)
+
 _conn: sqlite3.Connection | None = None
+
+
+def _add_columns(conn: sqlite3.Connection) -> list[str]:
+    """Дописать недостающие колонки. Возвращает добавленное."""
+    done = []
+    for table, column, ddl in ADDED_COLUMNS:
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not have or column in have:
+            continue
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        done.append(f"{table}.{column}")
+    return done
 
 
 def init(path: Path) -> None:
@@ -161,6 +189,7 @@ def init(path: Path) -> None:
     _conn = sqlite3.connect(path, check_same_thread=False)
     _conn.row_factory = sqlite3.Row
     _conn.executescript(SCHEMA)
+    _add_columns(_conn)
     _conn.commit()
 
 

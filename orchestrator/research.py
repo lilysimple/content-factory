@@ -35,6 +35,7 @@ MAX_TOKENS = 12000
 POSTS_LIMIT = 40            # сколько постов читаем с канала
 RULE_OF_THREE = 3           # с скольких примеров приём становится выводом
 TOP = 3                     # сколько постов показываем сверху и снизу
+NEWS_MAX = 5                # топ новостей недели: пять и ни одной больше
 WATCHLIST = "research/sources.md"
 
 # Недельная сводка называется по неделе. Проверка нужна, потому что в той
@@ -81,9 +82,26 @@ class Stats:
 @dataclass
 class Digest:
     stats: Stats
+    # Свой Instagram. Отдельным полем, а не вторым `Stats` в общей куче:
+    # там медиана по лайкам, и складывать её с просмотрами Telegram
+    # нельзя. Пусто — профиль не настроен или кэш не снят, и это дыра.
+    own_ig: Stats | None = None
     watched: list[str] = field(default_factory=list)     # что прочиталось
     failed: list[str] = field(default_factory=list)      # что не открылось
     facts: list[str] = field(default_factory=list)
+    # Что не сработало. Отдельным полем, а не вычиткой из `stats.worst`:
+    # низ ленты это числа, а «не сработало» это вывод, и делает его модель.
+    # До 11.09 поля не было вовсе, и человек в карточке видел только верх —
+    # сводка, в которой всё получилось, читается как отчёт, а не как работа.
+    flops: list[str] = field(default_factory=list)
+    # Топ новостей отрасли за неделю. Собирается из внешних фидов, и это
+    # главное сырьё понедельничной рубрики «Сводка недели: ИИ в бизнесе».
+    # До 11.09 новости растворялись в `facts` вперемешку с наблюдениями
+    # по своему каналу: человек открывал сводку, чтобы узнать, о чём
+    # писать в понедельник, и вычитывал это из общего списка.
+    news: list[dict[str, str]] = field(default_factory=list)
+    # Что залетало у соседей по нише. Без имён: правило карточки.
+    rivals: list[str] = field(default_factory=list)
     mechanics: list[dict[str, Any]] = field(default_factory=list)
     singles: list[str] = field(default_factory=list)     # не прошли правило трёх
     gaps: list[str] = field(default_factory=list)        # чего не удалось собрать
@@ -325,7 +343,7 @@ async def snapshot(b, *, window: Window | None = None) -> tuple[str, list[str]]:
                 continue
             st = measure(src, window=window)
             name = src.title or src.url
-            subs = src.subscribers.split()[0] if src.subscribers else "—"
+            subs = _subs(src.subscribers) or "—"
             # Труба в названии канала рвёт таблицу целиком: у «Вайб-кодинг
             # по Чуйкову | Ментор» строка разъезжается на шесть колонок.
             cell = name.replace("|", "/")
@@ -362,7 +380,7 @@ async def snapshot(b, *, window: Window | None = None) -> tuple[str, list[str]]:
         for src in igs:
             st = measure(src, window=window, metric="likes")
             name = src.title or src.url
-            subs = src.subscribers.split()[0] if src.subscribers else "—"
+            subs = _subs(src.subscribers) or "—"
             rows.append(f"| {name.replace('|', '/')} | {subs} | {st.posts} | "
                         f"{st.median or '—'} | {'да' if st.covered else 'нет'} |")
             if not st.covered:
@@ -526,6 +544,33 @@ async def build(chat_id: int, ask: str, *, say=None) -> Digest:
         else:
             dg.failed.append(f"свой канал {own}: {src.error}")
 
+    # Свой Instagram читается из кэша, а не из сети: за ним ходит Chrome
+    # человека (`tools/instagram_pull.py`). Цели этапа считаются по
+    # Instagram, и сводка без него отвечает на половину вопроса — поэтому
+    # отсутствие названо дырой с готовой командой, а не молчанием.
+    if cfg.instagram_profile:
+        # `@` здесь снимается намеренно. В `sources.md` голое `@имя` это
+        # Telegram, и `instagram.handle` такую строку честно отвергает —
+        # но в своей настройке площадка задана именем переменной, и ник
+        # с собачкой человек напишет по привычке от `PUBLISH_CHANNEL`.
+        name = instagram.handle(cfg.instagram_profile.strip().lstrip("@"))
+        if not name:
+            dg.gaps.append("своего профиля Instagram не разобрать из "
+                           f"<code>{cfg.instagram_profile}</code>: нужен ник "
+                           "или ссылка на профиль")
+        else:
+            ig, gap = instagram.read(b, name)
+            if gap:
+                dg.gaps.append(f"свой профиль {gap}")
+            if ig.ok:
+                dg.own_ig = measure(ig, metric="likes")
+                dg.watched.append(ig.summary())
+    else:
+        dg.gaps.append("своего профиля Instagram в настройках нет: поставь "
+                       "<code>INSTAGRAM_PROFILE</code> и сними профиль "
+                       "<code>tools/instagram_pull.py</code>. Пока сводка "
+                       "идёт только по Telegram")
+
     profiles = [u for u in others_urls if instagram.is_profile(u)]
     feeds = [u for u in others_urls if u not in profiles]
     others = await sources.fetch_all(feeds, limit=20) if feeds else []
@@ -564,11 +609,27 @@ async def build(chat_id: int, ask: str, *, say=None) -> Digest:
 
     data = agent.parse_json(answer, who="ресёрчер")
     dg.facts = [str(f) for f in (data.get("facts") or []) if str(f).strip()]
+    dg.flops = [str(f) for f in (data.get("flops") or []) if str(f).strip()]
+    dg.rivals = [str(r) for r in (data.get("rivals") or []) if str(r).strip()]
+    # Новость без следствия в сводку не идёт — это правило роли, и здесь
+    # оно же держится кодом: строка «что вышло» без «что это меняет» для
+    # понедельничного поста бесполезна, а выглядит как готовая.
+    for raw in (data.get("news") or [])[:NEWS_MAX]:
+        if not isinstance(raw, dict):
+            continue
+        what = str(raw.get("what") or "").strip()
+        means = str(raw.get("means") or "").strip()
+        if what and means:
+            dg.news.append({"what": what, "means": means})
+        elif what:
+            dg.gaps.append(f"новость «{_cut(what, 40)}» пришла без строки "
+                           "«что это меняет» — в сводку не взята")
     dg.mechanics, dg.singles = sift(data.get("mechanics") or [])
     dg.gaps += [str(g) for g in (data.get("gaps") or []) if str(g).strip()]
 
-    log.info("сводка %s: фактов %s, механик %s, единичных %s",
-             dg.week, len(dg.facts), len(dg.mechanics), len(dg.singles))
+    log.info("сводка %s: новостей %s, фактов %s, провалов %s, механик %s, "
+             "единичных %s", dg.week, len(dg.news), len(dg.facts),
+             len(dg.flops), len(dg.mechanics), len(dg.singles))
     return dg
 
 
@@ -594,8 +655,28 @@ def to_markdown(dg: Digest) -> str:
     else:
         out.append("Просмотров не видно, статистики нет.")
 
+    if dg.own_ig and dg.own_ig.with_views:
+        ig = dg.own_ig
+        out += ["", "## Свой Instagram", "",
+                "Медиана здесь по **лайкам**: просмотры сетка отдаёт только "
+                "у видео. С числами Telegram не сравнивается.", "",
+                f"- профиль: {ig.title or ig.channel}",
+                f"- подписчиков: {_subs(ig.subscribers) or '[уточнить факт]'}",
+                f"- выходов прочитано: {ig.posts}, с лайками: {ig.with_views}",
+                f"- медиана лайков: {ig.median}"]
+
+    if dg.news:
+        out += ["", "## Новости недели", ""]
+        out += [f"- **{n['what']}** — {n['means']}" for n in dg.news]
+    if dg.rivals:
+        out += ["", "## Что залетало у соседей", ""]
+        out += [f"- {r}" for r in dg.rivals]
     if dg.facts:
         out += ["", "## Наблюдения", ""] + [f"- {f}" for f in dg.facts]
+    # Провалы — Стратегу, с именами и числами. Здесь их не чистят: план
+    # строится на том, что не повторять, не меньше чем на том, что зашло.
+    if dg.flops:
+        out += ["", "## Что не сработало", ""] + [f"- {f}" for f in dg.flops]
     if dg.mechanics:
         out += ["", "## Механики недели", ""]
         for m in dg.mechanics:
@@ -613,31 +694,262 @@ def to_markdown(dg: Digest) -> str:
     return "\n".join(out) + "\n"
 
 
+# ── карточка человеку ─────────────────────────────────────────────────
+#
+# Карточка и выгрузка расходятся намеренно, и это не дубль одного текста.
+# Выгрузку `research/ГГГГ-Wnn.md` читает Стратег: ему нужен провенанс —
+# какой канал, какой пост, какие числа, — иначе он не отличит замер от
+# мнения. Карточку читает человек в телефоне, и провенанс ему в глаза не
+# помещается.
+#
+# До 11.09 карточка была укороченной копией выгрузки: верх ленты списком,
+# наблюдения списком, дыры в одну строку через точку с запятой. Три
+# претензии к ней, все верные.
+#
+# **Имена каналов.** Человеку они не нужны: он хочет знать, какой приём
+# сработал, а не у кого. Имя соседа в его сводке это шум, а иногда и
+# личный выпад — стоп-лист роли запрещает разбирать людей, а не работу.
+# Правило живёт в промпте, а `_anon` подчищает хендлы уже в карточке.
+# Выгрузке имена оставлены: Стратегу без них не проверить вывод.
+#
+# **Верх и низ ленты списком.** Это сырьё замера, а не результат. Человек
+# читает шесть строк с числами и заголовками и делает вывод сам — ровно
+# ту работу, за которой звал роль. Вывод теперь идёт словами, а числа
+# остаются в выгрузке.
+#
+# **Сплошной текст.** Блоки без пустых строк в Telegram слипаются, и
+# карточку приходится читать целиком, чтобы найти нужное. Теперь шапка
+# блока жирным, пустая строка перед ней, внутри блока строки-предложения.
+
+HANDLE = re.compile(r"(?<![\w@])@([A-Za-z][\w\d_]{3,31})\b")
+
+MONTHS = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
+          "августа", "сентября", "октября", "ноября", "декабря")
+
+
+def _human_week(window: str) -> str:
+    """Окно среза человеческой датой: `2026-W37 (…)` → `7–13 сентября`.
+
+    На вход идёт `Stats.window` — строка окна, а **не** `Digest.week`.
+    Разница принципиальная. `week` это имя файла, и на пути бота оно
+    называет неделю сборки; окно же ставится только там, где срез
+    действительно по нему отрезан (`measure(..., window=…)`).
+
+    Поэтому дата в шапке появляется ровно тогда, когда она заработана.
+    Окна нет — шапка молчит про даты и говорит просто «Сводка недели»:
+    красивая дата, которой не соответствует срез, это тот самый баг,
+    который проект уже оплатил однажды медианой за ноябрь–март.
+    """
+    m = re.match(r"(\d{4})-W(\d{2})", window or "")
+    if not m:
+        return ""
+    try:
+        start = date.fromisocalendar(int(m.group(1)), int(m.group(2)), 1)
+    except ValueError:
+        return ""
+    end = start + timedelta(days=6)
+    if start.month == end.month:
+        return f"{start.day}–{end.day} {MONTHS[end.month - 1]}"
+    return (f"{start.day} {MONTHS[start.month - 1]} — "
+            f"{end.day} {MONTHS[end.month - 1]}")
+
+# Сколько строк влезает в блок карточки, не превращая её в простыню.
+CARD_FACTS = 3
+CARD_FLOPS = 2
+CARD_MECH = 3
+CARD_GAPS = 4
+CARD_RIVALS = 3
+
+# Потолок сообщения в Telegram 4096 знаков, и превышение это не обрезка,
+# а отказ отправки: удавшаяся сводка дошла бы до человека молчанием.
+# Запас на хвост, который дописывает `run` («Целиком: research/…»).
+CARD_LIMIT = 3800
+
+
+def _anon(text: str, own: str = "") -> str:
+    """Снять хендл канала из строки для человека.
+
+    Ловит `@имя`, и только его. Имя, написанное словами («у Сиолошной
+    зашло»), отсюда не видно — границу здесь держит промпт, а не код, и
+    называть это гейтом нельзя.
+
+    Подставляется существительное, а не пустота: вырезанный хендл рвёт
+    падеж («у зашло»), и строка после такой чистки читается как сбой.
+
+    Свой канал подменяется своими же словами. Без этого он попадал под
+    ту же замену, что и чужие, и строка про собственные анонсы уезжала
+    человеку как наблюдение про соседа — тихая ложь, которую в карточке
+    нечем проверить.
+    """
+    mine = own.rstrip("/").rsplit("/", 1)[-1].lstrip("@").lower()
+
+    def swap(m: re.Match) -> str:
+        return "своего канала" if m.group(1).lower() == mine \
+            else "канала-соседа"
+    return HANDLE.sub(swap, text)
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """«1 пост», «3 поста», «9 постов». Число в шапке читает человек."""
+    n = abs(n) % 100
+    if 11 <= n <= 14:
+        return many
+    return {1: one, 2: few, 3: few, 4: few}.get(n % 10, many)
+
+
+# Число подписчиков в ленте отбито пробелом: «1 248 подписчиков», и у
+# больших каналов — неразрывным. Резать по первому пробелу нельзя, иначе
+# 1 248 превращается в 1.
+#
+# Множитель идёт вместе с числом и перечислен поимённо: «96.7K» и «2 млн»
+# это числа, «2 подписчика» — число и слово. Ловить множитель одной буквой
+# нельзя: на «2 млн подписчиков» это давало «2 м», а отбросив его —
+# «2», то есть ошибку в миллион раз в таблице, которую читает Стратег.
+SUBS_NUM = re.compile(
+    r"^[\d\s\u00a0\u202f.,]*\d\s*(?:[KkMm]|млн|тыс\.?|тысяч)?")
+
+
+def _subs(raw: str) -> str:
+    """Число подписчиков без слова: слово ставит карточка.
+
+    Лента отдаёт «36 подписчиков» одной строкой, и подставленная целиком
+    она давала «подписчиков 36 подписчиков».
+    """
+    m = SUBS_NUM.match(raw or "")
+    return m.group(0).strip() if m else (raw or "").strip()
+
+
+def _mech_line(m: dict[str, Any], own: str = "") -> str:
+    what = _anon(str(m.get("what") or "").strip(), own)
+    name = _anon(str(m.get("name") or "").strip(), own)
+    return f"<b>{name}</b> — {what}" if what else f"<b>{name}</b>"
+
+
 def card(dg: Digest) -> str:
     st = dg.stats
-    out = [f"🔍 <b>Сводка недели {dg.week}</b>"]
+    when = _human_week(st.window)
+    out = [f"🔍 <b>Сводка недели{' ' + when if when else ''}</b>", ""]
+
+    # Первый абзац — цифры одной фразой. Жирным только то, ради чего
+    # человек открыл сводку: сколько вышло и сколько прочитали.
     if st.with_views:
-        out.append(f"{st.posts} постов · медиана {st.median} просм."
-                   + (f" · {st.subscribers}" if st.subscribers else ""))
+        word = _plural(st.posts, "пост", "поста", "постов")
+        head = (f"За неделю <b>{st.posts} {word}</b>, медиана "
+                f"<b>{st.median} {st.metric}</b>")
+        subs = _subs(st.subscribers)
+        head += f", подписчиков <b>{subs}</b>." if subs else "."
+        out.append(head)
         if not st.enough:
-            out.append(f"⚠️ с просмотрами всего {st.with_views}, "
-                       "для выводов мало")
-        out += ["", "<b>Выше медианы</b>"]
-        out += [f"· {v} — {t}" for v, t in st.best]
+            out.append(f"Постов с цифрами всего {st.with_views} — "
+                       "это мало, выводы ниже держатся слабо.")
     else:
-        out.append("Просмотров не видно, статистики нет.")
+        out.append("Цифр по своему каналу нет: лента не отдала просмотры.")
+
+    # Свой Instagram второй строкой и отдельным числом. Мешать его с
+    # Telegram нельзя: там медиана по лайкам, здесь по просмотрам, и
+    # сложенные вместе они дают цифру, которой нет в природе.
+    if dg.own_ig and dg.own_ig.with_views:
+        ig = dg.own_ig
+        word = _plural(ig.posts, "выход", "выхода", "выходов")
+        line = (f"В Instagram <b>{ig.posts} {word}</b>, медиана "
+                f"<b>{ig.median} {ig.metric}</b>")
+        subs = _subs(ig.subscribers)
+        out.append(line + (f", подписчиков <b>{subs}</b>." if subs else "."))
+
+    # Новости идут первыми: ради них сводку и открывают в понедельник.
+    if dg.news:
+        out += ["", "<b>Новости недели</b>", ""]
+        for n in dg.news[:NEWS_MAX]:
+            out.append(f"<b>{_anon(n['what'], st.channel)}</b> — "
+                       f"{_anon(n['means'], st.channel)}")
+
+    if dg.rivals:
+        out += ["", "<b>Что залетало у соседей по нише</b>", ""]
+        out += [_anon(r, st.channel) for r in dg.rivals[:CARD_RIVALS]]
 
     if dg.facts:
-        out += ["", "<b>Наблюдения</b>"] + [f"· {f}" for f in dg.facts[:4]]
+        out += ["", "<b>Что сработало у нас</b>", ""]
+        out += [_anon(f, st.channel) for f in dg.facts[:CARD_FACTS]]
+
+    # Блок провалов идёт всегда, когда цифры вообще есть. Сводка, в
+    # которой всё получилось, читается как отчёт: человек перестаёт её
+    # открывать через месяц. Не назвал слабое место — так и написано.
+    if st.with_views or dg.flops:
+        out += ["", "<b>Что не сработало</b>", ""]
+        out += ([_anon(f, st.channel) for f in dg.flops[:CARD_FLOPS]]
+                if dg.flops
+                else ["Слабых мест за эту неделю не назвал."])
+
     if dg.mechanics:
-        out += ["", "<b>Механики недели</b>"]
-        out += [f"· {m['name']}" for m in dg.mechanics[:4]]
+        out += ["", "<b>Приёмы, которые можно повторить</b>", ""]
+        out += [_mech_line(m, st.channel) for m in dg.mechanics[:CARD_MECH]]
     if dg.singles:
-        out += ["", f"Единичных случаев: {len(dg.singles)}, "
-                    "в механики не пошли."]
-    if dg.gaps or dg.failed:
-        out += ["", "⚠️ " + "; ".join((dg.gaps + dg.failed)[:3])]
-    return "\n".join(out)
+        out += ["", f"Ещё {len(dg.singles)} приёма встретились по одному "
+                    "разу — в выводы не пошли."]
+
+    holes = [_anon(g, st.channel) for g in dg.gaps + dg.failed]
+    if holes:
+        out += ["", "<b>Чего не хватило</b>", ""]
+        out += holes[:CARD_GAPS]
+        if len(holes) > CARD_GAPS:
+            out.append("Спросите про любую — расскажу подробно.")
+    return _fit_card(out)
+
+
+HOLES_HEAD = "<b>Чего не хватило</b>"
+
+# Что можно снять из карточки и чем это заменяется. Порядок обратный
+# порядку ценности: всё перечисленное целиком лежит в файле сводки.
+# Новостей, цифр и дыр здесь нет и быть не должно.
+EXPENDABLE = (
+    ("<b>Приёмы, которые можно повторить</b>", "Приёмы недели — в файле."),
+    ("<b>Что сработало у нас</b>", "Наблюдения по своим постам — в файле."),
+    ("<b>Что залетало у соседей по нише</b>", "Срез по соседям — в файле."),
+)
+
+
+def _drop(out: list[str], head: str, note: str) -> list[str]:
+    """Снять блок целиком, от пустой строки перед шапкой до следующей шапки."""
+    if head not in out:
+        return out
+    i = out.index(head)
+    end = next((j for j in range(i + 1, len(out)) if out[j].startswith("<b>")),
+               len(out))
+    return out[:i - 1] + ["", note] + out[end:]
+
+
+def _fit_card(out: list[str]) -> str:
+    """Карточка под потолок Telegram: блоки уходят по очереди, дыры — нет.
+
+    Дыры отрезаются от тела **до** подгонки и приклеиваются обратно
+    после. Пока они резались наравне со всем остальным, длинная сводка
+    теряла их первыми — то есть ровно тот блок, ради которого правило
+    «неполный результат честнее молчания» и написано.
+
+    Один проход не годится: на длинных новостях снятие одного блока
+    оставляло карточку впятеро выше потолка, и она уходила в отправку
+    ровно такой же — то есть не уходила вовсе.
+    """
+    if HOLES_HEAD in out:
+        cut = out.index(HOLES_HEAD) - 1
+        body, tail = out[:cut], out[cut:]
+    else:
+        body, tail = out, []
+
+    room = CARD_LIMIT - len("\n".join(tail))
+    for head, note in EXPENDABLE:
+        if len("\n".join(body)) <= room:
+            break
+        body = _drop(body, head, note)
+
+    text = "\n".join(body)
+    if len(text) > room:
+        # Не влезло даже без них: новости сами по себе длиннее потолка.
+        # Режем по границе строки и говорим об этом, а не отдаём обрубок,
+        # который читается как законченная сводка.
+        text = (text[:max(room - 60, 0)].rsplit("\n", 1)[0].rstrip() +
+                "\n\n…\n\nДальше не поместилось в сообщение — смотрите файл.")
+    return "\n".join([text] + tail) if tail else text
 
 
 # Просьба про фактуру уходит в другую работу, а не в недельную сводку.

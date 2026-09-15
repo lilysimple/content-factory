@@ -67,6 +67,18 @@ class Config:
     # Пусто — публикация выключена, и он об этом говорит вслух.
     publish_channel: str = os.getenv("PUBLISH_CHANNEL", "")
 
+    # Свой профиль Instagram: ник без «@». Пара к `publish_channel`, но
+    # работает иначе — в сеть за ним никто не ходит. Страница отдаётся
+    # пустой оболочкой, `api/v1` без входа отвечает 401, и снимает профиль
+    # `tools/instagram_pull.py` своим Chrome в кэш папки бренда. Сводка
+    # читает кэш.
+    #
+    # Пусто — своей статистики по Instagram в сводке нет, и Ресёрчер
+    # говорит об этом дырой. Молчание тут читалось бы как ноль охвата, а
+    # это разные вещи: цели этапа считаются по Instagram, и сводка без
+    # него отвечает на половину вопроса.
+    instagram_profile: str = os.getenv("INSTAGRAM_PROFILE", "")
+
     brands_path: Path = ROOT / os.getenv("BRANDS_PATH", "./Brands")
     db_path: Path = ROOT / os.getenv("DB_PATH", "./factory.db")
     default_tz: str = os.getenv("DEFAULT_TZ", "Europe/Moscow")

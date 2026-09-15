@@ -116,19 +116,36 @@ async def main() -> None:
     check("снятые строки не исчезают из журнала", len(qrows("dropped")) == dropped)
 
     # ── занятость: очередь спрашивает мост, а не себя ─────────────────
+    #
+    # Занятость считается полосами: работы одного рода идут по очереди,
+    # разного — вместе. Спорят за слоты и темы именно однородные, и
+    # ждать друг друга сводке с монтажом незачем.
     reset()
     bridge.enqueue(CHAT, "напиши пост", workflow="post", topic="review")
     busy_id = bridge.create_task(CHAT, "задача мимо очереди",
-                                 workflow="plan", today=TODAY)
+                                 workflow="post", today=TODAY)
     check("мост занят задачей помимо очереди", bridge.running() == busy_id)
-    check("очередь не берёт строку, пока мост занят", bridge.take() is None,
+    check("полоса занята — строка того же рода ждёт", bridge.take() is None,
           "два источника занятости разошлись бы молча")
+
+    # Чужая полоса свободна, и держать её незачем: иначе очередь из
+    # одной полосы просто переименовалась в полосы.
+    qid_plan, _ = bridge.enqueue(CHAT, "план недели", workflow="plan",
+                                 topic="review")
+    other = bridge.take()
+    check("работа другого рода идёт, не дожидаясь чужой полосы",
+          other is not None and other["workflow"] == "plan", str(other))
+    check("взятая строка занимает свою полосу до появления прогона",
+          "plan" in bridge.busy_lanes(), str(bridge.busy_lanes()))
+    check("обе полосы заняты — больше не берём",
+          bridge.take() is None, str(bridge.busy_lanes()))
+    bridge.settle(qid_plan, status="done", task_id="")
 
     with db.tx() as c:
         c.execute("UPDATE bridge_runs SET status = 'done' WHERE task_id = ?",
                   (busy_id,))
     row = bridge.take()
-    check("свободный мост отдаёт первую строку", row is not None and
+    check("освободившаяся полоса отдаёт свою строку", row is not None and
           row["ask"] == "напиши пост")
     check("взятая строка больше не ждёт", not qrows("waiting"))
     check("взятая строка не потеряна", len(qrows("taken")) == 1)
@@ -162,9 +179,21 @@ async def main() -> None:
     await handlers.bridge_task(CHAT, "ещё один", "post", "review")
     said = reg.texts()
     check("вторая просьба принята, а не отбита",
-          "2-я в очереди" in said and "Уже работаю" not in said, said[-200:])
-    check("человеку названо, сколько впереди", "впереди 1 задача" in said,
-          said[-200:])
+          "жду" in said and "Уже работаю" not in said, said[-200:])
+    # Место в общей очереди перестало отвечать на вопрос «когда»: ждут
+    # свою полосу, а не всех подряд.
+    check("человеку названо, сколько впереди в его полосе",
+          "впереди 1 задача того же рода" in said, said[-200:])
+
+    # Работа другого рода не ждёт вовсе, и человеку это сказано прямо.
+    reg.clear()
+    await handlers.bridge_task(CHAT, "сводка", "research", "review")
+    said = reg.texts()
+    check("работа другого рода начинается сразу, а не встаёт третьей",
+          "начинаю работу" in said, said[-200:])
+    bridge.drop_waiting(CHAT)
+    await handlers.bridge_task(CHAT, "напиши пост", "post", "review")
+    await handlers.bridge_task(CHAT, "ещё один", "post", "review")
 
     # Один оборот насоса берёт ровно одну строку.
     row = bridge.take()

@@ -56,9 +56,18 @@ def fake_fetch(src_by_url: dict[str, sources.Source]):
     sources.fetch_all = fetch_all
 
 
-def answer(mechanics=None, facts=None, gaps=None) -> str:
+def answer(mechanics=None, facts=None, gaps=None, flops=None,
+           news=None, rivals=None) -> str:
     return json.dumps({
+        "news": news if news is not None else [
+            {"what": "Вышел открытый стандарт подключения инструментов",
+             "means": "свои таблицы можно отдать модели без разработчика"},
+        ],
+        "rivals": rivals if rivals is not None else
+                  ["Разборы со своим экраном собирают вдвое больше сохранений"],
         "facts": facts if facts is not None else ["Разборы собирают больше «как» постов"],
+        "flops": flops if flops is not None else
+                 ["Анонсы без даты проседают вчетверо против медианы"],
         "mechanics": mechanics if mechanics is not None else [
             {"name": "Разбор своей работы", "what": "показывать процесс, а не итог",
              "examples": ["пост про роли", "пост про дашборд", "пост про промпт"]},
@@ -128,8 +137,72 @@ async def main() -> None:
 
     card = reg.last()
     check("карточка от Ресёрчера", card.role == "research", card.role)
-    check("в карточке медиана", "медиана 30" in card.text, card.text[:150])
+    check("в карточке медиана", "медиана <b>30 просмотров</b>" in card.text,
+          card.text[:150])
+    check("в карточке нет верха ленты списком",
+          "Выше медианы" not in card.text, card.text[:200])
+    check("в карточке есть блок провалов",
+          "Что не сработало" in card.text, card.text)
     check("в карточке путь к файлу", "research/" in card.text, card.text[-80:])
+
+    # ── 3б. карточка и выгрузка расходятся намеренно ──────────────────
+    print("\n3б. Имена каналов: человеку нет, Стратегу да")
+    dg = research.Digest(stats=research.measure(channel([10, 20, 30])),
+                         week="2026-W37")
+    dg.facts = ["У @denissexy зашёл разбор одного релиза"]
+    dg.flops = ["Анонсы @lilyspace1 просели вчетверо"]
+    human, file = research.card(dg), research.to_markdown(dg)
+    check("хендла в карточке нет", "@denissexy" not in human, human)
+    check("падеж не порван", "канала-соседа" in human, human)
+    check("а в выгрузке Стратегу хендл остался",
+          "@denissexy" in file and "@lilyspace1" in file, file[:400])
+    check("провалы уехали и в файл", "## Что не сработало" in file, file[:600])
+
+    dg.flops = []
+    check("слабых мест не назвал — сказано вслух",
+          "не назвал" in research.card(dg), research.card(dg))
+
+    # ── 3в. новости, соседи и потолок сообщения ───────────────────────
+    print("\n3в. Новости недели, соседи и потолок Telegram")
+    dg = research.Digest(stats=research.measure(channel([10, 20, 30])),
+                         week="2026-W37")
+    dg.news = [{"what": f"Новость {i}", "means": f"следствие {i}"}
+               for i in range(1, 6)]
+    dg.rivals = ["У соседа по нише зашли разборы со своим экраном"]
+    text = research.card(dg)
+    check("новости в карточке", "Новости недели" in text and
+          text.count("следствие") == 5, text[:400])
+    check("соседи в карточке", "залетало у соседей" in text, text[:400])
+    check("новости и в файле", "## Новости недели" in research.to_markdown(dg))
+
+    # Потолок: длинная сводка режется, но блок дыр переживает срез.
+    big = research.Digest(stats=research.measure(channel([10, 20, 30])),
+                          week="2026-W37")
+    big.news = [{"what": "Н" * 60, "means": "ю" * 400} for _ in range(5)]
+    big.facts = ["ю" * 400] * 3
+    big.rivals = ["ю" * 400] * 3
+    big.mechanics = [{"name": "M", "what": "ю" * 400,
+                      "examples": ["1", "2", "3"]}] * 3
+    big.gaps = ["Скринов статистики нет.", "Кэш профиля устарел."]
+    fat = research.card(big)
+    check("карточка влезает в сообщение", len(fat) <= research.CARD_LIMIT,
+          str(len(fat)))
+    check("дыры пережили срез", "Чего не хватило" in fat and
+          "Скринов статистики нет." in fat, fat[-300:])
+    check("срез назван вслух", "не поместилось" in fat or
+          "в файле" in fat, fat[-300:])
+
+    # ── 3г. новость без следствия не выдаётся за готовую ──────────────
+    print("\n3г. Новость без «что это меняет» в сводку не идёт")
+    fake_fetch({"https://t.me/s/own": channel([10, 20, 30, 40, 50])})
+    install(answer(news=[{"what": "Кто-то выпустил модель", "means": ""},
+                         {"what": "И ещё одну", "means": "считать дешевле"}]))
+    reg.clear()
+    await research.run(reg, CHAT, "дай сводку")
+    seen = reg.texts()
+    check("новость без следствия не в новостях",
+          "Кто-то выпустил модель</b>" not in seen, seen[:400])
+    check("и названа дырой", "«что это меняет»" in seen, seen[-400:])
 
     # ── 4. цифры уехали в промпт готовыми ─────────────────────────────
     print("\n4. Модель получает цифры, а не считает их")
@@ -148,7 +221,7 @@ async def main() -> None:
     await research.run(reg, CHAT, "дай сводку")
     check("предупреждение уехало в промпт",
           "мало для вывода" in CALLS["prompts"][-1], CALLS["prompts"][-1][:400])
-    check("и человеку сказано", "для выводов мало" in reg.texts(),
+    check("и человеку сказано", "это мало" in reg.texts(),
           reg.texts()[:200])
 
     # ── 6. единичные случаи видны, но не выданы за механики ───────────

@@ -41,14 +41,25 @@ def brand(chat_id: int):
     return store.get(row["brand_slug"]) if row and row["brand_slug"] else None
 
 
-def today(chat_id: int) -> str:
-    """Сегодня в часовом поясе тенанта, а не сервера."""
+def now(chat_id: int) -> datetime:
+    """Сейчас в часовом поясе тенанта, а не сервера.
+
+    Часы завода и часы человека это разные часы: сервер может стоять в
+    UTC, а слот «в десять утра» человек имеет в виду свой. Пояс кривой
+    или тенанта ещё нет — падаем на часы машины: отказ здесь означал бы
+    молчащее расписание, а это хуже сдвига на час.
+    """
     row = db.one("SELECT tz FROM tenants WHERE chat_id = ?", chat_id)
     tz = (row["tz"] if row else None) or cfg.default_tz
     try:
-        return datetime.now(ZoneInfo(tz)).date().isoformat()
+        return datetime.now(ZoneInfo(tz))
     except Exception:                                        # noqa: BLE001
-        return datetime.now().date().isoformat()
+        return datetime.now()
+
+
+def today(chat_id: int) -> str:
+    """Сегодня в часовом поясе тенанта, а не сервера."""
+    return now(chat_id).date().isoformat()
 
 
 PROFILE_LIMIT = 8000
@@ -56,6 +67,29 @@ PROFILE_LIMIT = 8000
 # Потолок на один приложенный файл профиля: он режется раньше, чем
 # начинает вытеснять ЯДРО из общего бюджета.
 FILE_LIMIT = 2500
+
+
+def _fit(text: str, name: str, limit: int = FILE_LIMIT) -> str:
+    """Приложенный файл под свой потолок — по границе строки и вслух.
+
+    До 11.09 здесь стоял голый срез `text[:FILE_LIMIT]`. Он рубил посреди
+    слова и молчал об этом, а обрубок читается как законченная мысль:
+    роль не знает, что хвост файла до неё не доехал, и достраивает его
+    правдоподобным. Та же граница, что у секций ЯДРА выше, — «обрезка
+    названа вслух, а не молча», — до приложенных файлов не дотягивалась.
+
+    Файлы профиля пишутся с этим в уме: сперва то, что читает роль,
+    дальше строка-обрез и то, что читает человек. Режется по последнему
+    переводу строки, иначе фраза обрывается на середине.
+    """
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    cut = head.rfind("\n")
+    body = (head[:cut] if cut > limit // 2 else head).rstrip()
+    return (f"{body}\n\n…\n\nФайл не поместился в {limit} знаков "
+            f"({len(text)}): хвост «{name}» до тебя не доехал. Чего в "
+            f"промпте нет, того у тебя нет, и достраивать его нельзя.")
 
 
 def profile(b, sections: tuple[str, ...], limit: int = PROFILE_LIMIT,
@@ -93,7 +127,7 @@ def profile(b, sections: tuple[str, ...], limit: int = PROFILE_LIMIT,
     for key in files:
         name = brand_store.PROFILE.get(key, key)
         extra = b.read(key).strip()
-        blocks.append(f"## {name}\n\n" + (extra[:FILE_LIMIT] if extra else
+        blocks.append(f"## {name}\n\n" + (_fit(extra, name) if extra else
                       "Файла в профиле нет. Правил площадки по этой части "
                       "у тебя нет: работаешь по общему правилу и говоришь "
                       "об этом строкой."))
@@ -324,6 +358,29 @@ def reason(e: Exception) -> str:
 CORRECTIONS_TAIL = 12         # сколько последних правок едет в промпт
 
 
+# Просьбы, которые правкой быть не могут. Нужны режимам правки: нажав
+# «Правки» под текстом и написав «смонтируй», человек просит другую
+# работу, а не правку текста, — и получал именно правку.
+#
+# Список нарочно узкий и предметный. Широкий тут дороже: «сделай
+# обложку светлее» это правка макета, а не просьба сверстать новую, и
+# слово «обложка» в общем списке увело бы настоящую правку в новый
+# круг. Слово попадает сюда, только если оно не может значить правку
+# того, что человек сейчас видит на экране.
+OTHER_WORK = (
+    "смонтируй", "смонтировать", "нареж", "нареза", "разрежь",
+    "сплитом", "с панелью",
+    "контент-план", "план на неделю", "спланируй",
+    "опубликуй", "в очередь",
+)
+
+
+def starts_other_work(ask: str) -> bool:
+    """Просьба начать другую работу, а не поправить показанное."""
+    low = (ask or "").lower()
+    return any(w in low for w in OTHER_WORK)
+
+
 class Desk:
     """Что роль помнит между сообщениями: последнее сделанное и ждёт ли правку.
 
@@ -368,6 +425,14 @@ class Desk:
     def await_fix(self, chat_id: int, item: Any) -> None:
         self._items[chat_id] = item
         self._fix.add(chat_id)
+
+    def done_fix(self, chat_id: int) -> None:
+        """Снять режим правки, оставив сделанное на столе.
+
+        Отличается от `clear` ровно этим: человек, попросивший новую
+        работу, не теряет карточку предыдущей — кнопки под ней живые.
+        """
+        self._fix.discard(chat_id)
 
     def clear(self, chat_id: int | None = None) -> None:
         if chat_id is None:

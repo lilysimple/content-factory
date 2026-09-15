@@ -5,9 +5,13 @@
 просить модель решить, публиковать ли, значит поставить рассуждение туда,
 где нужна граница. Мы трижды убедились, что промпт это просьба.
 
-Режим один: `approve`. Человек видит превью ровно таким, каким пост
-выйдет, и нажимает кнопку. Автопубликация по журналу решений включается
-не раньше двух недель и десяти утверждений подряд — до этого её нет.
+Режимов два, и дом по умолчанию это `approve`: человек видит превью
+ровно таким, каким пост выйдет, и нажимает кнопку.
+
+Второй режим — автомат по времени слота, `autopost`. Он выключен, пока
+человек не включил его сам, и не включается раньше порога из журнала
+решений: десять утверждений и две недели с первой публикации. Порог
+держит `gate`, а не обещание в промпте.
 
 Защита от двойной публикации держится на `posts.external_id UNIQUE`:
 перезапуск бота или второе нажатие не создадут второй пост.
@@ -15,7 +19,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
+from datetime import date, datetime, time as dtime, timedelta
 from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -261,6 +267,214 @@ def skip(chat_id: int, theme_id: str, reason: str) -> None:
         c.execute("INSERT INTO posts (theme_id, chat_id, state) "
                   "VALUES (?,?,'skip') ON CONFLICT(theme_id) "
                   "DO UPDATE SET state = 'skip'", (theme_id, chat_id))
+
+
+# ── автопубликация по времени ─────────────────────────────────────────
+#
+# Режим `approve` остаётся домом по умолчанию: завод показывает превью и
+# ждёт кнопку. Автомат это второй режим, и включается он не флагом в
+# коде, а человеком в своём чате — и только после порога из журнала
+# решений (spec/README.md, 13.08): десять утверждений и две недели.
+#
+# Порог считается по фактическим публикациям. «Без правок» завод не
+# измеряет: правка текста живёт в файле, а не в базе, и считать её нечем.
+# Честнее назвать это утверждениями, чем делать вид, что мы проверили
+# больше, чем проверили.
+
+AUTO_AT_DEFAULT = "10:00"     # время слота, если человек не назвал своё
+AUTO_GRACE_MIN = 90           # сколько ждём опоздавший завод
+AUTO_MIN_PUBS = 10            # утверждений до автомата
+AUTO_MIN_DAYS = 14            # и дней с первой публикации
+
+_AT_RX = re.compile(r"^(\d{1,2})[:.](\d{2})$")
+
+
+def parse_at(raw: str) -> str | None:
+    """«9:30», «09.30» → «09:30». Мусор → None."""
+    m = _AT_RX.match((raw or "").strip())
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if h > 23 or mi > 59:
+        return None
+    return f"{h:02d}:{mi:02d}"
+
+
+def settings(chat_id: int) -> tuple[bool, str]:
+    """Включён ли автомат и на какое время. Время есть всегда."""
+    row = db.one("SELECT auto, auto_at FROM tenants WHERE chat_id = ?", chat_id)
+    if row is None:
+        return False, AUTO_AT_DEFAULT
+    return bool(row["auto"]), (row["auto_at"] or AUTO_AT_DEFAULT)
+
+
+def approvals(chat_id: int) -> tuple[int, int]:
+    """Сколько постов опубликовано и сколько дней прошло с первого.
+
+    Дни считаются от первой публикации, а не от заведения чата: две
+    недели наблюдения это две недели публикаций, а не две недели, пока
+    завод стоял.
+    """
+    row = db.one("SELECT COUNT(*) n, MIN(published_at) first FROM posts "
+                 "WHERE chat_id = ? AND state = 'pub'", chat_id)
+    n = row["n"] if row else 0
+    if not row or not row["first"]:
+        return n, 0
+    first = str(row["first"])[:10]
+    try:
+        days = (date.fromisoformat(desk.today(chat_id))
+                - date.fromisoformat(first)).days
+    except ValueError:
+        return n, 0
+    return n, days
+
+
+def gate(chat_id: int) -> list[str]:
+    """Что мешает автомату. Пустой список — можно.
+
+    Флаг тенанта сюда не входит: он про «хочу», а гейт про «можно».
+    Смешать их значит потерять причину отказа в тот момент, когда
+    человек нажимает «включить».
+    """
+    blockers: list[str] = []
+    if not cfg.publish_channel:
+        blockers.append("канал не настроен: PUBLISH_CHANNEL пуст")
+    n, days = approvals(chat_id)
+    if n < AUTO_MIN_PUBS:
+        blockers.append(f"утверждений {n} из {AUTO_MIN_PUBS}")
+    if days < AUTO_MIN_DAYS:
+        blockers.append(f"с первой публикации {days} дней из {AUTO_MIN_DAYS}")
+    return blockers
+
+
+def arm(chat_id: int, on: bool, at: str | None = None) -> list[str]:
+    """Включить или выключить автомат. Возвращает то, что помешало.
+
+    Выключить можно всегда и мгновенно: тормоз не должен зависеть ни от
+    какого порога.
+    """
+    if not on:
+        db.set_tenant(chat_id, auto=0)
+        return []
+    if blockers := gate(chat_id):
+        return blockers
+    db.set_tenant(chat_id, auto=1, auto_at=at or settings(chat_id)[1])
+    return []
+
+
+def slot_moment(chat_id: int, at: str, day: str):
+    """Момент слота датой и временем в поясе тенанта."""
+    h, m = (int(x) for x in at.split(":"))
+    return datetime.combine(date.fromisoformat(day), dtime(hour=h, minute=m))
+
+
+def due_now(chat_id: int, moment=None) -> tuple[list[dict[str, Any]],
+                                                list[dict[str, Any]]]:
+    """Что пора публиковать сейчас и что уже опоздало.
+
+    Опоздание тут не то же, что `overdue`. Там слот вчерашний и мёртвый,
+    здесь слот сегодняшний, но окно закрылось: Мак спал, завод стоял,
+    время прошло. Разница важна человеку — вчерашнее переносят, сегодняшнее
+    ещё можно опубликовать рукой.
+
+    Дата строго сегодняшняя. Задним числом автомат не публикует по той же
+    причине, по какой не публикует человек: план держится на датах.
+    """
+    _, at = settings(chat_id)
+    now = moment or desk.now(chat_id)
+    day = now.date().isoformat()
+    slot = slot_moment(chat_id, at, day)
+    if now < slot:
+        return [], []
+
+    late = now > slot + timedelta(minutes=AUTO_GRACE_MIN)
+    rows = db.q("SELECT * FROM themes WHERE chat_id = ? AND status = 'ready' "
+                "AND date = ? ORDER BY id", chat_id, day)
+    b = desk.brand(chat_id)
+    items = []
+    for r in rows:
+        t = dict(r)
+        # Площадки вне `AUTO_PUBLISH` автомата не касаются вовсе. Иначе
+        # слот Instagram каждый день попадал бы сюда и каждый день
+        # получал строку «комплект не готов» — неправду: комплект как раз
+        # готов, просто публикует его человек руками.
+        if (t.get("plat") or "telegram") not in AUTO_PUBLISH:
+            continue
+        if t.get("asset") or (b is not None and reel_path(b, t["id"])):
+            items.append(t)
+    return ([], items) if late else (items, [])
+
+
+# Про что этому чату уже сказали. Ключ несёт дату: одна и та же тема,
+# опоздавшая сегодня и завтра, это два разных события, и второе человек
+# должен увидеть.
+_told: set[tuple[int, str, str]] = set()
+
+
+def _once(chat_id: int, theme_id: str, kind: str) -> bool:
+    """Первый ли это раз. Память живёт до перезапуска — и это правильно:
+    перезапуск повторит важное, а важное повторить дешевле, чем потерять."""
+    key = (chat_id, theme_id, kind)
+    if key in _told:
+        return False
+    _told.add(key)
+    return True
+
+
+async def autopost(reg, chat_id: int, moment=None) -> list[str]:
+    """Один тик автомата. Возвращает ссылки на то, что ушло.
+
+    Тихо не работает: всё, что автомат сделал или не смог, доезжает до
+    человека строкой в 📤 Очередь. Автопубликация, о которой человек
+    узнаёт из канала, — это не автоматизация, а сюрприз.
+    """
+    on, at = settings(chat_id)
+    if not on:
+        return []
+    if blockers := gate(chat_id):
+        # Гейт был пройден в момент включения, значит что-то отвалилось
+        # потом — канал сняли, базу подменили. Молчать нельзя: человек
+        # уверен, что завод публикует.
+        if _once(chat_id, "-", "gate:" + desk.today(chat_id)):
+            await reg.say("publisher", chat_id,
+                          "Автопубликация включена, но сейчас не могу: "
+                          + "; ".join(blockers) + ".", topic="queue")
+        return []
+
+    ready, late = due_now(chat_id, moment)
+
+    for t in late:
+        if _once(chat_id, t["id"], "late:" + str(t.get("date"))):
+            await reg.say("publisher", chat_id,
+                          f"Слот {at} сегодня пропущен: <code>{t['id']}</code>. "
+                          f"Прошло больше {AUTO_GRACE_MIN} минут — сам "
+                          "публиковать не буду, покажи очередь и решай рукой: "
+                          "<code>/queue</code> или кнопка в очереди.",
+                          topic="queue")
+
+    links = []
+    for t in ready:
+        pkg = collect(chat_id, t)
+        if pkg.problems:
+            if _once(chat_id, t["id"], "problems:" + str(t.get("date"))):
+                await reg.say("publisher", chat_id,
+                              f"Слот {at} наступил, но комплект "
+                              f"<code>{t['id']}</code> не готов: "
+                              + "; ".join(pkg.problems) + ".", topic="queue")
+            continue
+        try:
+            link = await send(reg, chat_id, pkg)
+        except (NotReady, NoChannel) as e:
+            if _once(chat_id, t["id"], "failed:" + str(t.get("date"))):
+                await reg.say("publisher", chat_id,
+                              f"Автопубликация <code>{t['id']}</code> не "
+                              f"прошла: {e}", topic="queue")
+            continue
+        links.append(link)
+        await reg.say("publisher", chat_id,
+                      f"Опубликовала сама, слот {at}: {link}\n"
+                      f"<code>{t['id']}</code> в pub.", topic="queue")
+    return links
 
 
 # ── карточка ──────────────────────────────────────────────────────────

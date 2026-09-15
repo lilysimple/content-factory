@@ -144,7 +144,7 @@ def setup() -> None:
     for f in (assets / "images").glob("*"):
         if f.is_file() and f.name.startswith(("gen-", "stock-")):
             f.unlink()
-    for name in ("gen-credits.md", "stock-credits.md"):
+    for name in ("gen-credits.md", "stock-credits.md", "photo-log.json"):
         (assets / name).unlink(missing_ok=True)
     shutil.rmtree(assets / ".gen", ignore_errors=True)
 

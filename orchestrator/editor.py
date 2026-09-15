@@ -317,7 +317,13 @@ async def build(chat_id: int, ask: str, *, say=None) -> Draft:
 
     # `hooks.md` поверх секций: правило «обещание до ссылки» и первая
     # строка описания это механика площадки, а не голос бренда.
-    profile = desk.profile(b, SECTIONS, files=("hooks",))
+    #
+    # `canon.md` рядом с ним с 11.09: восемьдесят процентов контента это
+    # обучение, а обучение стоит на первоисточнике. В ЯДРЕ ему не место —
+    # ЯДРО про голос и аудиторию, а понятия Anthropic и OpenAI меняются
+    # по своему календарю. Файла нет — `desk.profile` скажет об этом
+    # строкой, и роль напишет пост без опоры, а не выдумает её.
+    profile = desk.profile(b, SECTIONS, files=("hooks", "canon"))
     samples = desk.voice_samples(b)
     stable = _voice_stable(samples, table.learned(b))
 
