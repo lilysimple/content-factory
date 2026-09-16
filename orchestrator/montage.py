@@ -156,6 +156,11 @@ class Reel:
     # Сырое при этом никуда не девается — на нём стоит правка словаря.
     said: list[Any] = field(default_factory=list)
     subs: list[dict[str, Any]] = field(default_factory=list)
+    # Нарезанное и по словарю — то же, что ушло в кадр и что читала
+    # роль. По нему ищется фраза блока: роль цитирует «включить
+    # long-running», а в сыром лежит «исключить -running», и блок
+    # выпадал с «в записи не нашлось».
+    spoken: list[dict[str, Any]] = field(default_factory=list)
     piece: tuple[float, float] | None = None
     face: footage.Face | None = None
     crop: tuple[float, float] = (0.5, 0.5)
@@ -340,6 +345,7 @@ def _relex(reel: Reel, rules: list[tuple[str, str]]) -> None:
     раз: словарь пополняется, а `reel.subs` остаются тем, что услышано.
     """
     subs, fixed = footage.relex(reel.subs, rules)
+    reel.spoken = subs
     reel.pages = footage.pages(subs)
     reel.findings = [f for f in reel.findings if not f.startswith(LEX_NOTE)]
     if fixed:
@@ -1071,7 +1077,7 @@ def speak_at(reel: Reel, phrase: str) -> float | None:
     Дубль без расшифровки — это `None` на любую фразу, и панель тогда
     идёт по секундам блоков, без набора под речь.
     """
-    return footage.anchor(reel.subs, phrase)
+    return footage.anchor(reel.spoken or reel.subs, phrase)
 
 
 FULL_KINDS = ("media", "art")
