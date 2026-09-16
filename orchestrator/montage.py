@@ -1591,7 +1591,8 @@ async def _panel(chat_id: int, reel: Reel, *, ask: str = "",
         if say:
             await say("Рисую картинки по теме для панели.")
         reel.findings += (await panelshot.draw(
-            b, slides, color=reel.color, accent=reel.accent))[:3]
+            b, slides, color=reel.color, accent=reel.accent,
+            theme=str(reel.theme.get("id") or "")))[:3]
     # Картинка не нарисовалась и слов у блока нет — ставить нечего.
     slides = [s for s in slides
               if s.kind != "card" or s.lines or s.items or s.image]

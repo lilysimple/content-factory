@@ -610,9 +610,23 @@ def main() -> None:
 
         other = [cut.Slide(phrase="без вас", kind="art", art="другой куб")]
         imagegen.make = _once
-        asyncio.run(panelshot.draw(b4, other, color="#111", accent="#C97C5D"))
+        asyncio.run(panelshot.draw(b4, other, color="#111", accent="#C97C5D",
+                                   theme="t-art"))
         check("другой бриф рисуется своей картинкой",
               other[0].image != first[0].image, str(other[0].image))
+
+        # Папка картинок без журнала — файлы с хешем в имени и ничем
+        # больше: что нарисовано и к какому ролику, не узнать ни кодом,
+        # ни глазами. Поэтому нарисованное называет себя строкой.
+        book = b4.path(panelshot.ART_CREDITS).read_text(encoding="utf-8")
+        check("нарисованное записано в журнал",
+              other[0].image.name in book and "другой куб" in book,
+              book[-160:])
+        check("тема ролика в журнале названа", "t-art" in book, book[-160:])
+        check("взятое из кэша второй строки не добавляет",
+              book.count(first[0].image.name) == 1, book[-300:])
+        check("шапка журнала не задваивается",
+              book.count("| Файл |") == 1, str(book.count("| Файл |")))
     finally:
         imagegen.make = was
 

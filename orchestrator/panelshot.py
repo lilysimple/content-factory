@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hashlib
 import ipaddress
 import logging
@@ -323,6 +324,39 @@ async def dress(b, slides: list[Any]) -> list[str]:
 
 ART = "montage/art"
 
+# Журнал нарисованного. Без него папка — двадцать пять файлов с хешем в
+# имени и ничем больше: узнать, что на картинке и к какому ролику её
+# рисовали, нельзя ни кодом, ни глазами. Кэш ключуется дословным брифом,
+# поэтому Монтажёр, сказавший то же другими словами, платит за новую
+# картинку — журнал показывает, за что именно заплачено и что уже есть.
+#
+# Форма та же, что у `gen-credits.md` Дизайнера: одна таблица, дописываем
+# строкой. Чтение — человеку, не коду: разбирать его завод не умеет.
+ART_CREDITS = "montage/art/credits.md"
+ART_HEAD = """# Картинки панели: что чем нарисовано
+
+Заполняет код, когда картинка действительно нарисована. Взятая из кэша
+строки не добавляет — она уже здесь.
+
+| Файл | Тема | Бриф | Когда |
+|---|---|---|---|
+"""
+
+
+def art_credit(b, name: str, theme: str, brief: str) -> None:
+    """Строка в журнал. Не записалось — картинку это не отменяет."""
+    try:
+        path = b.path(ART_CREDITS)
+        if not path.is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(ART_HEAD, encoding="utf-8")
+        line = " ".join(brief.split())[:160]
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"| `{name}` | {theme or '—'} | {line} | "
+                    f"{dt.date.today().isoformat()} |\n")
+    except OSError as e:                                     # noqa: BLE001
+        log.warning("журнал картинок не записался: %s", e)
+
 STYLE = ("Single glossy 3D object, centered, floating, soft studio light, "
          "subtle glow in {accent}, on a plain deep {color} background that "
          "fades to the edges. Minimal, premium, calm. Absolutely no text, "
@@ -340,7 +374,8 @@ def art_prompt(brief: str, color: str, accent: str) -> str:
             + STYLE.format(color=color, accent=accent))
 
 
-async def draw(b, slides: list[Any], *, color: str, accent: str) -> list[str]:
+async def draw(b, slides: list[Any], *, color: str, accent: str,
+               theme: str = "") -> list[str]:
     """Нарисовать картинки блокам `art`. Вернуть, что не вышло.
 
     Не вышло — блок остаётся карточкой со своими строками, если они есть,
@@ -378,6 +413,7 @@ async def draw(b, slides: list[Any], *, color: str, accent: str) -> list[str]:
                 out = folder / f"art-{name}{suffix}"
                 out.write_bytes(blob)
                 s.image = out
+                art_credit(b, out.name, theme, s.art)
 
     await asyncio.gather(*(one(s) for s in todo))
     for s in todo:
