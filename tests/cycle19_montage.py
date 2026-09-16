@@ -1154,6 +1154,17 @@ def panel() -> None:
     check("картинка слайда переезжает на блок и переживает пересборку",
           laid and laid[0].image == logo, str(laid))
 
+    print("\n45ж. Страница субтитра — не больше двух строк")
+    long = [{"text": t, "start": i * 0.3, "end": i * 0.3 + 0.25}
+            for i, t in enumerate(["наша", "задача", "продолжает", "заключаться"])]
+    got_pages = footage.pages(long)
+    check("четыре длинных слова не встают на одну страницу",
+          len(got_pages) == 2, str([[w["text"] for w in p["words"]]
+                                     for p in got_pages]))
+    check("ни одна страница не длиннее потолка знаков",
+          all(len(" ".join(w["text"] for w in p["words"])) <= footage.PAGE_CHARS
+              for p in got_pages), "потолок")
+
     print("\n45е. Обложка сплита")
     lines = montage.plate_lines("Почему ИИ агенты бесполезны и что делать вместо команды из семи")
     check("заголовок режется на плашки по словам и не шире потолка",

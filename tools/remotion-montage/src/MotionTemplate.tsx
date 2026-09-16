@@ -221,6 +221,10 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
               fontSize: Math.round(height * 0.032),
               uppercase: true,
               plate: true,
+              lowered: fullBlocks
+                .filter(visual)
+                .map((b) => ({from: b.start, to: b.end})),
+              lowTop: Math.round(height * 0.9),
             }}
           />
         ) : null}

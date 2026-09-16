@@ -668,7 +668,12 @@ const Art: React.FC<{
               fontWeight: 700,
               fontSize: panelHeight * 0.07,
               color: textColor,
-              textShadow: '0 2px 18px rgba(0,0,0,0.6)',
+              // Подпись стоит поверх картинки, а картинка пёстрая: на
+              // шестерёнках и каркасе дома строка без подложки читалась
+              // через раз. Тёмная подложка по тексту, а не полоса.
+              background: 'rgba(0,0,0,0.62)',
+              padding: `${panelHeight * 0.012}px ${panelHeight * 0.035}px`,
+              borderRadius: panelHeight * 0.02,
               opacity: interpolate(pop, [0.4, 1], [0, 1], {
                 extrapolateLeft: 'clamp',
                 extrapolateRight: 'clamp',

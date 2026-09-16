@@ -527,6 +527,10 @@ async def captions(video: Path, *, model: str = WHISPER_MODEL) -> list[Word]:
 PAGE_WORDS = 4
 PAGE_GAP = 0.7          # пауза длиннее — начинаем новую страницу
 PAGE_MAX = 3.2          # и дольше этого страница не висит
+# Знаков на страницу, с пробелами. Четыре длинных слова капсом давали
+# три строки: «НАША ЗАДАЧА ПРОДОЛЖАЕТ ЗАКЛЮЧАТЬСЯ» наезжала на панель в
+# сплите 16.09. В строку сплита влезает около 22 знаков — 30 это две.
+PAGE_CHARS = 30
 
 
 def pages(words: list[dict]) -> list[dict]:
@@ -544,7 +548,9 @@ def pages(words: list[dict]) -> list[dict]:
         if cur:
             gap = w["start"] - cur[-1]["end"]
             span = w["end"] - cur[0]["start"]
-            if len(cur) >= PAGE_WORDS or gap > PAGE_GAP or span > PAGE_MAX:
+            chars = sum(len(str(c["text"])) + 1 for c in cur) + len(str(w["text"]))
+            if (len(cur) >= PAGE_WORDS or gap > PAGE_GAP or span > PAGE_MAX
+                    or chars > PAGE_CHARS):
                 flush()
         cur.append(w)
     flush()

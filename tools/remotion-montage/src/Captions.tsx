@@ -31,18 +31,30 @@ export type CaptionStyle = {
   // там — слова ложились человеку на лицо. Над швом у панели пустое
   // поле, и строка живёт на нём, ничего не закрывая.
   above?: boolean;
+  // Отрезки готового ролика, когда строка опускается к низу холста: на
+  // блоке на весь кадр шва нет, и строка на его месте висела посреди
+  // картинки. `lowTop` — где тогда её нижний край.
+  lowered?: {from: number; to: number}[];
+  lowTop?: number;
 };
 
 const CaptionPage: React.FC<{
   page: Page;
   accent: string;
   look: CaptionStyle;
-}> = ({page, accent, look}) => {
+}> = ({page, accent, look: given}) => {
+  let look = given;
   const frame = useCurrentFrame();
   const {fps, height} = useVideoConfig();
   // Время внутри страницы — своё, от начала её Sequence. Абсолютное
   // получаем сложением, иначе подсветка уедет на второй же странице.
   const now = page.start + frame / fps;
+  const low = (look.lowered ?? []).some(
+    (r) => page.start >= r.from && page.start < r.to,
+  );
+  if (low && look.lowTop !== undefined) {
+    look = {...look, top: look.lowTop};
+  }
   const anchored = look.top !== undefined;
 
   const above = anchored && look.above;
