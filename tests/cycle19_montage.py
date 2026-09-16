@@ -553,6 +553,12 @@ def main() -> None:
     check("фраза блока ищется по поправленному",
           montage.speak_at(spoke, "включить") == 1.2,
           str(montage.speak_at(spoke, "включить")))
+    check("прошлая находка раскладки узнаётся",
+          montage._is_lay_note("на панель не встало: «х» в записи не нашлось")
+          and montage._is_lay_note("«х»: блок короче 1.5 с — соседний занял "
+                                   "его время"), "находки")
+    check("чужая находка под правило не попадает",
+          not montage._is_lay_note("вырезано 16 с тишины"), "чужая")
     check("без словаря поиск идёт по услышанному",
           montage.speak_at(montage.Reel(theme={"id": "t12"},
                                         video=_brand().path("нет.mov"),
