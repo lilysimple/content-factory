@@ -457,6 +457,20 @@ def main() -> None:
           footage.relex([{"text": "Всё", "start": 0.0, "end": 0.4}],
                         [("все", "всё-таки")])[1] == 1)
 
+    # Тире whisper отбивает паузу отдельным словом, а `norm` знаков не
+    # видит — и «клод –» целиком попадало в совпадение правила про
+    # «клод». Хвост приклеивался к замене, и в кадр ехало «CLAUDE– ЭТО».
+    dash = [{"text": "клод", "start": 0.0, "end": 0.4},
+            {"text": "–", "start": 0.4, "end": 0.5},
+            {"text": "это", "start": 0.5, "end": 0.8}]
+    got, n_dash = footage.relex(dash, [("клод", "Claude")])
+    check("одинокое тире не приклеивается к замене",
+          [w["text"] for w in got] == ["Claude", "–", "это"],
+          str([w["text"] for w in got]))
+    check("тире не сочли поправленным словом", n_dash == 1, str(n_dash))
+    check("своё время у тире осталось",
+          got[1]["start"] == 0.4 and got[1]["end"] == 0.5, str(got[1]))
+
     print("\n26. Правка человека разбирается в пары замен")
     check("стрелка", montage.fixes("клод -> Claude") == [("клод", "Claude")],
           str(montage.fixes("клод -> Claude")))
@@ -528,6 +542,57 @@ def main() -> None:
           str(reel.findings))
     check("чужая находка не потерялась",
           "что-то не сошлось" in reel.findings, str(reel.findings))
+
+    # Монтажёр читает поправленное словарём, а не сырое. Пока он читал
+    # сырое, огрех расшифровки уезжал в заголовок темы — «Недооценённая
+    # функция «clot»» на живом дубле 16.09, — а оттуда на обложку.
+    said = footage.relex_heard(
+        [footage.Word("функция", 0.0, 0.4), footage.Word("клот", 0.4, 0.8)],
+        [("клот", "Claude")])
+    check("роли достаётся текст после словаря",
+          [w.text for w in said] == ["функция", "Claude"], str(said))
+    check("метки услышанного не съехали",
+          said[1].start == 0.4 and said[1].end == 0.8, str(said[1]))
+
+    # Правка это не новый монтаж: картинки панели уже нарисованы и
+    # оплачены, и пересобирать их на смену слова нельзя. Блоки лежат на
+    # ролике со ссылками на файлы — `refit` их не трогает.
+    import sys
+    from orchestrator import imagegen, panelshot
+    b4 = _brand()
+    made: list[str] = []
+
+    def _once(prompt: str, aspect: str = "4:5") -> bytes:
+        made.append(prompt)
+        return b"\xff\xd8\xff" + b"0" * 64          # маленький jpeg
+
+    def _never(prompt: str, aspect: str = "4:5") -> bytes:
+        made.append(prompt)
+        raise AssertionError("картинку нарисовали второй раз")
+
+    was = imagegen.make
+    try:
+        imagegen.make = _once
+        first = [cut.Slide(phrase="без вас", kind="art", art="куб на столе")]
+        asyncio.run(panelshot.draw(b4, first, color="#111", accent="#C97C5D"))
+        check("первый раз картинка рисуется", len(made) == 1, str(made))
+        check("нарисованное легло файлом",
+              first[0].image is not None and first[0].image.is_file(),
+              str(first[0].image))
+
+        imagegen.make = _never
+        again = [cut.Slide(phrase="без вас", kind="art", art="куб на столе")]
+        asyncio.run(panelshot.draw(b4, again, color="#111", accent="#C97C5D"))
+        check("тот же бриф второй раз не рисуется, берётся готовый файл",
+              again[0].image == first[0].image, str(again[0].image))
+
+        other = [cut.Slide(phrase="без вас", kind="art", art="другой куб")]
+        imagegen.make = _once
+        asyncio.run(panelshot.draw(b4, other, color="#111", accent="#C97C5D"))
+        check("другой бриф рисуется своей картинкой",
+              other[0].image != first[0].image, str(other[0].image))
+    finally:
+        imagegen.make = was
 
 
     print("\n29. Замена словами не собирает ролик заново")

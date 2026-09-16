@@ -952,6 +952,19 @@ def _respan(run: list[dict], dst: str) -> list[dict]:
             for i, p in enumerate(parts)]
 
 
+def relex_heard(words: list[Word], rules: list[tuple[str, str]]) -> list[Word]:
+    """Услышанное по словарю бренда, теми же объектами.
+
+    `relex` работает со словарями — это форма субтитров. Ролям же нужно
+    услышанное с исходными метками, а оно живёт в `Word`, поэтому тут
+    перекладка туда и обратно, а правило замены остаётся одно.
+    """
+    fixed, _ = relex([{"text": w.text, "start": w.start, "end": w.end}
+                      for w in words], rules)
+    return [Word(str(w["text"]), float(w["start"]), float(w["end"]))
+            for w in fixed]
+
+
 def relex(words: list[dict],
           rules: list[tuple[str, str]]) -> tuple[list[dict], int]:
     """Пословный транскрипт → он же с исправлениями словаря.
@@ -985,6 +998,12 @@ def relex(words: list[dict],
             i += 1
             continue
         n, dst = hit
+        # Знаки препинания `norm` не видит, поэтому в совпадение затекает
+        # и одинокое тире, стоящее словом: whisper отбивает им паузу.
+        # Приклеенное к замене, оно выходит в кадр как «CLAUDE– ЭТО».
+        # Тире — соседнее слово, а не хвост этого, и идёт своим ходом.
+        while n > 1 and not _WORD_RX.search(str(words[i + n - 1]["text"])):
+            n -= 1
         out.extend(_respan(words[i:i + n], dst))
         fixed += n
         i += n

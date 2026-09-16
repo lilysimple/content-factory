@@ -150,6 +150,11 @@ class Reel:
     # применяется к нему заново на правке, а границы Монтажёра
     # приходят уже после расшифровки и режут те же слова.
     heard: list[Any] = field(default_factory=list)
+    # То же услышанное, но по словарю бренда. Ролям отдаётся оно:
+    # Монтажёр, читая сырое, спотыкается о «клот» и «clot» и уносит
+    # огрех расшифровки в заголовок темы, откуда он едет на обложку.
+    # Сырое при этом никуда не девается — на нём стоит правка словаря.
+    said: list[Any] = field(default_factory=list)
     subs: list[dict[str, Any]] = field(default_factory=list)
     piece: tuple[float, float] | None = None
     face: footage.Face | None = None
@@ -1349,6 +1354,7 @@ async def analyse(reel: Reel, *, say=None,
     # пополниться правкой человека, и тогда он применяется к тому же
     # транскрипту заново, без второй расшифровки.
     reel.heard = words
+    reel.said = footage.relex_heard(words, rules or [])
     reel.subs = footage.cut_words(words, reel.cuts)
     _relex(reel, rules or [])
 
@@ -1473,7 +1479,7 @@ async def bounds(chat_id: int, reel: Reel, *, ask: str = "",
     if say:
         await say("Слушаю, где дубль начинается и где кончается.")
     try:
-        frags, lost = await cut.fragments(chat_id, reel.heard,
+        frags, lost = await cut.fragments(chat_id, reel.said or reel.heard,
                                           reel.probe.duration,
                                           whole=True, ask=ask)
     except Exception as e:                                   # noqa: BLE001
@@ -1530,7 +1536,7 @@ async def _panel(chat_id: int, reel: Reel, *, ask: str = "",
     art = imagegen.ready()
     try:
         slides, lost, cover = await cut.panel(
-            chat_id, reel.heard, ask=ask,
+            chat_id, reel.said or reel.heard, ask=ask,
             materials=[d for d, _ in shown], art=art)
     except Exception as e:                                   # noqa: BLE001
         log.warning("панель не пришла: %s", e)
