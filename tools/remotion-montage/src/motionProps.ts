@@ -153,6 +153,11 @@ export const motionPropsSchema = z.object({
   coverAccent: z.array(z.string()).default([]),
   coverLogoPath: z.string().optional(),
   coverName: z.string().optional(),
+  // Куда лёг заголовок и на сколько отступил от своего края. Считает
+  // питон по рамке лица (`montage.place_plates`): на портретном дубле
+  // лицо стоит сверху, и заголовок уходит вниз. Здесь только рисование.
+  coverTitleAnchor: z.enum(['top', 'bottom']).default('top'),
+  coverTitleInset: z.number().default(0),
 
   width: z.number().default(1080),
   height: z.number().default(1920),

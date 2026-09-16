@@ -1677,6 +1677,72 @@ COVER_FILE = "montage/cover.md"
 PLATE_CHARS = 22          # строка плашки: длиннее — кегль падает, не читается
 PLATE_LINES = 3
 
+# Геометрия обложки сплита повторяет `SplitCover.tsx` в долях ширины
+# холста: там те же числа, только в CSS. Считаем здесь по той же
+# причине, что и у обычной обложки, — блок заголовка стоит сверху, а на
+# портретном дубле сверху лицо, и текст ложится человеку на лоб молча.
+# Композиция про лицо не знает вовсе, рамку лица знает питон.
+PLATE_TOP = 0.10          # отступ знака от верха холста
+PLATE_GAP = 0.022         # воздух между плашками
+PLATE_BADGE = 0.136       # высота плашки со знаком: 0.1 кадра + 2 × 0.018 поля
+PLATE_TAIL = 0.01         # отбивка под знаком, `marginBottom` в композиции
+PLATE_SIZE = 0.066        # кегль строки заголовка
+PLATE_BOX = 1.4           # высота плашки: 1.12 интерлиньяж + 2 × 0.14 поля
+
+
+def plate_block(count: int, width: int, *, badge: bool) -> tuple[float, float]:
+    """Заголовок сплита сверху: где он начинается и какой он высоты, в px.
+
+    Повторяет колонку `SplitCover.tsx`: знак, отбивка, плашки через
+    `gap`. Обе цифры нужны одному — `place_plates`.
+    """
+    top = width * PLATE_TOP
+    if badge:
+        top += width * (PLATE_BADGE + PLATE_TAIL + PLATE_GAP)
+    block = (count * width * PLATE_SIZE * PLATE_BOX
+             + max(0, count - 1) * width * PLATE_GAP)
+    return top, block
+
+
+def place_plates(count: int, canvas: tuple[int, int],
+                 band: tuple[float, float] | None, *,
+                 badge: bool = False) -> dict[str, Any]:
+    """Куда лечь заголовку сплита, чтобы он не перекрыл лицо.
+
+    `band` — полоса лица на холсте в долях высоты, та же, что считает
+    `cover_crop`. Нет лица — заголовок стоит под знаком, как стоял.
+    Отдаёт якорь, отступ от его края и строку «не сошлось», если увести
+    текст оказалось некуда.
+
+    Знак остаётся наверху всегда: он маленький, и в сетке профиля ролик
+    узнаётся по нему. Уезжает только заголовок.
+    """
+    w, h = canvas
+    top, block = plate_block(count, w, badge=badge)
+    out: dict[str, Any] = {"anchor": "top", "inset": round(top), "note": None}
+    if not band or count <= 0:
+        return out
+
+    # Кадр въезжает с 1.06 до 1, и полоса лица в первые кадры чуть выше
+    # и крупнее. Разница — доли процента высоты, её накрывает FACE_PAD.
+    face_top, face_bottom = band[0] * h, band[1] * h
+    if top + block <= face_top - h * FACE_PAD:
+        return out                            # под знаком и выше лица
+
+    edge = h * COVER_EDGE
+    below = (h - edge) - (face_bottom + h * FACE_PAD)
+    if block <= below:
+        # Под лицом на портретном дубле обычно вся нижняя треть.
+        room = h - (face_bottom + h * FACE_PAD) - block
+        out["anchor"] = "bottom"
+        out["inset"] = round(min(h * COVER_INSET, max(edge, room)))
+        return out
+
+    out["note"] = ("заголовок обложки лёг у лица: свободной полосы под ним "
+                   "не хватило. Стоит снять дубль, где лицо не по центру, "
+                   "или задать обложку у Дизайнера")
+    return out
+
 
 def cover_default(b) -> tuple[str, str]:
     """Знак бренда по умолчанию: `logo: адрес` и `name: имя` в файле бренда.
@@ -1737,10 +1803,12 @@ async def _split_cover(reel: Reel, b, size: tuple[int, int]) -> None:
         reel.findings.append(shot.note)
     reel.still = shot.path
     focus = (0.5, 0.35)
+    band = None
     if shot.face:
-        fx, fy, _, _ = cover_crop(shot.face,
-                                  (reel.probe.width, reel.probe.height), size)
+        fx, fy, top, bottom = cover_crop(
+            shot.face, (reel.probe.width, reel.probe.height), size)
         focus = (round(fx, 4), round(fy, 4))
+        band = (top, bottom)
 
     url = str(info.get("url") or "").strip()
     name = str(info.get("name") or "").strip()
@@ -1754,9 +1822,14 @@ async def _split_cover(reel: Reel, b, size: tuple[int, int]) -> None:
             reel.findings.append(f"знака на обложке не будет — {e}")
 
     accent = [str(w).strip() for w in info.get("accent") or [] if str(w).strip()]
+    lines = plate_lines(title)
+    spot = place_plates(len(lines), size, band, badge=bool(logo or name))
+    if spot["note"]:
+        reel.findings.append(spot["note"])
     reel.split_cover = {
         "still": shot.path, "focus": focus, "logo": logo, "name": name,
-        "lines": plate_lines(title), "accent": accent}
+        "lines": lines, "accent": accent,
+        "anchor": spot["anchor"], "inset": spot["inset"]}
 
 
 def _cover_props(reel: Reel) -> dict[str, Any]:
@@ -1771,6 +1844,10 @@ def _cover_props(reel: Reel) -> dict[str, Any]:
         "coverFocus": {"x": c["focus"][0], "y": c["focus"][1]},
         "coverLines": list(c["lines"]),
         "coverAccent": list(c["accent"]),
+        # Куда лёг заголовок, считает `place_plates` по рамке лица.
+        # Композиция только рисует — как и у обычной обложки.
+        "coverTitleAnchor": c.get("anchor", "top"),
+        "coverTitleInset": c.get("inset", 0),
     }
     if c.get("logo"):
         out["coverLogoPath"] = f"cover-logo-{tid}{Path(c['logo']).suffix}"

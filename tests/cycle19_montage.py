@@ -1187,18 +1187,50 @@ def panel() -> None:
     check("файла нет — знака нет, не поломка",
           montage.cover_default(_CB("")) == ("", ""), "пусто")
 
+    # Заголовок сплита стоит сверху, и на портретном дубле сверху лицо.
+    # Живой прогон 2026-09-16 показал ровно это: три плашки лёгли на лоб.
+    plates = montage.plate_lines("Большинство агентов, которые вам продают, "
+                                 "не нужны")
+    canvas16 = (1080, 1920)
+    top16, block16 = montage.plate_block(len(plates), 1080, badge=True)
+    free = montage.place_plates(len(plates), canvas16, None, badge=True)
+    check("без лица заголовок остаётся под знаком",
+          free["anchor"] == "top" and abs(free["inset"] - top16) <= 1,
+          str(free))
+
+    # Лицо в верхней трети кадра, как на вертикальном дубле с рук.
+    face16 = montage.place_plates(len(plates), canvas16, (0.194, 0.396),
+                                  badge=True)
+    check("лицо сверху — заголовок уходит вниз", face16["anchor"] == "bottom",
+          str(face16))
+    check("заголовок кончил лицо ниже рамки",
+          1920 - face16["inset"] - block16 > 0.396 * 1920,
+          f"{face16['inset']} {block16:.0f}")
+    check("ушедший вниз заголовок не съехал за край",
+          face16["inset"] >= round(1920 * montage.COVER_EDGE), str(face16))
+
+    # Лицо во весь кадр: увести заголовок некуда, и это говорится строкой.
+    all16 = montage.place_plates(len(plates), canvas16, (0.03, 0.99),
+                                 badge=True)
+    check("лицо во весь кадр — честная строка", bool(all16["note"]),
+          str(all16["note"]))
+
     creel = montage.Reel(theme={"id": "t-cov"}, video=harness.TMP / "x.mp4")
     check("без обложки первого кадра нет",
           montage._cover_props(creel) == {"introSeconds": 0.0}, "нет")
     creel.split_cover = {"still": harness.TMP / "s.png", "focus": (0.4, 0.3),
                          "logo": harness.TMP / "l.svg", "name": "Claude",
-                         "lines": ["Почему ИИ агенты"], "accent": ["ИИ"]}
+                         "lines": ["Почему ИИ агенты"], "accent": ["ИИ"],
+                         "anchor": "bottom", "inset": 211}
     cp = montage._cover_props(creel)
     check("обложка едет в props с кадром, знаком и первым кадром",
           cp["introSeconds"] == montage.COVER_SECONDS
           and cp["coverPath"] == "cover-t-cov.png"
           and cp["coverLogoPath"] == "cover-logo-t-cov.svg"
           and cp["coverFocus"] == {"x": 0.4, "y": 0.3}, str(cp))
+    check("место заголовка едет в props вместе с обложкой",
+          cp["coverTitleAnchor"] == "bottom" and cp["coverTitleInset"] == 211,
+          str(cp))
 
     print("\n45д. Лицо в кадре с первых секунд")
     firsts, why_full = montage.lay(reel, [

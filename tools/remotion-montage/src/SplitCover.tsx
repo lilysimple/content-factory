@@ -17,6 +17,11 @@ const EASE = Easing.bezier(0.16, 1, 0.3, 1);
 // белая плашка со знаком и именем продукта, под ней заголовок на белых
 // плашках. Слова из `accent` — цветом бренда. В сетке профиля ролик
 // узнаётся по человеку и знаку, а панели там не видно вовсе.
+//
+// Знак стоит наверху всегда, а заголовок — там, где ему велел питон:
+// `titleAnchor` и `titleInset` считает `montage.place_plates` по рамке
+// лица. Про лицо здесь не знают ничего, и знать не должны: рамку даёт
+// детектор, а не вёрстка.
 export const SplitCover: React.FC<{
   path: string;
   focus: {x: number; y: number};
@@ -25,13 +30,30 @@ export const SplitCover: React.FC<{
   accentColor: string;
   logoPath?: string;
   name?: string;
-}> = ({path, focus, lines, accent, accentColor, logoPath, name}) => {
+  titleAnchor?: 'top' | 'bottom';
+  titleInset?: number;
+}> = ({
+  path,
+  focus,
+  lines,
+  accent,
+  accentColor,
+  logoPath,
+  name,
+  titleAnchor = 'top',
+  titleInset = 0,
+}) => {
   const frame = useCurrentFrame();
   const {fps, width} = useVideoConfig();
   const pop = spring({frame, fps, config: {damping: 15, mass: 0.6}});
   const marks = new Set(accent.map((w) => w.toLowerCase()));
   const plain = (w: string) => w.toLowerCase().replace(/[.,!?:;«»"()]/g, '');
   const size = width * 0.066;
+  const badge = Boolean(logoPath || name);
+  // Питон отступа не прислал — заголовок встаёт под знаком, как встал бы
+  // без расчёта. Числа те же, что в `montage.plate_block`.
+  const auto = width * (badge ? 0.1 + 0.136 + 0.01 + 0.022 : 0.1);
+  const inset = titleInset > 0 ? titleInset : auto;
 
   return (
     <AbsoluteFill>
@@ -52,10 +74,9 @@ export const SplitCover: React.FC<{
           justifyContent: 'flex-start',
           alignItems: 'center',
           paddingTop: width * 0.1,
-          gap: width * 0.022,
         }}
       >
-        {logoPath || name ? (
+        {badge ? (
           <div
             style={{
               display: 'flex',
@@ -93,6 +114,16 @@ export const SplitCover: React.FC<{
             ) : null}
           </div>
         ) : null}
+      </AbsoluteFill>
+      <AbsoluteFill
+        style={{
+          justifyContent: titleAnchor === 'top' ? 'flex-start' : 'flex-end',
+          alignItems: 'center',
+          paddingTop: titleAnchor === 'top' ? inset : 0,
+          paddingBottom: titleAnchor === 'top' ? 0 : inset,
+          gap: width * 0.022,
+        }}
+      >
         {lines.map((line, i) => {
           const at = fps * (0.12 + i * 0.08);
           const show = interpolate(frame, [at, at + fps * 0.3], [0, 1], {

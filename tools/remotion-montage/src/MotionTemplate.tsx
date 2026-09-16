@@ -58,6 +58,8 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
             accentColor={props.accentColor}
             logoPath={props.coverLogoPath}
             name={props.coverName}
+            titleAnchor={props.coverTitleAnchor}
+            titleInset={props.coverTitleInset}
           />
         </Sequence>
       ) : null}
