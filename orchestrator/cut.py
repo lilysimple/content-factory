@@ -194,18 +194,6 @@ async def fragments(chat_id: int, words: list[Any], duration: float, *,
     prompt = ("## Задача\n\n" + task
               + "\n\nВремя фрагментов в секундах от начала записи.\n\n"
               "## Расшифровка\n\n" + transcript(words))
-    materials = materials or []
-    if materials:
-        prompt += ("\n\n## Материалы из альбома\n\n"
-                   "Прислал человек вместе с дублем, по порядку. Поставь "
-                   "каждый на свою фразу блоком `media`.\n\n"
-                   + "\n".join(f"{i}. {m}" for i, m in
-                               enumerate(materials, 1)))
-    else:
-        prompt += "\n\n## Материалы из альбома\n\nНе прислали."
-    prompt += ("\n\n## Картинки по теме\n\n"
-               + (f"Доступны, не больше {ART_MAX} на ролик."
-                  if art else "Недоступны: блок `art` не ставь."))
     if (ask or "").strip():
         prompt += f"\n\n## Что сказал человек\n\n{ask.strip()}"
     prompt += "\n\nОтветь одним JSON-объектом в формате из твоей секции."
@@ -239,10 +227,16 @@ async def fragments(chat_id: int, words: list[Any], duration: float, *,
 
 PANEL_KINDS = ("card", "icon", "counter", "scale", "media", "art")
 # Картинок по теме на ролик. Каждая это вызов Nano Banana за деньги и
-# полминуты ожидания, а панель из одних картинок — слайд-шоу.
-ART_MAX = 3
-PANEL_WANT = 6               # на сорок секунд больше шести не читается
-PANEL_TOKENS = 4000
+# полминуты ожидания (три идут разом), поэтому потолок есть, но высокий:
+# около одной на шесть секунд ролика. Было три — решение человека 16.09.
+ART_MAX = 10
+# Блок каждые пять-семь секунд: на минуту ролика это десять-двенадцать.
+# Шесть блоков оставляли панель пустой по полминуты — решение человека
+# 16.09, после живого сплита: картинок на рилс нужно около десяти.
+PANEL_WANT = 14
+# Четырнадцать блоков с обложкой и мышлением не влезали бы в 4000: на
+# Opus 5 `max_tokens` считает мышление вместе с ответом, и JSON обрывался бы.
+PANEL_TOKENS = 8000
 SCALE_MIN = 2                # шкала с одной ступенью это не шкала
 
 PANEL_SCHEMA = {
@@ -272,8 +266,22 @@ PANEL_SCHEMA = {
             },
         },
         "notes": {"type": "array", "items": {"type": "string"}},
+        # Обложка сплита: заголовок на белых плашках, слова цветом и
+        # продукт, чей знак стоит сверху. Пишет роль, потому что это тот
+        # же выбор, что и панель, — что в записи главное.
+        "cover": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "accent": {"type": "array", "items": {"type": "string"}},
+                "url": {"type": "string"},
+                "name": {"type": "string"},
+            },
+            "required": ["title", "accent", "url", "name"],
+            "additionalProperties": False,
+        },
     },
-    "required": ["panel", "notes"],
+    "required": ["panel", "notes", "cover"],
     "additionalProperties": False,
 }
 
@@ -418,7 +426,8 @@ def _slides(raw: list[dict[str, Any]], *, materials: int = 0,
 async def panel(chat_id: int, words: list[Any], *,
                 want: int = PANEL_WANT, ask: str = "",
                 materials: list[str] | None = None,
-                art: bool = False) -> tuple[list[Slide], list[str]]:
+                art: bool = False
+                ) -> tuple[list[Slide], list[str], dict[str, Any]]:
     """Блоки панели сплита по расшифровке."""
     b = desk.brand(chat_id)
     if b is None:
@@ -458,4 +467,5 @@ async def panel(chat_id: int, words: list[Any], *,
                          materials=len(materials), art=art)
     lost += [str(n) for n in (data.get("notes") or []) if str(n).strip()]
     log.info("панель: взято %s блоков, отброшено %s", len(good), len(lost))
-    return good[:want], lost
+    cover = data.get("cover") if isinstance(data.get("cover"), dict) else {}
+    return good[:want], lost, cover

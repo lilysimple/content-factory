@@ -1,8 +1,10 @@
-import React from 'react';
+import React, {useLayoutEffect, useRef, useState} from 'react';
 import {Video} from '@remotion/media';
 import {
   AbsoluteFill,
   Easing,
+  continueRender,
+  delayRender,
   Freeze,
   Img,
   Sequence,
@@ -577,38 +579,73 @@ const Screen: React.FC<{
 };
 
 // Картинка по теме, когда записи экрана нет. Нарисованное стоит на месте,
-// поэтому движение даёт шаблон: предмет парит — медленный наезд, дрейф и
-// лёгкое покачивание, а края уходят в цвет панели, чтобы картинка не
-// читалась прямоугольником, вставленным поверх.
+// поэтому движение даёт шаблон, и его здесь несколько слоёв сразу, иначе
+// картинка читается слайдом:
+//
+// - вход: проявляется из расфокуса и наезжает пружиной;
+// - предмет парит — дрейф, покачивание и наклон в перспективе, будто его
+//   вертят в руках;
+// - по картинке проходит блик, раз в несколько секунд;
+// - за предметом дышит свечение акцентом бренда;
+// - края уходят в цвет панели, чтобы не читался вставленный прямоугольник.
 const Art: React.FC<{
   block: MotionBlock;
   panelColor: string;
   textColor: string;
   panelHeight: number;
-}> = ({block, panelColor, textColor, panelHeight}) => {
+  accentColor?: string;
+}> = ({block, panelColor, textColor, panelHeight, accentColor = '#ffffff'}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const sec = frame / fps;
   const life = Math.max(0.1, block.end - block.start);
   const t = Math.min(1, sec / life);
-  const pop = spring({frame, fps, config: {damping: 18, mass: 0.8}});
+  const pop = spring({frame, fps, config: {damping: 16, mass: 0.9}});
   const caption = block.lines[0];
 
+  const blur = interpolate(frame, [0, fps * 0.5], [18, 0], {
+    extrapolateLeft: 'clamp',
+    extrapolateRight: 'clamp',
+  });
+  // Блик: проходит за 0.9 с, повторяется каждые 3.2 с.
+  const sweep = ((sec + 0.6) % 3.2) / 0.9;
+  const glow = 0.35 + 0.25 * Math.sin(sec * 2.1);
+
   return (
-    <AbsoluteFill style={{overflow: 'hidden'}}>
+    <AbsoluteFill style={{overflow: 'hidden', perspective: panelHeight * 2.4}}>
       <AbsoluteFill
         style={{
-          scale: String(interpolate(pop, [0, 1], [1.18, 1.06]) + t * 0.08),
-          translate: `${Math.sin(sec * 0.7) * panelHeight * 0.012}px ${
-            Math.sin(sec * 1.1) * panelHeight * 0.018
+          background: `radial-gradient(circle at 50% 48%, ${accentColor} 0%, rgba(0,0,0,0) 45%)`,
+          opacity: glow * 0.35,
+        }}
+      />
+      <AbsoluteFill
+        style={{
+          scale: String(interpolate(pop, [0, 1], [1.3, 1.06]) + t * 0.12),
+          translate: `${Math.sin(sec * 0.9) * panelHeight * 0.025}px ${
+            Math.sin(sec * 1.3) * panelHeight * 0.03
           }px`,
-          rotate: `${Math.sin(sec * 0.5) * 0.8}deg`,
+          rotate: `${Math.sin(sec * 0.6) * 2.2}deg`,
+          transform: `rotateY(${Math.sin(sec * 0.8) * 9}deg) rotateX(${
+            Math.cos(sec * 0.7) * 6
+          }deg)`,
+          filter: `blur(${blur}px)`,
         }}
       >
         <Img
           src={staticFile(block.imagePath!)}
           style={{width: '100%', height: '100%', objectFit: 'cover'}}
         />
+        {sweep >= 0 && sweep <= 1 ? (
+          <AbsoluteFill
+            style={{
+              background:
+                'linear-gradient(105deg, rgba(255,255,255,0) 35%, rgba(255,255,255,0.28) 50%, rgba(255,255,255,0) 65%)',
+              translate: `${interpolate(sweep, [0, 1], [-120, 120])}% 0`,
+              mixBlendMode: 'screen',
+            }}
+          />
+        ) : null}
       </AbsoluteFill>
       <AbsoluteFill
         style={{
@@ -620,7 +657,9 @@ const Art: React.FC<{
           style={{
             justifyContent: 'flex-end',
             alignItems: 'center',
-            paddingBottom: panelHeight * 0.2,
+            // Подпись картинки держится выше полосы караоке: на 0.2 она
+            // стояла впритык к двухстрочной странице субтитра.
+            paddingBottom: panelHeight * 0.29,
           }}
         >
           <div
@@ -634,6 +673,10 @@ const Art: React.FC<{
                 extrapolateLeft: 'clamp',
                 extrapolateRight: 'clamp',
               }),
+              translate: `0 ${interpolate(pop, [0.4, 1], [panelHeight * 0.04, 0], {
+                extrapolateLeft: 'clamp',
+                extrapolateRight: 'clamp',
+              })}px`,
               whiteSpace: 'nowrap',
             }}
           >
@@ -727,6 +770,43 @@ const Card: React.FC<{
   );
 };
 
+// Текст блока не лезет на полосу караоке. Высоту здесь считать нечем:
+// длину строки, перенос и число пунктов знает только вёрстка. Поэтому
+// блок меряется готовым, и если выше отведённого — ужимается `zoom`, а не
+// `scale`: `zoom` пересчитывает раскладку, и ужатый блок встаёт по
+// центру своего места, а не висит сдвинутым. Кадр ждёт замера
+// (`delayRender`), иначе первый кадр блока снялся бы ещё неужатым.
+//
+// Нашёл живой монтаж 15.09: подпись счётчика в две строки и третий пункт
+// списка уходили под плашку субтитра.
+const FIT_MIN = 0.55;
+
+const Fit: React.FC<{max: number; children: React.ReactNode}> = ({
+  max,
+  children,
+}) => {
+  const ref = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(1);
+  const [handle] = useState(() => delayRender('Панель: замер блока'));
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el) {
+      const natural = el.scrollHeight;
+      if (natural > max) {
+        setZoom(Math.max(FIT_MIN, max / natural));
+      }
+    }
+    continueRender(handle);
+  }, [handle, max]);
+
+  return (
+    <div ref={ref} style={{zoom, display: 'flex', justifyContent: 'center', width: '100%'}}>
+      {children}
+    </div>
+  );
+};
+
 const BlockView: React.FC<{
   block: MotionBlock;
   panelHeight: number;
@@ -766,7 +846,9 @@ const BlockView: React.FC<{
         // Низ панели отдан караоке: строка садится на шов и на длинной
         // странице растёт вверх — тремя строками она накрывала подпись
         // под счётчиком. Содержимое блока держится выше этой полосы.
-        paddingBottom: panelHeight * 0.17,
+        // 0.2, а не 0.17: страница караоке в две строки капсом с обводкой
+        // занимает 0.19 панели, и подпись блока касалась её сверху.
+        paddingBottom: panelHeight * 0.2,
       }}
     >
       {block.imagePath && block.kind === 'card' ? (
@@ -776,6 +858,7 @@ const BlockView: React.FC<{
       {block.kind === 'art' && block.imagePath ? (
         <Art
           block={block}
+          accentColor={accentColor}
           panelColor={panelColor}
           textColor={textColor}
           panelHeight={panelHeight}
@@ -826,7 +909,12 @@ const BlockView: React.FC<{
             // верхний край панели.
             maxHeight={panelHeight * (block.kicker ? 0.5 : 0.62)}
           />
-        ) : block.kind === 'icon' ? (
+        ) : (
+          // Место под текст: от надзаголовка до полосы караоке. Блок
+          // стоит по центру с отступом под надзаголовок, поэтому с ним
+          // места почти вдвое меньше, чем без него.
+          <Fit max={panelHeight * (block.kicker ? 0.43 : 0.68)}>
+        {block.kind === 'icon' ? (
           <IconCard
             block={block}
             cardColor={cardColor}
@@ -856,6 +944,8 @@ const BlockView: React.FC<{
             panelHeight={panelHeight}
             maxHeight={panelHeight * (block.kicker ? 0.6 : 0.84)}
           />
+        )}
+          </Fit>
         )}
       </div>
     </AbsoluteFill>

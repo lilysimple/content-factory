@@ -1154,14 +1154,112 @@ def panel() -> None:
     check("картинка слайда переезжает на блок и переживает пересборку",
           laid and laid[0].image == logo, str(laid))
 
+    print("\n45е. Обложка сплита")
+    lines = montage.plate_lines("Почему ИИ агенты бесполезны и что делать вместо команды из семи")
+    check("заголовок режется на плашки по словам и не шире потолка",
+          len(lines) <= montage.PLATE_LINES
+          and all(len(x) <= montage.PLATE_CHARS for x in lines[:-1]),
+          str(lines))
+    check("хвост заголовка не теряется",
+          " ".join(lines).split() ==
+          "Почему ИИ агенты бесполезны и что делать вместо команды из семи".split(),
+          str(lines))
+
+    class _CB:
+        def __init__(self, text):
+            self.text = text
+        def read(self, rel):
+            return self.text
+    check("знак бренда по умолчанию читается из файла",
+          montage.cover_default(_CB("# c\nlogo: claude.ai\nname: Claude\n"))
+          == ("claude.ai", "Claude"), "cover.md")
+    check("файла нет — знака нет, не поломка",
+          montage.cover_default(_CB("")) == ("", ""), "пусто")
+
+    creel = montage.Reel(theme={"id": "t-cov"}, video=harness.TMP / "x.mp4")
+    check("без обложки первого кадра нет",
+          montage._cover_props(creel) == {"introSeconds": 0.0}, "нет")
+    creel.split_cover = {"still": harness.TMP / "s.png", "focus": (0.4, 0.3),
+                         "logo": harness.TMP / "l.svg", "name": "Claude",
+                         "lines": ["Почему ИИ агенты"], "accent": ["ИИ"]}
+    cp = montage._cover_props(creel)
+    check("обложка едет в props с кадром, знаком и первым кадром",
+          cp["introSeconds"] == montage.COVER_SECONDS
+          and cp["coverPath"] == "cover-t-cov.png"
+          and cp["coverLogoPath"] == "cover-logo-t-cov.svg"
+          and cp["coverFocus"] == {"x": 0.4, "y": 0.3}, str(cp))
+
+    print("\n45д. Лицо в кадре с первых секунд")
+    firsts, why_full = montage.lay(reel, [
+        cut.Slide(phrase="опиши что", kind="art", art="a cube", full=True,
+                  image=harness.TMP / "a.png"),
+        cut.Slide(phrase="три недели", kind="card", lines=["слова"],
+                  full=True)])
+    check("первый блок на весь кадр встаёт на половину и назван",
+          not firsts[0].full and any("первые секунды" in n or
+                                     "первых секунд" in n for n in why_full),
+          str(why_full))
+    check("слова на весь кадр не разворачиваются",
+          not firsts[1].full, str(firsts[1]))
+    later = montage.lay(reel, [
+        cut.Slide(phrase="опиши что", kind="card", lines=["раз"]),
+        cut.Slide(phrase="три недели", kind="art", art="a cube", full=True,
+                  image=harness.TMP / "a.png")])[0]
+    check("картинка не первым блоком на весь кадр остаётся",
+          later[1].full, str(later[1]))
+
+    print("\n45г. Окно головы сплита стоит по лицу")
+    # Вертикальный дубль 1080×1920 в окне 1080×1060: видна 0.552 высоты.
+    face = footage.Face(x=0.35, y=0.15, w=0.3, h=0.17, conf=0.9)
+    track = montage.head_track([(2.0, face), (9.0, face)],
+                               (1080, 1920), (1080, 1920))
+    seen = 1920 * (1 - montage.MOTION_SPLIT) / 1920
+    top = track[0].y - seen / 2
+    at = (face.cy - top) / seen
+    check("центр лица встаёт на заданную долю окна, а не на середину",
+          abs(at - montage.HEAD_AT) < 0.01, f"{at:.3f}")
+    check("по ширине окно идёт за лицом", track[0].x == round(face.cx, 4),
+          str(track[0]))
+    check("лиц нет — трека нет, остаётся движение",
+          montage.head_track([], (1080, 1920), (1080, 1920)) == [], "пусто")
+
+    print("\n45в. Границы дубля не знают про панель")
+    # Нашёл живой монтаж 15.09: блок про материалы альбома уехал заменой
+    # строки и в промпт границ, где переменной `materials` нет, — границы
+    # падали на каждом дубле, и ролик шёл целиком без хука.
+    seen: dict[str, str] = {}
+
+    class _Stop(Exception):
+        pass
+
+    async def _peek(role, chat_id, prompt, **kw):
+        seen["prompt"] = prompt
+        raise _Stop
+
+    real_ask, agent.ask = agent.ask, _peek
+    try:
+        asyncio.run(cut.fragments(CHAT, [], 30.0, whole=True))
+        err = "модель не позвана"
+    except _Stop:
+        err = ""
+    except Exception as e:                                   # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+    finally:
+        agent.ask = real_ask
+    check("границы дубля доходят до модели без ошибки", not err, err)
+    check("в промпте границ нет разделов панели",
+          "Материалы из альбома" not in seen.get("prompt", "")
+          and "Картинки по теме" not in seen.get("prompt", ""),
+          seen.get("prompt", "")[-200:])
+
     print("\n45б. Альбом к дублю и картинки по теме")
     blocks_raw = [
         {"phrase": "просто пишешь ему", "kind": "media", "media": 1},
         {"phrase": "материала нет", "kind": "media", "media": 4},
         {"phrase": "стеклянный куб", "kind": "art",
          "art": "a translucent glass cube", "lines": ["Куб"]},
-        {"phrase": "второй образ", "kind": "art", "art": "a brain"},
-        {"phrase": "третий образ", "kind": "art", "art": "a key"},
+        *[{"phrase": f"образ {i}", "kind": "art", "art": f"thing {i}"}
+          for i in range(2, cut.ART_MAX + 1)],
         {"phrase": "четвёртый образ", "kind": "art", "art": "a lock",
          "lines": ["Замок"]},
         {"phrase": "без брифа", "kind": "art", "art": ""},

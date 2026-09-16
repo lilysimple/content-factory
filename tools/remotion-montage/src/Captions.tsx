@@ -21,9 +21,10 @@ export type CaptionStyle = {
   top?: number;
   fontSize?: number;
   uppercase?: boolean;
-  // Плотная чёрная плашка по тексту вместо градиента во весь кадр.
-  // На шве градиент не работает: он затемняет низ панели, и склейка
-  // двух картинок превращается в грязное пятно.
+  // Без градиента во весь кадр: на шве он затемняет низ панели, и
+  // склейка двух картинок превращается в грязное пятно. Подложки у строки
+  // тоже нет — чёрная плашка читалась титром поверх ролика, — поэтому
+  // слова держат плотная обводка и тень.
   plate?: boolean;
   // Строка висит **над** линией `top`, а не под ней. Нужно на сплите:
   // под швом начинается дубль, и в вертикальном кадре лицо стоит ровно
@@ -84,9 +85,11 @@ const CaptionPage: React.FC<{
           textTransform: look.uppercase ? 'uppercase' : undefined,
           ...(look.plate
             ? {
-                background: '#000',
-                padding: '0.10em 0.28em',
-                boxDecorationBreak: 'clone',
+                background: 'transparent',
+                textShadow:
+                  '0 3px 14px rgba(0,0,0,0.9), 0 0 4px rgba(0,0,0,0.95)',
+                WebkitTextStroke: '0.09em rgba(0,0,0,0.85)',
+                paintOrder: 'stroke fill',
               }
             : {
                 textShadow:

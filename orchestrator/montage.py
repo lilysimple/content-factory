@@ -159,6 +159,9 @@ class Reel:
     # Обложка пришла от Дизайнера свёрстанной целиком. Тогда свой текст
     # на первый кадр монтаж не кладёт: слова там уже есть.
     dressed: bool = False
+    # Обложка сплита: кадр с лицом, знак продукта и заголовок на плашках.
+    # Отдельно от `lines`/`anchor` обычной обложки — вёрстка другая.
+    split_cover: dict[str, Any] = field(default_factory=dict)
     pages: list[dict[str, Any]] = field(default_factory=list)
     # Блоки панели до привязки ко времени. Живут на ролике, а не в
     # аргументе рендера: правка субтитров пересобирает ролик заново,
@@ -1015,6 +1018,11 @@ async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
 
 MOTION_SPLIT = 0.448        # замер с кадра примера: 860 из 1920
 MOTION_HEADS = ("top", "bottom")
+
+# Центр лица в окне головы — на этой доле его высоты сверху. Ниже
+# середины окна лицо уходит к шву и под плашку субтитра, выше трети —
+# макушка упирается в край. Над лицом остаётся воздух, под ним руки.
+HEAD_AT = 0.38
 # Чем блок занят. `card` — карточка со скрином или строками; остальные
 # три двигаются сами: знак прилетает пружиной, число набирается от нуля,
 # бегунок едет по ступеням. Картинка себя анимировать не умеет.
@@ -1060,6 +1068,8 @@ def speak_at(reel: Reel, phrase: str) -> float | None:
     """
     return footage.anchor(reel.subs, phrase)
 
+
+FULL_KINDS = ("media", "art")
 
 # Короче этого блок не читается: полторы секунды на карточку со
 # строкой — это мигание, а не вторая дорожка.
@@ -1115,11 +1125,24 @@ def lay(reel: Reel, slides: list[Any]) -> tuple[list[Block], list[str]]:
             items.append((text, when))
         blocks.append(Block(
             start=at, end=end, kicker=s.kicker, lines=list(s.lines),
-            items=items, full=s.full, kind=s.kind, image=s.image,
+            items=items, kind=s.kind, image=s.image,
+            # На весь кадр — только то, что смотрится само: запись и
+            # картинка по теме. Слова на весь кадр прятали голову на
+            # десяток секунд, и ролик открывался без человека.
+            full=s.full and s.kind in FULL_KINDS,
             video=s.video, video_len=s.video_len, media_size=s.media_size,
             value=s.value,
             value_at=speak_at(reel, s.value_phrase) if s.value_phrase
             else None))
+
+    # Лицо должно быть в кадре с первых секунд: зритель решает, смотреть
+    # ли дальше, по человеку, а не по панели. Первый блок на весь кадр
+    # остаётся на своей половине. Нашёл живой сплит 15.09: разгон словами
+    # на весь кадр держал голову скрытой тринадцать секунд.
+    if blocks and blocks[0].full:
+        blocks[0].full = False
+        lost.append("первый блок показан на половине, а не на весь кадр: "
+                    "лицо в кадре с первых секунд")
 
     # Дырка в начале — пустая панель на первых секундах, и выглядит она
     # поломкой. Тянем первый блок к нулю, а не заводим пустой.
@@ -1226,9 +1249,10 @@ def motion_props(reel: Reel, blocks: list[Block], size: tuple[int, int], *,
         "width": w,
         "height": h,
         "fps": fps,
-        # Первого кадра у сплита нет: обложка это отдельная работа
-        # Дизайнера, а панель начинается с первого слова.
+        # Первый кадр сплита — его обложка (`_split_cover`): кадр с лицом,
+        # знак и заголовок. Нет её — панель начинается с первого слова.
         "outroSeconds": 1.8 if reel.cta else 0.0,
+        **_cover_props(reel),
     }
     return {k: v for k, v in props.items() if v is not None}
 
@@ -1249,8 +1273,13 @@ async def render_motion(reel: Reel, blocks: list[Block],
         src = blocks[i].video or blocks[i].image
         assert src is not None
         files[name] = src
+    if props.get("coverPath"):
+        files[props["coverPath"]] = reel.split_cover["still"]
+    if props.get("coverLogoPath"):
+        files[props["coverLogoPath"]] = reel.split_cover["logo"]
 
-    frames = max(1, round((reel.cuts.total + props["outroSeconds"]) * fps))
+    frames = max(1, round((reel.cuts.total + props["outroSeconds"]
+                           + props["introSeconds"]) * fps))
 
     with _staged(files):
         return await _render("Motion", props, key=reel.theme["id"],
@@ -1500,9 +1529,9 @@ async def _panel(chat_id: int, reel: Reel, *, ask: str = "",
     shown = await _describe(items)
     art = imagegen.ready()
     try:
-        slides, lost = await cut.panel(chat_id, reel.heard, ask=ask,
-                                       materials=[d for d, _ in shown],
-                                       art=art)
+        slides, lost, cover = await cut.panel(
+            chat_id, reel.heard, ask=ask,
+            materials=[d for d, _ in shown], art=art)
     except Exception as e:                                   # noqa: BLE001
         log.warning("панель не пришла: %s", e)
         reel.findings.append(f"панели не будет: блоки не пришли "
@@ -1552,6 +1581,7 @@ async def _panel(chat_id: int, reel: Reel, *, ask: str = "",
         return
     reel.slides = slides
     reel.blocks = blocks
+    reel.split_cover = dict(cover)
     if say:
         await say(f"Панель: {len(blocks)} блока по речи.")
 
@@ -1584,6 +1614,168 @@ async def _describe(items: list[album.Item]) -> list[tuple[str, dict[str, Any]]]
         if item.caption:
             what += f" — подпись: «{item.caption[:120]}»"
         out.append((what, meta))
+    return out
+
+
+def head_track(points: list[tuple[float, "footage.Face"]],
+               video: tuple[int, int], size: tuple[int, int], *,
+               split: float = MOTION_SPLIT) -> list["footage.Focus"]:
+    """Трек окна головы в сплите: лицо на `HEAD_AT` высоты окна.
+
+    Чистая функция: стенд проверяет арифметику без детектора. Окно головы
+    — нижняя часть холста под панелью; видео вписано в него по большей
+    стороне, как в `Clip`, и видна только доля кадра. Фокус это центр
+    окна в долях исходного кадра, поэтому лицо поднимается в окне
+    сдвигом фокуса вниз на (0.5 − HEAD_AT) видимой высоты.
+    """
+    vw, vh = video
+    bw, bh = size[0], size[1] * (1 - split)
+    if not points or not vw or not vh:
+        return []
+    k = max(bw / vw, bh / vh)
+    seen_h = bh / (vh * k)
+    track = [footage.Focus(t, round(f.cx, 4),
+                           round(f.cy + (0.5 - HEAD_AT) * seen_h, 4), 1.0)
+             for t, f in points]
+    return footage._smooth(track, span=1)
+
+
+async def _head(reel: Reel, size: tuple[int, int]) -> None:
+    """Окно головы сплита — по лицу, а не по движению.
+
+    Не нашлось лица или детектора — остаётся трек активности, и это
+    называется: сплит с головой, срезанной по глаза, человек иначе
+    примет за поломку шаблона.
+    """
+    if reel.probe is None or reel.cuts is None:
+        return
+    try:
+        points = await footage.face_points(reel.video, reel.probe.duration,
+                                           TOOLS)
+    except (footage.NoVision, footage.NoFfmpeg) as e:
+        reel.findings.append(f"лицо для сплита не искали ({e}) — окно "
+                             "головы едет за движением")
+        return
+    track = head_track(points, (reel.probe.width, reel.probe.height), size)
+    if not track:
+        reel.findings.append("лица в дубле не нашлось — окно головы сплита "
+                             "едет за движением")
+        return
+    reel.focus = track
+    reel.pan = footage.cut_track(track, reel.cuts)
+
+
+# ── обложка сплита ────────────────────────────────────────────────────
+#
+# Первым кадром — полноразмерный кадр дубля с лицом, сверху белая плашка
+# со знаком продукта, под ней заголовок на белых плашках, слова цветом
+# бренда. Так сделаны обложки референса, и в сетке профиля ролик
+# узнаётся по человеку и по знаку, а не по панели, которой там не видно.
+
+COVER_SECONDS = 1.2
+COVER_FILE = "montage/cover.md"
+PLATE_CHARS = 22          # строка плашки: длиннее — кегль падает, не читается
+PLATE_LINES = 3
+
+
+def cover_default(b) -> tuple[str, str]:
+    """Знак бренда по умолчанию: `logo: адрес` и `name: имя` в файле бренда.
+
+    Роль называет продукт, когда он прозвучал. Не прозвучал — у бренда
+    свой постоянный знак на обложках: у lily-space это Claude. Файла нет —
+    обложка без знака, и это не поломка.
+    """
+    url = name = ""
+    for line in (b.read(COVER_FILE) or "").splitlines() if b else []:
+        key, _, value = line.partition(":")
+        if key.strip().lower() == "logo":
+            url = value.strip()
+        elif key.strip().lower() == "name":
+            name = value.strip()
+    return url, name
+
+
+def plate_lines(title: str, width: int = PLATE_CHARS,
+                most: int = PLATE_LINES) -> list[str]:
+    """Заголовок на плашки: по словам, не длиннее `width`, не больше `most`.
+
+    Не влезло в `most` — хвост дописывается в последнюю строку, а не
+    пропадает: обложка с оборванной мыслью хуже длинной плашки.
+    """
+    out: list[str] = []
+    for word in title.split():
+        if out and len(out[-1]) + 1 + len(word) <= width:
+            out[-1] += " " + word
+        else:
+            out.append(word)
+    if len(out) > most:
+        out = out[:most - 1] + [" ".join(out[most - 1:])]
+    return out
+
+
+async def _split_cover(reel: Reel, b, size: tuple[int, int]) -> None:
+    """Собрать обложку сплита. Не вышло — ролик идёт без неё, и это названо."""
+    if b is None or reel.probe is None:
+        return
+    info = reel.split_cover
+    title = str(info.get("title") or "").strip() or reel.hook or reel.title
+    if not title:
+        reel.findings.append("обложки нет: ни заголовка, ни хука")
+        reel.split_cover = {}
+        return
+
+    tid = reel.theme["id"]
+    try:
+        shot = await footage.cover_shot(
+            reel.video, reel.focus, reel.probe.duration,
+            TOOLS / f".still-{tid}.png", window=reel.piece, quiet=reel.quiet)
+    except footage.NoFfmpeg as e:
+        reel.findings.append(f"обложки нет: кадр не снялся ({e})")
+        reel.split_cover = {}
+        return
+    if shot.note:
+        reel.findings.append(shot.note)
+    reel.still = shot.path
+    focus = (0.5, 0.35)
+    if shot.face:
+        fx, fy, _, _ = cover_crop(shot.face,
+                                  (reel.probe.width, reel.probe.height), size)
+        focus = (round(fx, 4), round(fy, 4))
+
+    url = str(info.get("url") or "").strip()
+    name = str(info.get("name") or "").strip()
+    if not url:
+        url, name = cover_default(b)
+    logo = None
+    if url:
+        try:
+            logo = await panelshot.take(b, url, "icon")
+        except panelshot.NoShot as e:
+            reel.findings.append(f"знака на обложке не будет — {e}")
+
+    accent = [str(w).strip() for w in info.get("accent") or [] if str(w).strip()]
+    reel.split_cover = {
+        "still": shot.path, "focus": focus, "logo": logo, "name": name,
+        "lines": plate_lines(title), "accent": accent}
+
+
+def _cover_props(reel: Reel) -> dict[str, Any]:
+    """Обложка сплита в props. Пусто — первого кадра нет."""
+    c = reel.split_cover
+    if not c or not c.get("still"):
+        return {"introSeconds": 0.0}
+    tid = reel.theme["id"]
+    out: dict[str, Any] = {
+        "introSeconds": COVER_SECONDS,
+        "coverPath": f"cover-{tid}{Path(c['still']).suffix}",
+        "coverFocus": {"x": c["focus"][0], "y": c["focus"][1]},
+        "coverLines": list(c["lines"]),
+        "coverAccent": list(c["accent"]),
+    }
+    if c.get("logo"):
+        out["coverLogoPath"] = f"cover-logo-{tid}{Path(c['logo']).suffix}"
+    if c.get("name"):
+        out["coverName"] = c["name"]
     return out
 
 
@@ -1697,6 +1889,9 @@ async def build(chat_id: int, ask: str, *, say=None,
 
     if panel:
         await _panel(chat_id, reel, ask=ask, say=say)
+        if reel.blocks:
+            await _head(reel, size)
+            await _split_cover(reel, b, size)
 
     piece = None
     try:

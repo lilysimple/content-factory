@@ -872,6 +872,35 @@ async def cover_shot(video: Path, track: list[Focus], duration: float,
     return Shot(at, await still(video, at, out), face, note)
 
 
+FACE_TRACK_SHOTS = 10     # кадров на весь дубль: голова ходит медленно
+
+
+async def face_points(video: Path, duration: float, work: Path, *,
+                      n: int = FACE_TRACK_SHOTS) -> list[tuple[float, Face]]:
+    """Где лицо по ходу дубля: секунда записи и самое крупное лицо в кадре.
+
+    Нужно сплиту. Трек активности (`pan`) едет за движением, а в
+    говорящей голове движутся руки: в сплите 15.09 окно головы стояло на
+    груди, и лицо было срезано по глаза весь ролик. Кадр без лица просто
+    пропускается — пустой список значит, что лица не нашлось нигде.
+    """
+    start = STILL_SKIP
+    end = max(start, duration - 0.5)
+    times = ([round(start + (end - start) * (i + 0.5) / n, 2) for i in range(n)]
+             if end > start else [round(duration / 2, 2)])
+    work.mkdir(parents=True, exist_ok=True)
+    probes: list[Path] = []
+    try:
+        for i, t in enumerate(times):
+            probes.append(await still(video, t, work / f".face-{i}.png"))
+        found = await faces(probes)
+    finally:
+        for p in probes:
+            p.unlink(missing_ok=True)
+    return [(t, max(fs, key=lambda f: f.w * f.h))
+            for t, fs in zip(times, found) if fs]
+
+
 # ── словарь исправлений: что слышно → что сказано ─────────────────────
 #
 # Whisper слышит русскую речь, а бренд говорит именами: Claude, Remotion,

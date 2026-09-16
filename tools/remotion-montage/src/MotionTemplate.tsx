@@ -4,21 +4,25 @@ import {Captions} from './Captions';
 import {Clip} from './Clip';
 import {Panel} from './Panel';
 import {OutroCard} from './ReelTemplate';
+import {SplitCover} from './SplitCover';
 import type {MotionProps} from './motionProps';
 
 // Сборка сплита.
 //
-// Холст поделён швом на две половины: дубль и панель. Шов жёсткий, без
-// растушёвки, и это решение, а не упрощение — в разобранном примере он
-// тоже жёсткий. Мягкий переход между записью экрана и лицом читается как
-// брак склейки: глаз ищет, где кончается одна картинка, и не находит.
+// Холст поделён швом на две половины: дубль и панель. Шов мягкий: край
+// дубля растворяется в цвет панели на полосе `SEAM_FADE`. Жёсткая линия
+// читалась стыком двух разных роликов — решение человека 16.09, после
+// живого сплита.
 //
 // Субтитр садится ровно на шов и живёт плашкой. Градиент, которым он
 // отбит в `Reel`, здесь затемнял бы низ панели — то есть портил бы
 // картинку, ради которой панель и заведена.
 
+const SEAM_FADE = 0.045;   // доля высоты холста
+
 export const MotionTemplate: React.FC<MotionProps> = (props) => {
   const {fps, width, height} = useVideoConfig();
+  const introFrames = Math.round(props.introSeconds * fps);
 
   const panelHeight = Math.round(height * props.split);
   const videoHeight = height - panelHeight;
@@ -44,6 +48,20 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
 
   return (
     <AbsoluteFill style={{backgroundColor: props.panelColor}}>
+      {introFrames > 0 && props.coverPath ? (
+        <Sequence from={0} durationInFrames={introFrames} name="Обложка">
+          <SplitCover
+            path={props.coverPath}
+            focus={props.coverFocus}
+            lines={props.coverLines}
+            accent={props.coverAccent}
+            accentColor={props.accentColor}
+            logoPath={props.coverLogoPath}
+            name={props.coverName}
+          />
+        </Sequence>
+      ) : null}
+      <Sequence from={introFrames} name="Сплит">
       {/* ── половина с дублем ── */}
       <div
         style={{
@@ -75,6 +93,19 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
             />
           </Sequence>
         ))}
+        {/* Мягкий шов: край дубля уходит в цвет панели. */}
+        <div
+          style={{
+            position: 'absolute',
+            left: 0,
+            width,
+            height: Math.round(height * SEAM_FADE),
+            ...(panelOnTop ? {top: 0} : {bottom: 0}),
+            background: `linear-gradient(${panelOnTop ? '180deg' : '0deg'}, ${props.panelColor} 0%, rgba(0,0,0,0) 100%)`,
+            backdropFilter: 'blur(6px)',
+            WebkitMaskImage: `linear-gradient(${panelOnTop ? '180deg' : '0deg'}, #000 0%, transparent 100%)`,
+          }}
+        />
       </div>
 
       {/* ── половина с панелью ── */}
@@ -208,6 +239,7 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
           />
         </Sequence>
       ) : null}
+      </Sequence>
     </AbsoluteFill>
   );
 };

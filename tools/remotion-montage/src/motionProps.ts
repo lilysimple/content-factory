@@ -144,6 +144,16 @@ export const motionPropsSchema = z.object({
   cta: z.string().optional(),
   brandName: z.string().optional(),
 
+  // Обложка сплита: первые `introSeconds` — кадр дубля с лицом, знак
+  // продукта и заголовок на плашках. Нуль — первого кадра нет.
+  introSeconds: z.number().default(0),
+  coverPath: z.string().optional(),
+  coverFocus: z.object({x: z.number(), y: z.number()}).default({x: 0.5, y: 0.35}),
+  coverLines: z.array(z.string()).default([]),
+  coverAccent: z.array(z.string()).default([]),
+  coverLogoPath: z.string().optional(),
+  coverName: z.string().optional(),
+
   width: z.number().default(1080),
   height: z.number().default(1920),
   fps: z.number().default(30),
