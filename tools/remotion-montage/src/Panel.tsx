@@ -596,7 +596,7 @@ const Art: React.FC<{
   accentColor?: string;
 }> = ({block, panelColor, textColor, panelHeight, accentColor = '#ffffff'}) => {
   const frame = useCurrentFrame();
-  const {fps} = useVideoConfig();
+  const {fps, height} = useVideoConfig();
   const sec = frame / fps;
   const life = Math.max(0.1, block.end - block.start);
   const t = Math.min(1, sec / life);
@@ -658,8 +658,11 @@ const Art: React.FC<{
             justifyContent: 'flex-end',
             alignItems: 'center',
             // Подпись картинки держится выше полосы караоке: на 0.2 она
-            // стояла впритык к двухстрочной странице субтитра.
-            paddingBottom: panelHeight * 0.29,
+            // стояла впритык к двухстрочной странице субтитра. На весь
+            // кадр строка субтитра опускается к низу холста (до 0.9
+            // высоты, две строки — от 0.82), и подпись встаёт над ней —
+            // от панели считать нельзя, контейнер тут во весь холст.
+            paddingBottom: block.full ? height * 0.21 : panelHeight * 0.29,
           }}
         >
           <div
@@ -884,6 +887,15 @@ const BlockView: React.FC<{
             textTransform: 'uppercase',
             color: accentColor,
             whiteSpace: 'nowrap',
+            // Над картинкой надзаголовок терялся на её фоне («ШАГ 4»
+            // на коробке) — та же тёмная подложка, что у подписи.
+            ...(block.kind === 'art' && block.imagePath
+              ? {
+                  background: 'rgba(0,0,0,0.62)',
+                  padding: `${kickerSize * 0.25}px ${kickerSize * 0.6}px`,
+                  borderRadius: kickerSize * 0.4,
+                }
+              : {}),
           }}
         >
           {block.kicker}
