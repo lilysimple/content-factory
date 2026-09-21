@@ -157,6 +157,7 @@ section{padding:78px 0;position:relative}
 .session .day b{font-family:"Unbounded",system-ui,sans-serif;font-weight:800;font-size:26px;letter-spacing:-0.03em;color:var(--head)}
 .session .day span{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--ink-soft)}
 .session h3{font-size:19px;font-weight:800}
+.session .price{font-family:"Unbounded",system-ui,sans-serif;font-weight:800;font-size:22px;letter-spacing:-0.02em;color:var(--head)}
 .session p{font-size:14.5px;color:var(--ink-soft)}
 .session ul{margin:0;padding-left:18px;font-size:14.5px;display:flex;flex-direction:column;gap:4px}
 .session .out{border-top:1.5px dashed var(--edge);padding-top:12px;margin-top:auto}
@@ -189,6 +190,7 @@ section{padding:78px 0;position:relative}
 
 /* цена */
 .price-grid{display:grid;grid-template-columns:1fr 1fr .9fr;gap:20px;align-items:stretch}
+.price-grid.single{grid-template-columns:1fr .9fr}
 .tier{padding:24px;display:flex;flex-direction:column;gap:10px;transition:opacity .2s ease}
 .tier .label{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
 .tier .when{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--ink-soft)}
@@ -586,12 +588,12 @@ footer a{color:var(--h-violet);font-weight:700}
 <section id="price" class="band-green" data-stop="тарифы" data-cat="tariffs" style="--head:var(--h-green)">
   <div class="wrap">
     <div class="sec-head"><span class="sec-num">06</span><h2>Стоимость <span class="w-p">участия</span></h2></div>
-    <p class="sec-note">Состав одинаковый, цена зависит от даты оплаты. Продажи открыты до среды, 23 сентября, 23:59 МСК.</p>
-    <div class="price-grid">
+    <p class="sec-note">Цена одна до конца продаж: 5 000 ₽. Продажи открыты до среды, 23 сентября, 23:59 МСК.</p>
+    <div class="price-grid single">
       <div class="sticker tier" id="tier1">
-        <div class="label"><span class="when">до 20 сентября, 23:59</span><span class="tag" id="tag1">сейчас</span></div>
+        <div class="label"><span class="when">до 23 сентября, 23:59</span><span class="tag" id="tag1">сейчас</span></div>
         <div class="amount">5 000 ₽</div>
-        <div class="cd" id="cd1">Цена действует до конца воскресенья</div>
+        <div class="cd" id="cd1">Цена не повышается до закрытия продаж</div>
         <ul>
           <li><svg width="17" height="17" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3.5 3.5L13 4" fill="none" stroke="var(--h-green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Три живые сессии, 7 часов</span></li>
           <li><svg width="17" height="17" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3.5 3.5L13 4" fill="none" stroke="var(--h-green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Разбор вашего Ядра вслух</span></li>
@@ -599,18 +601,6 @@ footer a{color:var(--h-violet);font-weight:700}
           <li><svg width="17" height="17" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3.5 3.5L13 4" fill="none" stroke="var(--h-green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Месяц закрытого клуба в подарок</span></li>
         </ul>
         <a href="https://t.me/innerlila" target="_blank" rel="noopener" class="btn primary" id="buy1">Занять место за 5 000 ₽</a>
-      </div>
-      <div class="sticker tier dim" id="tier2">
-        <div class="label"><span class="when">21–23 сентября</span><span class="tag off" id="tag2">с понедельника</span></div>
-        <div class="amount">7 000 ₽</div>
-        <div class="cd" id="cd2">Последние три дня продаж</div>
-        <ul>
-          <li><svg width="17" height="17" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3.5 3.5L13 4" fill="none" stroke="var(--h-green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Три живые сессии, 7 часов</span></li>
-          <li><svg width="17" height="17" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3.5 3.5L13 4" fill="none" stroke="var(--h-green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Разбор вашего Ядра вслух</span></li>
-          <li><svg width="17" height="17" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3.5 3.5L13 4" fill="none" stroke="var(--h-green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Команда из шести агентов остаётся у вас</span></li>
-          <li><svg width="17" height="17" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3.5 3.5L13 4" fill="none" stroke="var(--h-green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Месяц закрытого клуба в подарок</span></li>
-        </ul>
-        <a href="https://t.me/innerlila" target="_blank" rel="noopener" class="btn" id="buy2">Занять место за 7 000 ₽</a>
       </div>
       <div class="sticker terms">
         <div>
@@ -631,11 +621,12 @@ footer a{color:var(--h-violet);font-weight:700}
 <section id="extra" data-stop="следующий уровень" data-cat="program" style="--head:var(--h-blue)">
   <div class="wrap">
     <div class="sec-head"><span class="sec-num">07</span><h2>Через неделю — <span class="w-g">видео и фото</span></h2></div>
-    <p class="sec-note">Отдельный модуль на следующие выходные, 3 и 4 октября. Докупается к интенсиву и идёт на той же папке бренда: агенты уже знают ваше Ядро. Время московское.</p>
+    <p class="sec-note">Отдельный модуль на следующие выходные, 3 и 4 октября: фото 1 000 ₽, видео 2 000 ₽. Докупается к интенсиву и идёт на той же папке бренда: агенты уже знают ваше Ядро. Время московское.</p>
     <div class="sessions">
       <article class="sticker session">
         <div class="day"><b>Сб 03.10</b><span>11:00–13:30</span></div>
         <h3>Фото бренда</h3>
+        <div class="price">1 000 ₽</div>
         <ul>
           <li>Собираем фотоаватары: ваши кадры, а не стоковые люди</li>
           <li>Предметные кадры продукта под обложки и посты</li>
@@ -646,6 +637,7 @@ footer a{color:var(--h-violet);font-weight:700}
       <article class="sticker session">
         <div class="day"><b>Вс 04.10</b><span>11:00–14:00</span></div>
         <h3>Видео и сборка ролика</h3>
+        <div class="price">2 000 ₽</div>
         <ul>
           <li>Ролики из текста и из ваших фото</li>
           <li>Видеоаватар: ролик вашим лицом без съёмки</li>
@@ -659,8 +651,7 @@ footer a{color:var(--h-violet);font-weight:700}
       <svg width="46" height="46" viewBox="0 0 46 46" aria-hidden="true"><path d="M8 12h20v22H8zM32 18l8-5v20l-8-5z" fill="none" stroke="var(--purple-deep)" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/></svg>
       <div>
         <b>Модуль идёт отдельно и берётся по желанию</b>
-        <!-- TODO: подставить цену модуля, пока стоит «уточняется» -->
-        <p>Интенсив 24, 26 и 27 сентября остаётся самостоятельным: команда агентов и посты у вас уже есть. Видео и фото — следующий слой поверх готовой мастерской. Цена уточняется, запись и вопросы в Telegram.</p>
+        <p>Интенсив 24, 26 и 27 сентября остаётся самостоятельным: команда агентов и посты у вас уже есть. Видео и фото — следующий слой поверх готовой мастерской. Суббота 1 000 ₽, воскресенье 2 000 ₽; запись и вопросы в Telegram.</p>
       </div>
     </div>
   </div>
@@ -745,7 +736,7 @@ footer a{color:var(--h-violet);font-weight:700}
 <section class="cta" data-stop="пора действовать" data-cat="action" style="--head:var(--h-violet)">
   <div class="wrap">
     <h2>В воскресенье <span class="w-hand">увидите<svg viewBox="0 0 100 12" aria-hidden="true" preserveAspectRatio="none"><path d="M3 8c18-6 36 4 54-2s26-1 40 3"/></svg></span> <span class="w-g">свои первые посты</span></h2>
-    <p>Три сессии, камерная группа и команда агентов, которая остаётся с вами. Цена 5 000 ₽ до 20 сентября.</p>
+    <p>Три сессии, камерная группа и команда агентов, которая остаётся с вами. Цена 5 000 ₽, продажи до 23 сентября.</p>
     <div class="btns">
       <a href="https://t.me/innerlila" target="_blank" rel="noopener" class="btn primary">Занять место</a>
       <a href="#program" class="btn sun">Посмотреть программу</a>
@@ -807,26 +798,18 @@ footer a{color:var(--h-violet);font-weight:700}
 
 <script>
 (function(){
-  var D1=Date.UTC(2026,8,20,20,59,59), D2=Date.UTC(2026,8,23,20,59,59);
+  var D2=Date.UTC(2026,8,23,20,59,59);
   function left(ms){var h=Math.floor(ms/36e5),d=Math.floor(h/24);h=h%24;var m=Math.floor(ms/6e4)%60;
     return (d?d+' дн ':'')+h+' ч '+m+' мин';}
   function $(id){return document.getElementById(id);}
   function tick(){
     var now=Date.now();
-    if(now<D1){
-      $('cd1').textContent='До повышения цены: '+left(D1-now);
-    }else if(now<D2){
-      $('tier1').classList.add('dim'); $('tag1').className='tag off'; $('tag1').textContent='прошло';
-      $('tier2').classList.remove('dim'); $('tag2').className='tag'; $('tag2').textContent='сейчас';
-      $('buy2').classList.add('primary'); $('buy1').classList.remove('primary');
-      $('cd1').textContent='Эта цена уже не действует';
-      $('cd2').textContent='До закрытия продаж: '+left(D2-now);
-      document.querySelectorAll('a.js-buy').forEach(function(a){ if(/5 000/.test(a.textContent)) a.textContent='Занять место за 7 000 ₽'; });
+    if(now<D2){
+      $('cd1').textContent='До закрытия продаж: '+left(D2-now);
     }else{
-      $('tier1').classList.add('dim'); $('tier2').classList.add('dim');
-      $('tag1').className='tag off'; $('tag1').textContent='прошло';
-      $('tag2').className='tag off'; $('tag2').textContent='закрыто';
-      $('cd1').textContent=''; $('cd2').textContent='';
+      $('tier1').classList.add('dim');
+      $('tag1').className='tag off'; $('tag1').textContent='закрыто';
+      $('cd1').textContent='';
       $('closing').hidden=false;
     }
   }
