@@ -68,10 +68,13 @@ def main() -> int:
     spec = frames.panel_spec(block(), size=PANEL, fps=30, colors=COLORS)
     check("карточка словами идёт в анимацию", spec is not None)
 
-    for kind in ("media", "art"):
-        check(f"«{kind}» остаётся Remotion",
-              frames.panel_spec(block(kind=kind), size=PANEL, fps=30,
-                                colors=COLORS) is None)
+    check("«media» остаётся Remotion",
+          frames.panel_spec(block(kind="media"), size=PANEL, fps=30,
+                            colors=COLORS) is None,
+          "запись из альбома двигает шаблон наездом на слово")
+    check("«art» без файла остаётся Remotion",
+          frames.panel_spec(block(kind="art"), size=PANEL, fps=30,
+                            colors=COLORS) is None)
 
     check("карточка со скрином без файла остаётся Remotion",
           frames.panel_spec(block(imagePath="panel-1.png"), size=PANEL,
@@ -182,10 +185,12 @@ def main() -> int:
 
     # ── 8. обложка: задание из тех же чисел ───────────────────────────
     print("\n8. Обложка движением")
+    cover = harness.TMP / "cover-x.png"
+    cover.write_bytes("\x89PNG\r\n\x1a\nкадр обложки".encode())
     spec = frames.cover_spec(
         size=(1080, 1920), fps=30, seconds=1.8, lines=[],
         anchor="bottom", inset=211, focus=(0.5, 0.35), scrim=0.0,
-        blur=False, back="#111111", image=Path("/tmp/cover-x.png"))
+        blur=False, back="#111111", image=cover)
     check("клип обложки длиной в первый кадр", spec["duration"] == 1.8)
     check("картинка приезжает именем файла",
           spec["imageSrc"] == "cover-x.png", spec["imageSrc"])
@@ -193,6 +198,134 @@ def main() -> int:
           spec["focus"] == {"x": 0.5, "y": 0.35}, spec["focus"])
     check("задание сериализуется целиком",
           json.loads(json.dumps(spec))["width"] == 1080)
+
+    # ── 9. шрифт: именем из ТЗ, чужое имя не подменяется молча ───────
+    print("\n9. Шрифт обложки")
+    check("шрифт из ТЗ площадки берётся как есть",
+          frames.face("Unbounded") == "Unbounded.css")
+    check("шрифт с пробелом в имени сходится с файлом",
+          frames.face("Golos Text") == "GolosText.css")
+    check("незнакомый шрифт падает в Manrope, а не в системный",
+          frames.face("Чужая Гарнитура") == "Manrope.css")
+    for name in frames.FACES:
+        check(f"{name} лежит в репозитории",
+              (frames.ROOT / frames.FONTS / f"{name}.css").exists())
+
+    # ── 10. фото и скрин идут разными шаблонами ──────────────────────
+    print("\n10. Фото и скрин — разные шаблоны")
+    photo = frames.panel_spec(block(kind="art", imagePath="art-1.png"),
+                              size=PANEL, fps=30, colors=COLORS, image=shot)
+    check("картинка по теме идёт карточкой-фото",
+          photo is not None and photo["kind"] == frames.PHOTO, photo)
+    check("фото собирается своим шаблоном",
+          frames.template_of(photo) == "photo.html")
+    page = frames.panel_spec(
+        block(imagePath="panel-1.png"),
+        size=PANEL, fps=30, colors=COLORS, image=shot)
+    check("снимок страницы идёт в окно браузера",
+          page is not None and page["kind"] == frames.SHOT, page)
+
+    # ── 11. дорожка панели: один клип вместо шести ──────────────────
+    print("\n11. Дорожка панели")
+    track = [block(start=2.0, end=6.0, lines=["Первая"]),
+             block(start=7.0, end=11.0, kind="counter", value=12,
+                   valueAt=7.5, lines=["минуты"])]
+    spec = frames.track_spec(track, size=PANEL, fps=30, colors=COLORS,
+                             band=115)
+    check("дорожка начинается с первого блока", spec["offset"] == 2.0, spec)
+    check("дорожка длится до конца последнего",
+          spec["duration"] == 9.0, spec["duration"])
+    check("сцены отсчитываются от начала дорожки",
+          [(sc["start"], sc["end"]) for sc in spec["scenes"]]
+          == [(0.0, 4.0), (5.0, 9.0)], spec["scenes"])
+    check("число набирается от начала своей сцены",
+          spec["scenes"][1]["valueAt"] == 0.5, spec["scenes"][1])
+    check("дорожка идёт своим шаблоном",
+          frames.template_of(spec) == "track.html")
+
+    check("блок во весь кадр отменяет дорожку",
+          frames.track_spec(track + [block(start=12.0, end=16.0, full=True)],
+                            size=PANEL, fps=30, colors=COLORS,
+                            band=115) is None,
+          "у такого блока другой холст — панель разворачивается на кадр")
+    check("запись из альбома отменяет дорожку",
+          frames.track_spec(track + [block(start=12.0, end=16.0,
+                                           kind="media",
+                                           videoPath="panel-2.mp4")],
+                            size=PANEL, fps=30, colors=COLORS,
+                            band=115) is None,
+          "её двигает Remotion, и в дорожке на её месте была бы дыра")
+    check("без блоков дорожки нет",
+          frames.track_spec([], size=PANEL, fps=30, colors=COLORS,
+                            band=115) is None)
+
+    page = frames.track_spec(
+        [block(imagePath="panel-0.png"),
+         block(start=7.0, end=11.0, kind="art", imagePath="art-0.png")],
+        size=PANEL, fps=30, colors=COLORS, band=115,
+        images={0: shot, 1: _other(shot)})
+    check("снимок страницы в дорожке идёт окном",
+          page["scenes"][0]["frame"] == "browser", page["scenes"][0])
+    check("картинка по теме в дорожке идёт кадром",
+          page["scenes"][1]["frame"] == "photo", page["scenes"][1])
+    check("у картинок дорожки свои отпечатки",
+          page["scenes"][0]["imageMark"] != page["scenes"][1]["imageMark"])
+
+    # ── 12. значки и пункты по словам ───────────────────────────────
+    print("\n12. Значки и разбор пункта")
+    from orchestrator import cut                                   # noqa: E402
+
+    it = montage.point("[папка] папка с исходниками — любой дубль")
+    check("значок снят с начала пункта", it["icon"] == "папка", it)
+    check("показывается текст без значка и пояснения",
+          it["text"] == "папка с исходниками", it)
+    check("пояснение отделено", it["note"] == "любой дубль", it)
+    check("в записи ищется только фраза",
+          it["phrase"] == "папка с исходниками", it)
+    plain = montage.point("стабилизировать тряску")
+    check("пункт без разметки остаётся собой",
+          (plain["text"], plain["icon"], plain["note"])
+          == ("стабилизировать тряску", "", ""), plain)
+
+    check("значок из набора находится", bool(frames.icon("Ножницы")))
+    check("значка не из набора нет", frames.icon("единорог") == "")
+
+    good, lost = cut._slides([
+        {"phrase": "сначала папка", "kind": "flow",
+         "items": ["[папка] папка", "[искра] Клод"]},
+        {"phrase": "одна вещь", "kind": "grid", "items": ["только одна"]},
+        {"phrase": "подсветить фразу", "kind": "mark", "lines": []},
+        {"phrase": "значок чужой", "kind": "card", "icon": "единорог",
+         "lines": ["строка"]},
+    ])
+    kinds = [(g.kind, g.icon) for g in good]
+    check("поток с двумя шагами взят", ("flow", "") in kinds, str(kinds))
+    check("плитки с одним пунктом отброшены",
+          any("пунктов 1" in n for n in lost), str(lost))
+    check("подсветка без фразы отброшена",
+          any("строк нет" in n for n in lost), str(lost))
+    check("чужой значок снят, а карточка осталась",
+          ("card", "") in kinds and any("единорог" in n for n in lost),
+          str(lost))
+
+    # ── 13. столбики: число из речи, а не из головы ─────────────────
+    print("\n13. Столбики")
+    bar = montage.point("[часы] вручную — 180")
+    check("число пояснения стало высотой", bar["value"] == 180.0, bar)
+    check("подпись столбика это имя", bar["text"] == "вручную", bar)
+    check("у обычного пункта числа нет",
+          "value" not in montage.point("заменить кадр — любой дубль"))
+
+    good, lost = cut._slides([
+        {"phrase": "час против минуты", "kind": "bars",
+         "items": ["вручную — 180", "с ним — 20"]},
+        {"phrase": "столбики без чисел", "kind": "bars",
+         "items": ["раз", "два"]},
+    ])
+    check("столбики с числами взяты",
+          [g.kind for g in good] == ["bars"], str(good))
+    check("столбики без чисел отброшены и названы",
+          any("нет числа" in n for n in lost), str(lost))
 
     return report()
 

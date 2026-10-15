@@ -1,6 +1,10 @@
 #!/bin/sh
 # Системного ffmpeg на машине нет; берём бинарь, который привозит Remotion.
 # Без DYLD_LIBRARY_PATH он не находит свои dylib и падает на запуске.
+#
+# Сборка Remotion идёт с --disable-filters: кодирования с альфа-каналом
+# на ней нет (MOV падает на 'No such filter: setparams', WebM молча
+# уходит в yuv420p). Нам оно и не нужно — панель остаётся непрозрачной.
 BIN="$(cd "$(dirname "$0")/../remotion-montage/node_modules/@remotion/compositor-darwin-arm64" && pwd)"
 DYLD_LIBRARY_PATH="$BIN${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" export DYLD_LIBRARY_PATH
 exec "$BIN/ffprobe" "$@"

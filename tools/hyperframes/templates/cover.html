@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <title>Обложка ролика</title>
+    <link rel="stylesheet" href="./fonts/__FONTCSS__" />
     <script src="./vendor/gsap.min.js"></script>
     <style>
       body { margin: 0; }
@@ -12,12 +13,20 @@
       #scrim { position: absolute; inset: 0; display: block; }
       #words {
         position: absolute; left: 0; right: 0;
-        display: flex; flex-direction: column;
-        box-sizing: border-box;
-        font-family: system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+        display: flex; flex-direction: column; align-items: center;
+        box-sizing: border-box; text-align: center;
+        font-family: '__FONT__', system-ui, -apple-system, Arial, sans-serif;
         font-synthesis-weight: none;
       }
-      .word { font-weight: 800; margin: 0 0 8px; line-height: 1.1; }
+      /* Те же числа, что рисует `Cover.tsx`: это один и тот же первый
+         кадр, и разъехаться им значит показать человеку две разные
+         обложки на одной теме. */
+      #title { font-weight: 500; line-height: 1.25; margin: 0 0 18px;
+               text-shadow: 0 2px 16px rgba(0,0,0,0.6); }
+      .word { line-height: 1.04; letter-spacing: -0.035em; margin: 0;
+              text-shadow: 0 6px 30px rgba(0,0,0,0.45); }
+      #brand { margin: 22px 0 0; color: #fff; opacity: 0.8;
+               font-weight: 500; font-size: 30px; }
     </style>
   </head>
   <body>
@@ -31,16 +40,16 @@
       data-duration="__DUR__"
     >
       <section id="frame" class="clip" data-start="0" data-duration="__DUR__">
-        <img id="shot" alt="" />
+        <img id="shot" alt="" src="__IMG__" />
         <span id="scrim"></span>
         <div id="words"></div>
       </section>
     </div>
     <script type="application/json" id="spec">__SPEC__</script>
     <script>
-      // Обложка ролика движением: кадр наезжает, строки заголовка
-      // набираются по одной. Что написать и каким кеглем, посчитал питон
-      // по ТЗ площадки — тот же расчёт, что у неподвижной обложки.
+      // Обложка движением: кадр наезжает, строки набираются по одной.
+      // Что написать, каким кеглем и каким цветом, посчитал питон по ТЗ
+      // площадки — здесь только рисование, ровно как в `Cover.tsx`.
       const spec = JSON.parse(document.getElementById('spec').textContent);
       const shot = document.getElementById('shot');
       const scrim = document.getElementById('scrim');
@@ -48,45 +57,69 @@
 
       document.body.style.background = spec.backColor;
       if (spec.imageSrc) {
-        shot.src = spec.imageSrc;
         shot.style.objectPosition =
           Math.round(spec.focus.x * 100) + '% ' + Math.round(spec.focus.y * 100) + '%';
-        if (spec.blur) { shot.style.filter = 'blur(' + Math.round(spec.width * 0.02) + 'px)'; }
+        if (spec.blur) {
+          shot.style.filter = 'blur(16px)';
+          shot.style.transform = 'scale(1.12)';
+        }
       } else {
         shot.style.display = 'none';
       }
-      scrim.style.background =
-        'linear-gradient(' + (spec.anchor === 'top' ? '180deg' : '0deg') +
-        ', rgba(0,0,0,' + spec.scrim + ') 0%, rgba(0,0,0,0) 62%)';
+      // Затемнение той же силы и в ту же сторону, что у неподвижной
+      // обложки: белый заголовок на светлом кадре иначе исчезает.
+      scrim.style.background = spec.scrim > 0
+        ? 'linear-gradient(180deg, rgba(0,0,0,' + (spec.scrim * 0.5).toFixed(2)
+          + ') 0%, rgba(0,0,0,' + (spec.scrim * 1.4).toFixed(2)
+          + ') 55%, rgba(0,0,0,' + Math.min(0.85, spec.scrim * 2).toFixed(2)
+          + ') 100%)'
+        : 'none';
 
-      box.style.padding = Math.round(spec.width * 0.08) + 'px';
-      if (spec.anchor === 'top') { box.style.top = Math.round(spec.inset) + 'px'; }
-      else { box.style.bottom = Math.round(spec.inset) + 'px'; }
+      const pad = Math.round(spec.width * 0.07);
+      box.style.padding = spec.anchor === 'top'
+        ? Math.round(spec.inset) + 'px ' + pad + 'px 0'
+        : '0 ' + pad + 'px ' + Math.round(spec.inset) + 'px';
+      if (spec.anchor === 'top') { box.style.top = '0'; }
+      else { box.style.bottom = '0'; }
 
       const made = [];
-      spec.lines.forEach((line) => {
+      if (spec.title) {
+        const t = document.createElement('p');
+        t.id = 'title';
+        t.textContent = spec.title;
+        t.style.color = spec.titleColor;
+        t.style.fontSize = Math.round(spec.titleSize) + 'px';
+        box.appendChild(t);
+        made.push({node: t, at: 0});
+      }
+      spec.lines.forEach((line, i) => {
         const p = document.createElement('p');
         p.className = 'word';
         p.textContent = line.text;
         p.style.color = line.color;
         p.style.fontSize = Math.round(line.size) + 'px';
+        p.style.fontWeight = String(spec.weight);
         box.appendChild(p);
-        made.push(p);
+        made.push({node: p, at: 0.08 + i * 0.08});
       });
+      if (spec.brandName) {
+        const b = document.createElement('p');
+        b.id = 'brand';
+        b.textContent = spec.brandName;
+        box.appendChild(b);
+        made.push({node: b, at: 0.08 + spec.lines.length * 0.08});
+      }
 
       const tl = gsap.timeline({paused: true});
-      if (spec.imageSrc) {
-        // Наезд на весь кадр: медленный, без разворота. Обложка это
-        // титул, а не сцена, и быстрый зум читается дрожью.
-        tl.fromTo(shot, {scale: 1.0}, {scale: 1.06, duration: spec.duration, ease: 'none'}, 0);
+      if (spec.imageSrc && !spec.blur) {
+        // Наезд медленный и без разворота: обложка это титул, а не
+        // сцена, и быстрый зум читается дрожью.
+        tl.fromTo(shot, {scale: 1.0},
+                  {scale: 1.06, duration: spec.duration, ease: 'none'}, 0);
       }
-      made.forEach((node, i) => {
-        tl.fromTo(
-          node,
-          {y: Math.round(spec.height * 0.03), opacity: 0},
-          {y: 0, opacity: 1, duration: 0.45, ease: 'power3.out'},
-          0.12 + i * 0.16
-        );
+      made.forEach((m) => {
+        tl.fromTo(m.node, {y: 22, opacity: 0},
+                  {y: 0, opacity: 1, duration: 0.45, ease: 'power3.out'}, m.at);
       });
       window.__timelines['cover'] = tl;
     </script>

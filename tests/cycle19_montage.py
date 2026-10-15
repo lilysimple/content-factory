@@ -1085,8 +1085,9 @@ def main() -> None:
         montage.Block(start=0.0, end=3.0, kicker="БЕЗ КОДА", full=True,
                       lines=["Google Opal"]),
         montage.Block(start=3.0, end=9.0, image=shot,
-                      items=[("опиши что", montage.speak_at(split_reel, "опиши что")),
-                             ("этого не говорили", None)]),
+                      items=[{"text": "опиши что",
+                              "at": montage.speak_at(split_reel, "опиши что")},
+                             {"text": "этого не говорили", "at": None}]),
     ]
     props = montage.motion_props(split_reel, blocks, (1080, 1920))
 
@@ -1142,8 +1143,8 @@ def main() -> None:
     rich = [montage.Block(start=0.0, end=4.0, kind="counter", value=3,
                           value_at=1.5, lines=["бизнес-модели"]),
             montage.Block(start=4.0, end=8.0, kind="scale",
-                          items=[("low — быстро", 4.4),
-                                 ("high — рассуждение", 6.2)]),
+                          items=[{"text": "low — быстро", "at": 4.4},
+                                 {"text": "high — рассуждение", "at": 6.2}]),
             montage.Block(start=8.0, end=9.0, kind="counter", value=5)]
     rp = montage.motion_props(split_reel, rich, (1080, 1920))["blocks"]
     check("тип блока доезжает до шаблона",
@@ -1238,11 +1239,12 @@ def panel() -> None:
     check("ненайденная фраза выбрасывает блок и называет его",
           any("не нашлось" in n for n in lost), str(lost))
     check("ненайденный пункт остаётся без секунды, а не пропадает",
-          blocks[0].items[1] == ("второго", None), str(blocks[0].items))
+          blocks[0].items[1]["text"] == "второго"
+          and blocks[0].items[1]["at"] is None, str(blocks[0].items))
     # Шаблон отсчитывает пункт от начала блока: сказанный после его
     # конца не появился бы на панели вовсе.
     check("пункт, сказанный вне своего блока, едет с карточкой и назван",
-          blocks[0].items[0] == ("первое", None)
+          blocks[0].items[0]["at"] is None
           and any("вне своего блока" in n for n in lost), str(lost))
     check("счётчик набирается на своём слове",
           blocks[1].value_at == 9.3, str(blocks[1].value_at))

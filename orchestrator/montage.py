@@ -1033,24 +1033,36 @@ def _video_name(reel: Reel) -> str:
 COVER_SPIN = 1.8            # длина первого кадра ролика, секунды
 
 
-async def _cover_clip(reel: Reel, b, size: tuple[int, int], *,
-                      fps: int, seconds: float) -> tuple[Path | None, str]:
-    """Обложка движением: медленный наезд на утверждённый кадр.
+async def _cover_clip(reel: Reel, b, props: dict[str, Any],
+                      size: tuple[int, int], *,
+                      fps: int) -> tuple[Path | None, str]:
+    """Обложка движением: кадр наезжает, строки набираются по одной.
 
-    Берётся только свёрстанная Дизайнером обложка (`dressed`): слова на
-    ней уже стоят, и клип ничего не переписывает — он двигает картинку,
-    которую человек утвердил кнопкой. Обложку, которую монтаж набирает
-    сам, сюда не отдаём: заголовок там идёт шрифтом бренда, а своего
-    Manrope у HyperFrames нет, и человек получил бы два разных шрифта
-    на одном ролике.
+    Числа приходят из готовых props — тех самых, по которым рисует
+    `Cover.tsx`. Разбивку на строки, кегль и цвет посчитал питон по ТЗ
+    площадки; шаблон HyperFrames повторяет рисование один в один, и
+    шрифт у них один и тот же файл, а не одноимённая гарнитура.
+
+    Свёрстанная Дизайнером обложка (`dressed`) приезжает без слов: они
+    уже на картинке, и клип их не переписывает — только двигает кадр,
+    который человек утвердил кнопкой.
     """
-    if not (reel.dressed and reel.cover):
-        return None, ""
     spec = frames.cover_spec(
-        size=size, fps=fps, seconds=seconds, lines=[], anchor=reel.anchor,
-        inset=reel.inset or round(size[1] * COVER_INSET),
-        focus=reel.crop, scrim=0.0, blur=False, back=reel.color,
-        image=reel.cover)
+        size=size, fps=fps, seconds=props["introSeconds"],
+        lines=props.get("coverLines") or [],
+        anchor=props.get("coverAnchor", "bottom"),
+        inset=props.get("coverInset", 0),
+        focus=(props["coverFocus"]["x"], props["coverFocus"]["y"]),
+        scrim=props.get("scrim", 0.0),
+        blur=bool(props.get("coverBlur")),
+        back=props.get("brandColor", reel.color),
+        image=reel.cover,
+        title=props.get("title") or "",
+        title_color=props.get("titleColor", "#FFFFFF"),
+        title_size=props.get("titleSize", 38),
+        brand_name=props.get("brandName") or "",
+        font=props.get("coverFont", frames.CARD_FONT),
+        weight=props.get("coverWeight", 800))
     try:
         return await frames.clip(b, spec, template="cover.html",
                                  image=reel.cover, cap=frames.COVER_CAP), ""
@@ -1094,19 +1106,10 @@ async def render(reel: Reel, b, size: tuple[int, int], *,
             files[look["src"]] = art
 
     intro = COVER_SPIN if (reel.cover or reel.title or reel.hook) else 0.0
-    clip_name = None
-    if intro:
-        made, note = await _cover_clip(reel, b, size, fps=fps, seconds=intro)
-        if note:
-            reel.findings.append(note)
-        if made:
-            clip_name = f"cover-clip-{reel.theme['id']}.mp4"
-            files[clip_name] = made
 
     props = {
         "videoPath": video_name,
         "coverPath": cover_name,
-        "coverClipPath": clip_name,
         "coverBlur": _blur(reel),
         "coverFocus": {"x": reel.crop[0], "y": reel.crop[1]},
         "coverAnchor": reel.anchor,
@@ -1143,6 +1146,18 @@ async def render(reel: Reel, b, size: tuple[int, int], *,
         "personMask": person,
     }
     props = {k: v for k, v in props.items() if v is not None}
+
+    # Обложка движением собирается **из этих же props**, а не из
+    # отдельного счёта: кегль, цвет, отступ и затемнение посчитаны один
+    # раз выше, и второй счёт разошёлся бы с первым молча.
+    if intro and reel.cover:
+        made, note = await _cover_clip(reel, b, props, size, fps=fps)
+        if note:
+            reel.findings.append(note)
+        if made:
+            props["coverClipPath"] = f"cover-clip-{reel.theme['id']}.mp4"
+            files[props["coverClipPath"]] = made
+
     # «Первые десять секунд» человек считает от начала ролика, а маскот
     # живёт в записи: до него идёт обложка. Вычитаем её здесь, где длина
     # первого кадра уже известна, — иначе маскот уходит позже, чем его
@@ -1465,9 +1480,14 @@ class Block:
     # Список, который набирается под речь: пункт выезжает в ту секунду,
     # когда человек его называет. Секунду ищет `speak_at`; не нашлась —
     # пункт едет с началом блока, а не пропадает с панели.
-    items: list[tuple[str, float | None]] = field(default_factory=list)
+    # Пункт панели: показанный текст, его секунда, пояснение и значок.
+    # Секунда `None` — слова в записи не нашлось, и пункт едет с
+    # началом блока, а не пропадает.
+    items: list[dict[str, Any]] = field(default_factory=list)
     full: bool = False
     kind: str = "card"
+    # Значок сцены: имя из набора `frames.ICONS`. Пусто — значка нет.
+    icon: str = ""
     # `counter`: до какого числа считать и на каком слове набирать.
     value: int | None = None
     value_at: float | None = None
@@ -1535,6 +1555,35 @@ def _is_lay_note(text: str) -> bool:
 BLOCK_MIN = 1.5
 
 
+POINT_RX = re.compile(r"^\[([^\]]{1,24})\]\s*(.+)$")
+
+
+def point(text: str) -> dict[str, Any]:
+    """Пункт панели: что показать и что искать в записи.
+
+    Роль пишет пункт одной строкой — `[значок] фраза — пояснение`, — и
+    из неё выходит три разные вещи. Значок и пояснение рисуются, а
+    **ищется в расшифровке только сама фраза**: искать по ней вместе с
+    пояснением значит не найти ничего, потому что пояснение роль
+    придумала, а не услышала.
+    """
+    raw = str(text).strip()
+    mark = ""
+    hit = POINT_RX.match(raw)
+    if hit:
+        mark, raw = hit.group(1).strip(), hit.group(2).strip()
+    shown, _, note = raw.partition(" — ")
+    out: dict[str, Any] = {"text": shown.strip(), "note": note.strip(),
+                           "icon": mark, "phrase": shown.strip()}
+    # Пояснение, которое целиком число, это высота столбика: «эфиры — 12».
+    # Для остальных сортов оно останется подписью, и лишним не будет.
+    try:
+        out["value"] = float(note.strip().replace(",", ".").replace(" ", ""))
+    except ValueError:
+        pass
+    return out
+
+
 def lay(reel: Reel, slides: list[Any]) -> tuple[list[Block], list[str]]:
     """Блоки панели во времени готового ролика.
 
@@ -1582,17 +1631,20 @@ def lay(reel: Reel, slides: list[Any]) -> tuple[list[Block], list[str]]:
         # Пункт, чьё слово звучит за пределами блока, на панели не
         # появится вовсе: шаблон отсчитывает его от начала блока. Такой
         # едет с началом, как ненайденный, и это называется человеку.
-        items: list[tuple[str, float | None]] = []
+        items: list[dict[str, Any]] = []
         for text in s.items:
-            when = speak_at(reel, text)
+            it = point(text)
+            when = speak_at(reel, it["phrase"])
             if when is not None and not (at <= when < end):
-                lost.append(f"«{text[:40]}»: сказано вне своего блока — "
-                            "пункт выехал вместе с карточкой")
+                lost.append(f"«{it['phrase'][:40]}»: сказано вне своего "
+                            "блока — пункт выехал вместе с карточкой")
                 when = None
-            items.append((text, when))
+            it["at"] = when
+            items.append(it)
         blocks.append(Block(
             start=at, end=end, kicker=s.kicker, lines=list(s.lines),
             items=items, kind=s.kind, image=s.image,
+            icon=getattr(s, "icon", ""),
             # На весь кадр — только то, что смотрится само: запись и
             # картинка по теме. Слова на весь кадр прятали голову на
             # десяток секунд, и ролик открывался без человека.
@@ -1671,13 +1723,20 @@ def _block_props(b: Block, image: str | None,
         "start": round(b.start, 3),
         "end": round(b.end, 3),
         "lines": list(b.lines),
-        "items": [{"text": text, "at": round(b.start if at is None else at, 3)}
-                  for text, at in b.items],
+        "items": [{k: v for k, v in (
+            ("text", it["text"]),
+            ("at", round(b.start if it.get("at") is None else it["at"], 3)),
+            ("note", it.get("note") or ""),
+            ("icon", it.get("icon") or ""),
+            ("value", it.get("value")),
+        ) if v not in ("", None)} for it in b.items],
         "full": b.full,
         "kind": b.kind,
     }
     if b.kicker:
         out["kicker"] = b.kicker
+    if b.icon:
+        out["icon"] = b.icon
     if image and b.video:
         out["videoPath"] = image
         out["videoSeconds"] = round(b.video_len, 3)
@@ -1786,6 +1845,7 @@ async def render_motion(reel: Reel, b, blocks: list[Block],
     """
     await _ready()
 
+    files: dict[str, Path] = {_video_name(reel): reel.video}
     names = _panel_files(reel.theme["id"], blocks)
     marks = _mark_files(reel.theme["id"], blocks)
     raw = [_block_props(bl, names.get(i), marks.get(i))
@@ -1794,16 +1854,29 @@ async def render_motion(reel: Reel, b, blocks: list[Block],
     # по имени файла HyperFrames его не найдёт, папка рендера своя.
     shots = {i: bl.image for i, bl in enumerate(blocks)
              if bl.image and not bl.video}
-    clips, notes = await frames.panel_clips(
+    # Сперва дорожка: вся панель одним клипом со сквозным фоном и
+    # переходами между сценами. Не собралась (блок во весь кадр, запись
+    # из альбома, упавший рендер) — собираем поблочно, как раньше.
+    track, start, notes = await frames.panel_track(
         b, raw, size=size, fps=fps, colors=panel_colors(), split=split,
         images=shots)
     reel.findings.extend(notes)
 
+    clips: dict[int, Path] = {}
+    if track is None:
+        clips, notes = await frames.panel_clips(
+            b, raw, size=size, fps=fps, colors=panel_colors(), split=split,
+            images=shots)
+        reel.findings.extend(notes)
+
     props = motion_props(reel, blocks, size, fps=fps, head=head, split=split,
                          clips=clips)
+    if track is not None:
+        props["trackPath"] = f"track-{reel.theme['id']}.mp4"
+        props["trackStart"] = round(start, 3)
+        files[props["trackPath"]] = track
     assert reel.cuts is not None
 
-    files: dict[str, Path] = {_video_name(reel): reel.video}
     for i, name in _clip_files(reel.theme["id"], clips).items():
         files[name] = clips[i]
     for i, name in _panel_files(reel.theme["id"], blocks).items():

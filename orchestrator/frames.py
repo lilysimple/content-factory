@@ -46,18 +46,36 @@ FRAMES = "montage/frames"
 # Сорта блока, которые рисуются словами, а не кадром. `media` и `art`
 # сюда не идут: там запись из альбома и картинка по теме, их двигает
 # шаблон Remotion своим наездом и подчёркиванием слова.
-KINDS = ("card", "icon", "counter", "scale")
+KINDS = ("card", "icon", "counter", "scale", "art",
+         # Сорта, которые рисуют инфографику: поток со стрелками,
+         # плитки, окно терминала, столбики, плашки-слова и фраза с
+         # подсветкой звучащего слова. Живут только в дорожке — по
+         # одиночке их показывать незачем, они и есть поток.
+         "flow", "grid", "terminal", "bars", "chips", "mark")
 
 # Карточка со скрином страницы идёт своим шаблоном: окно браузера рисует
 # готовый блок каталога HyperFrames, а скрин ложится в его слот. Своё
 # окно это чужая работа второй раз и хуже.
 SHOT = "shot"
+# Фотография едет своим шаблоном: рамка браузера вокруг снимка читается
+# как чужой интерфейс. Сюда же уходит `art` — картинка по теме.
+PHOTO = "photo"
+# Вся панель одним клипом: сцены вместо карточек, переход между ними и
+# фон, который не прерывается. Устройство — `NOTES.md`.
+TRACK = "track"
 STAGE = "compositions/components/browser-device-stage.html"
 
 # Manrope: тот же шрифт, которым Remotion набирает субтитры и обложку.
 # Без него карточка приезжала системной гарнитурой, и на одном ролике
 # стояли два разных шрифта.
 FONTS = "assets/fonts"
+# Те же пять гарнитур, что грузит `Cover.tsx`, и те же два начертания:
+# ТЗ площадки называет шрифт именем, и шрифт, которого нет, молча
+# подменился бы системным. Карточки панели всегда Manrope — там кегли
+# считает шаблон, а не ТЗ.
+FACES = ("Manrope", "Montserrat", "Unbounded", "GolosText",
+         "FiraSansCondensed")
+CARD_FONT = "Manrope"
 
 # Потолок на один клип. Панель сплита это 1080×576 и три-четыре секунды;
 # замер пробного ролика — десять секунд холста 1920×1080 за 23 с. Минуты
@@ -89,8 +107,10 @@ def ready() -> str:
         return f"шаблонов карточки нет в {TEMPLATES}"
     if not (SHIM / "ffmpeg").exists():
         return f"ffmpeg для HyperFrames не на месте: {SHIM}"
-    if not (ROOT / FONTS / "manrope-cyrillic.woff2").exists():
-        return f"шрифта карточек нет в {ROOT / FONTS}"
+    missing = [f for f in FACES if not (ROOT / FONTS / f"{f}.css").exists()]
+    if missing:
+        return (f"шрифтов карточек нет в {ROOT / FONTS}: "
+                + ", ".join(missing))
     return ""
 
 
@@ -111,7 +131,21 @@ def _env() -> dict[str, str]:
 
 def template_of(spec: dict[str, Any]) -> str:
     """Какой шаблон собирает это задание."""
-    return "shot.html" if spec.get("kind") == SHOT else "panel.html"
+    kind = spec.get("kind")
+    if kind == TRACK:
+        return "track.html"
+    if kind == SHOT:
+        return "shot.html"
+    if kind == PHOTO:
+        return "photo.html"
+    return "panel.html"
+
+
+def face(name: str) -> str:
+    """Файл стилей гарнитуры. Имя не из списка — Manrope: шрифт, которого
+    нет, иначе подменится системным молча, уже на готовом кадре."""
+    plain = (name or "").replace(" ", "")
+    return f"{plain if plain in FACES else CARD_FONT}.css"
 
 
 def _digest(spec: dict[str, Any], template: str) -> str:
@@ -154,17 +188,25 @@ def panel_spec(block: dict[str, Any], *, size: tuple[int, int],
         return None
     if block.get("imagePath") and image is None:
         return None
+    # `art` без картинки это не карточка, а пустое место: сорт заведён
+    # ради самой картинки по теме.
+    if kind == "art" and image is None:
+        return None
     start = float(block["start"])
     dur = round(float(block["end"]) - start, 3)
     if dur < MIN_SECONDS:
         return None
-    if block.get("imagePath") and kind == "card":
-        kind = SHOT
+    if block.get("imagePath") and kind in ("card", "art"):
+        # Окно браузера — только снимку страницы: он и есть страница, и
+        # приходит он от `panelshot` в блоке `card`. Картинка по теме и
+        # фотография (`art`) идут кадром во всю карточку: рамка браузера
+        # вокруг снимка читается как чужой интерфейс.
+        kind = SHOT if kind == "card" else PHOTO
     lines = [str(s) for s in block.get("lines") or []]
     items = [{"text": str(it["text"]), "at": round(float(it["at"]) - start, 3)}
              for it in block.get("items") or []]
     if not lines and not items and block.get("value") is None \
-            and kind != SHOT:
+            and kind not in (SHOT, PHOTO):
         return None
     w, h = size
     spec: dict[str, Any] = {
@@ -200,7 +242,10 @@ def panel_spec(block: dict[str, Any], *, size: tuple[int, int],
 def cover_spec(*, size: tuple[int, int], fps: int, seconds: float,
                lines: list[dict[str, Any]], anchor: str, inset: float,
                focus: tuple[float, float], scrim: float, blur: bool,
-               back: str, image: Path | None) -> dict[str, Any]:
+               back: str, image: Path | None,
+               title: str = "", title_color: str = "#FFFFFF",
+               title_size: int = 38, brand_name: str = "",
+               font: str = CARD_FONT, weight: int = 800) -> dict[str, Any]:
     """Обложка в задание. Числа те же, что у неподвижной обложки.
 
     Кегль и цвет строк считает питон по ТЗ площадки
@@ -223,6 +268,14 @@ def cover_spec(*, size: tuple[int, int], fps: int, seconds: float,
         "fps": fps,
         "duration": round(float(seconds), 3),
         "imageSrc": image.name if image else "",
+        "imageMark": (hashlib.sha256(image.read_bytes()).hexdigest()[:16]
+                      if image else ""),
+        "title": title,
+        "titleColor": title_color,
+        "titleSize": int(title_size),
+        "brandName": brand_name,
+        "font": font,
+        "weight": int(weight),
     }
 
 
@@ -237,6 +290,9 @@ def _write_job(job: Path, template: str, spec: dict[str, Any],
     job.mkdir(parents=True, exist_ok=True)
     body = (TEMPLATES / template).read_text(encoding="utf-8")
     body = (body
+            .replace("__FONTCSS__", face(spec.get("font", "")))
+            .replace("__FONT__", face(spec.get("font", ""))[:-4])
+            .replace("__IMG__", spec.get("imageSrc", ""))
             .replace("__W__", str(spec["width"]))
             .replace("__H__", str(spec["height"]))
             .replace("__FPS__", str(spec["fps"]))
@@ -252,7 +308,6 @@ def _write_job(job: Path, template: str, spec: dict[str, Any],
         body = (body
                 .replace("__SW__", str(shot[0]))
                 .replace("__SH__", str(shot[1]))
-                .replace("__IMG__", spec.get("imageSrc", ""))
                 .replace("__VARS__", json.dumps(
                     {"chrome": "browser",
                      "title": spec.get("stageTitle") or "",
@@ -299,7 +354,9 @@ async def _render(job: Path, out: Path, *, cap: int) -> None:
 
 
 async def clip(b, spec: dict[str, Any], *, template: str = "",
-               image: Path | None = None, cap: int = CLIP_CAP) -> Path:
+               image: Path | None = None,
+               images: dict[int, Path] | None = None,
+               cap: int = CLIP_CAP) -> Path:
     """Готовый mp4 на это задание. Бросает `NoClip` строкой причины.
 
     Кэш по отпечатку: тот же блок на пересборке ролика второй раз не
@@ -314,7 +371,7 @@ async def clip(b, spec: dict[str, Any], *, template: str = "",
     mark = _digest(spec, template)
     folder = b.path(FRAMES)
     folder.mkdir(parents=True, exist_ok=True)
-    out = folder / f"{spec.get('kind', 'cover')}-{mark[:16]}.mp4"
+    out = folder / f"{spec.get('kind') or 'cover'}-{mark[:16]}.mp4"
     if out.exists() and out.stat().st_size > 0:
         return out
 
@@ -322,6 +379,8 @@ async def clip(b, spec: dict[str, Any], *, template: str = "",
     shutil.rmtree(job, ignore_errors=True)
     try:
         _write_job(job, template, spec, image)
+        for src in (images or {}).values():
+            shutil.copy2(src, job / src.name)
         await _render(job, out, cap=cap)
     finally:
         shutil.rmtree(job, ignore_errors=True)
@@ -383,3 +442,166 @@ class Local:
         out = self.root / rel
         out.parent.mkdir(parents=True, exist_ok=True)
         return out
+
+
+# ── символы ─────────────────────────────────────────────────────────
+
+# Значки рисуются линией прямо в композиции: `d` пути лежит здесь, цвет
+# берётся от текста. Набор закрытый и маленький нарочно — имя не из
+# списка это молчаливо пропавший значок, и ловить такое на готовом
+# ролике дороже, чем назвать строкой.
+#
+# Внешнего источника нет по той же причине, по какой нет шрифта из
+# сети: рендер обязан идти без интернета, а знак продукта у нас и так
+# снимается фавиконом со страницы (`panelshot`).
+ICONS = {
+    "папка": "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+    "видео": "M3 6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M17 9l4-3v12l-4-3",
+    "кадр": "M4 4h16v16H4z M4 9h16 M4 15h16 M9 4v16 M15 4v16",
+    "ножницы": "M6 4l12 12 M18 4L6 16 M7 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4z M17 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4z",
+    "музыка": "M9 18V5l12-2v13 M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0z M21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z",
+    "часы": "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M12 7v5l3 2",
+    "галочка": "M4 13l5 5L20 6",
+    "искра": "M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z",
+    "терминал": "M4 5h16v14H4z M7 9l3 3-3 3 M13 15h4",
+    "картинка": "M4 5h16v14H4z M4 16l5-5 4 4 3-3 4 4",
+    "текст": "M5 5h14 M5 10h14 M5 15h9",
+    "список": "M8 6h12 M8 12h12 M8 18h12 M4 6h.01 M4 12h.01 M4 18h.01",
+    "поиск": "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.3-4.3",
+    "палочка": "M4 20L17 7 M15 5l4 4 M14 4l1 2 2 1-2 1-1 2-1-2-2-1 2-1z",
+    "шестерёнка": "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19 12l2-1-1-3-2 .4a7 7 0 0 0-2-1.2L15 5h-3l-.9 2.2a7 7 0 0 0-2 1.2L7 8 6 11l2 1-2 1 1 3 2-.4a7 7 0 0 0 2 1.2L12 19h3l.9-2.2a7 7 0 0 0 2-1.2l2 .4 1-3z",
+    "речь": "M20 15a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z",
+    "стрелка": "M5 12h14 M13 6l6 6-6 6",
+    "замок": "M6 11h12v9H6z M9 11V8a3 3 0 0 1 6 0v3",
+}
+
+
+def icon(name: str) -> str:
+    """Путь значка по имени. Имени нет в наборе — пусто, и это видно
+    вызывающему: он назовёт пропажу строкой, а не нарисует пустоту."""
+    return ICONS.get((name or "").strip().lower(), "")
+
+
+# ── дорожка панели: один клип вместо шести ──────────────────────────
+
+# Потолок на дорожку: это минута видео 1080×576 одним рендером. Замер
+# 15.10 — 56 с дорожки собрались за 146 с.
+TRACK_CAP = 600
+
+
+def track_spec(blocks: list[dict[str, Any]], *, size: tuple[int, int],
+               fps: int, colors: dict[str, str], band: int,
+               images: dict[int, Path] | None = None,
+               ) -> dict[str, Any] | None:
+    """Все блоки панели одним заданием. `None` — дорожки не будет.
+
+    Карточка перестаёт быть отдельным клипом и становится сценой внутри
+    общего времени: отсюда и переход между соседними, и фон, который не
+    прерывается на стыке. Шесть клипов встык дают шесть статик подряд —
+    это видно на готовом ролике и было первой жалобой на анимацию.
+
+    Секунды сцен — от начала дорожки, а дорожка начинается с первого
+    блока: внутри клипа о ролике не знают.
+
+    `full` сюда не идёт: такой блок разворачивает панель на весь кадр, и
+    холст у него другой. Есть хоть один — дорожки нет, блоки собираются
+    поодиночке, как раньше.
+    """
+    if not blocks or any(b.get("full") for b in blocks):
+        return None
+    shots = images or {}
+    w, h = size
+    start = float(blocks[0]["start"])
+    end = max(float(b["end"]) for b in blocks)
+    if end - start < MIN_SECONDS:
+        return None
+
+    scenes: list[dict[str, Any]] = []
+    for i, b in enumerate(blocks):
+        kind = str(b.get("kind", "card"))
+        if kind == "media" or b.get("videoPath"):
+            # Запись из альбома остаётся Remotion: там наезд на слово и
+            # своя арифметика. Дорожка её не покрывает — значит и
+            # дорожки нет, иначе на её месте будет дыра.
+            return None
+        at = float(b["start"]) - start
+        scene: dict[str, Any] = {
+            "kind": kind,
+            "kicker": str(b.get("kicker") or ""),
+            "lines": [str(s) for s in b.get("lines") or []],
+            # Подпись и число у пункта нужны плиткам и столбикам; у
+            # списка их просто нет, и пустыми они не едут.
+            "items": [{k: v for k, v in (
+                ("text", str(it["text"])),
+                ("at", round(float(it["at"]) - float(b["start"]), 3)),
+                ("note", str(it.get("note") or "")),
+                ("value", it.get("value")),
+                ("icon", icon(str(it.get("icon") or ""))),
+            ) if v not in ("", None)} for it in b.get("items") or []],
+            "start": round(at, 3),
+            "end": round(float(b["end"]) - start, 3),
+        }
+        if b.get("icon"):
+            scene["icon"] = icon(str(b["icon"]))
+        if b.get("value") is not None:
+            scene["value"] = int(b["value"])
+            scene["valueAt"] = round(
+                float(b.get("valueAt", b["start"])) - float(b["start"]), 3)
+        if i in shots:
+            shot = shots[i]
+            scene["imageSrc"] = shot.name
+            scene["imageMark"] = hashlib.sha256(
+                shot.read_bytes()).hexdigest()[:16]
+            # Окно браузера — только снимку страницы (`card`), и рисуется
+            # оно в самой дорожке: блок каталога это подкомпозиция с
+            # одним слотом на композицию, а окон в дорожке бывает
+            # несколько и скрины у них разные.
+            scene["frame"] = "browser" if kind == "card" else "photo"
+            scene["stageTitle"] = str(b.get("stageTitle") or "")
+        scenes.append(scene)
+
+    return {
+        "kind": TRACK,
+        "scenes": scenes,
+        "width": w,
+        "height": h,
+        "fps": fps,
+        "duration": round(end - start, 3),
+        "offset": round(start, 3),
+        "reserve": band,
+        "panelColor": colors["panelColor"],
+        "accentColor": colors["accentColor"],
+        "textColor": colors["textColor"],
+        "cardColor": colors["cardColor"],
+        "glowColor": colors.get("glowColor", colors["cardColor"]),
+        "font": CARD_FONT,
+    }
+
+
+async def panel_track(b, blocks: list[dict[str, Any]], *,
+                      size: tuple[int, int], fps: int,
+                      colors: dict[str, str], split: float,
+                      images: dict[int, Path] | None = None
+                      ) -> tuple[Path | None, float, list[str]]:
+    """Дорожка панели одним файлом: путь, её начало в ролике и строки.
+
+    Картинок в дорожке бывает несколько, а папка задания одна — файлы с
+    совпадающими именами разъехались бы молча, поэтому каждая картинка
+    едет под именем от своего отпечатка.
+    """
+    gap = ready()
+    if gap:
+        return None, 0.0, [f"панель без анимации — {gap}"]
+
+    w, h = size
+    spec = track_spec(blocks, size=(w, round(h * split)), fps=fps,
+                      colors=colors, band=round(h * split * CAPTION_BAND),
+                      images=images)
+    if spec is None:
+        return None, 0.0, []
+    try:
+        made = await clip(b, spec, template="track.html",
+                          images=images, cap=TRACK_CAP)
+    except NoClip as e:
+        return None, 0.0, [f"панель без анимации — {e}"]
+    return made, spec["offset"], []

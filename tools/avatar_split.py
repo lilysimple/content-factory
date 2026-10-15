@@ -106,7 +106,7 @@ def _blocks(cards: list[dict], words: list[dict],
     starts = _starts(cards, words)
     ends = [s - GAP for s in starts[1:]] + [max(0.0, total - SOLO)]
     out: list[dict] = []
-    for card, start, end in zip(cards, starts, ends):
+    for i, (card, start, end) in enumerate(zip(cards, starts, ends)):
         if end - start < montage.BLOCK_MIN:
             raise NoBlocks(f"«{(card.get('lines') or ['?'])[0]}»: на панели "
                            f"{round(end - start, 1)} с, короче "
@@ -119,11 +119,41 @@ def _blocks(cards: list[dict], words: list[dict],
         }
         if card.get("kicker"):
             block["kicker"] = str(card["kicker"])
+        if card.get("icon"):
+            block["icon"] = str(card["icon"])
+        # Пункты карточки: каждый приходит на своём слове. Это и есть
+        # анимация по речи — плашка, шаг потока или строка терминала
+        # появляется тогда, когда её называют, а не вместе с карточкой.
+        points = []
+        for j, it in enumerate(card.get("points") or []):
+            when = it.get("at")
+            if isinstance(when, (int, float)):
+                at = float(when)
+            elif when:
+                at = _spoken(str(when), words, f"карточка {i + 1}, пункт {j + 1}")
+            else:
+                at = start + 0.3 * (j + 1)
+            point = {"text": str(it["text"]), "at": round(at, 2)}
+            if it.get("note"):
+                point["note"] = str(it["note"])
+            if it.get("value") is not None:
+                point["value"] = float(it["value"])
+            if it.get("icon"):
+                point["icon"] = str(it["icon"])
+            points.append(point)
+        if points:
+            block["items"] = points
         if card.get("image") or card.get("url"):
-            # Карточка со скрином: сам файл приедет отдельно (`shots`),
-            # здесь только отметка, что картинка у блока есть.
+            # Сам файл приедет отдельно (`shots`), здесь только отметка,
+            # что картинка у блока есть. Адрес (`url`) — это страница, и
+            # она идёт в окно браузера; присланный файл — фотография, и
+            # окна вокруг снимка не бывает.
             block["imagePath"] = "shot.png"
-            block["stageTitle"] = str(card.get("title") or "")
+            if card.get("url"):
+                block["kind"] = "card"
+                block["stageTitle"] = str(card.get("title") or "")
+            else:
+                block["kind"] = "art"
         if card.get("value") is not None:
             block["value"] = int(card["value"])
             phrase = str(card.get("at") or "").strip()
@@ -211,10 +241,17 @@ async def build(video: Path, cards: list[dict], out: Path, *,
             except panelshot.NoShot as e:
                 notes.append(f"карточка {i + 1} без скрина — {e}")
 
-    clips, gaps = await frames.panel_clips(
+    track, track_at, gaps = await frames.panel_track(
         cache, blocks, size=(1080, 1920), fps=fps,
         colors=montage.panel_colors(), split=split, images=shots)
     notes.extend(gaps)
+
+    clips: dict[int, Path] = {}
+    if track is None:
+        clips, gaps = await frames.panel_clips(
+            cache, blocks, size=(1080, 1920), fps=fps,
+            colors=montage.panel_colors(), split=split, images=shots)
+        notes.extend(gaps)
     for i, clip in clips.items():
         blocks[i]["clipPath"] = f"clip-{out.stem}-{i}.mp4"
 
@@ -225,7 +262,7 @@ async def build(video: Path, cards: list[dict], out: Path, *,
     for i, block in enumerate(blocks):
         if "imagePath" not in block:
             continue
-        if i in clips or i not in shots:
+        if track is not None or i in clips or i not in shots:
             block.pop("imagePath", None)
             continue
         name = f"shot-{out.stem}-{i}{shots[i].suffix.lower()}"
@@ -235,11 +272,16 @@ async def build(video: Path, cards: list[dict], out: Path, *,
     name = f"avatar-{out.stem}{video.suffix}"
     payload = props(name, probe, blocks, pages, fps=fps, head=head,
                     split=split)
+    if track is not None:
+        payload["trackPath"] = f"track-{out.stem}.mp4"
+        payload["trackStart"] = round(track_at, 3)
     frame_count = max(1, round(probe.duration * fps))
 
     staged = {name: video}
     staged.update({blocks[i]["clipPath"]: clip for i, clip in clips.items()})
     staged.update(extra)
+    if track is not None:
+        staged[payload["trackPath"]] = track
 
     await montage._ready()
     with montage._staged(staged):

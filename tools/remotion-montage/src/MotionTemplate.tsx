@@ -146,6 +146,8 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
         }}
       >
         <Panel
+          trackPath={props.trackPath}
+          trackStart={props.trackStart}
           blocks={splitBlocks}
           panelColor={props.panelColor}
           glowColor={props.glowColor}

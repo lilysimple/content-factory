@@ -3,26 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <title>Карточка панели</title>
+    <link rel="stylesheet" href="./fonts/__FONTCSS__" />
     <script src="./vendor/gsap.min.js"></script>
     <style>
-      /* Manrope — тот же шрифт, которым Remotion набирает субтитры и
-         заголовок обложки. Файл лежит рядом, а не тянется из сети:
-         рендер идёт без интернета, а правило `font_family_without_font_face`
-         именованную гарнитуру без локального файла не пропускает. Две
-         подрезки: кириллица и латиница — в карточках обе. */
-      @font-face {
-        font-family: 'Manrope';
-        font-style: normal;
-        font-weight: 400 800;
-        src: url('./fonts/manrope-cyrillic.woff2') format('woff2');
-        unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
-      }
-      @font-face {
-        font-family: 'Manrope';
-        font-style: normal;
-        font-weight: 400 800;
-        src: url('./fonts/manrope-latin.woff2') format('woff2');
-      }
       body { margin: 0; }
       #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
       .clip { position: absolute; inset: 0; }
@@ -30,19 +13,19 @@
         position: absolute; inset: 0;
         display: flex; flex-direction: column; justify-content: center;
         box-sizing: border-box;
-        font-family: 'Manrope', system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+        font-family: '__FONT__', system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
         font-synthesis-weight: none;
       }
       .kicker {
-        font-size: 26px; font-weight: 700; letter-spacing: 0.18em;
+        font-size: 26px; font-weight: 800; letter-spacing: 0.18em;
         text-transform: uppercase; margin: 0 0 18px;
       }
       .line { font-weight: 800; margin: 0 0 10px; line-height: 1.08; }
-      .line.sub { font-weight: 600; opacity: 0.74; }
+      .line.sub { font-weight: 500; opacity: 0.74; }
       .items { margin: 14px 0 0; padding: 0; list-style: none; }
       .item {
         display: flex; align-items: baseline; gap: 16px;
-        font-weight: 600; margin: 0 0 12px; line-height: 1.2;
+        font-weight: 500; margin: 0 0 12px; line-height: 1.2;
       }
       .dot { display: block; width: 14px; height: 14px; border-radius: 50%; flex: none; }
       .count { font-weight: 800; line-height: 1; margin: 0; }
@@ -50,7 +33,7 @@
       .rail { position: absolute; left: 0; right: 0; height: 6px; border-radius: 3px; }
       .step {
         position: relative; flex: 1 1 0; display: flex; flex-direction: column;
-        align-items: center; gap: 14px; font-weight: 600; z-index: 2;
+        align-items: center; gap: 14px; font-weight: 500; z-index: 2;
       }
       .notch { display: block; width: 18px; height: 18px; border-radius: 50%; }
       /* Бегунок это кольцо вокруг ступени, а не кружок поверх неё: поверх

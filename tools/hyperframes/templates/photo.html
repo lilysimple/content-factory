@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Карточка с фотографией</title>
+    <link rel="stylesheet" href="./fonts/__FONTCSS__" />
+    <script src="./vendor/gsap.min.js"></script>
+    <style>
+      body { margin: 0; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+      .clip { position: absolute; inset: 0; }
+      #photo { position: absolute; inset: 0; display: block;
+               width: 100%; height: 100%; object-fit: cover; }
+      /* Шторка: кадр открывается полосой снизу вверх, а не проявляется
+         пятном. Проявление на три секунды читается как подгрузка. */
+      #veil { position: absolute; inset: 0; display: block; }
+      #shade { position: absolute; inset: 0; display: block; }
+      #words {
+        position: absolute; left: 0; right: 0; bottom: 0;
+        display: flex; flex-direction: column; box-sizing: border-box;
+        font-family: '__FONT__', system-ui, -apple-system, Arial, sans-serif;
+        font-synthesis-weight: none;
+      }
+      .kicker { font-size: 26px; font-weight: 800; letter-spacing: 0.18em;
+                text-transform: uppercase; margin: 0 0 14px; }
+      .line { font-weight: 800; margin: 0 0 8px; line-height: 1.1; }
+      .line.sub { font-weight: 500; opacity: 0.86; }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="photo"
+      data-start="0"
+      data-width="__W__"
+      data-height="__H__"
+      data-fps="__FPS__"
+      data-duration="__DUR__"
+    >
+      <section id="card" class="clip" data-start="0" data-duration="__DUR__">
+        <img id="photo" alt="" src="__IMG__" />
+        <span id="shade"></span>
+        <span id="veil"></span>
+        <div id="words"></div>
+      </section>
+    </div>
+    <script type="application/json" id="spec">__SPEC__</script>
+    <script>
+      // Карточка с фотографией: кадр едет сам (дрейф), слова лежат на
+      // затемнённом низу. Для фото это честнее окна браузера — рамка
+      // вокруг снимка читается как чужой интерфейс.
+      const spec = JSON.parse(document.getElementById('spec').textContent);
+      const unit = Math.min(spec.height / 12, spec.width / 14);
+      const box = document.getElementById('words');
+      const photo = document.getElementById('photo');
+
+      document.body.style.background = spec.panelColor;
+      box.style.color = '#fff';
+      const side = Math.round(unit * 1.1);
+      box.style.padding = Math.round(unit * 0.8) + 'px ' + side + 'px '
+        + (Math.round(unit * 0.7) + (spec.reserve || 0)) + 'px ' + side + 'px';
+      document.getElementById('shade').style.background =
+        'linear-gradient(0deg, rgba(0,0,0,0.72) 0%, rgba(0,0,0,0.38) '
+        + (40 + (spec.reserve ? 14 : 0)) + '%, rgba(0,0,0,0) 72%)';
+      document.getElementById('veil').style.background = spec.panelColor;
+
+      const made = [];
+      if (spec.kicker) {
+        const k = document.createElement('p');
+        k.className = 'kicker';
+        k.textContent = spec.kicker;
+        k.style.color = spec.accentColor;
+        k.style.fontSize = Math.round(unit * 0.42) + 'px';
+        box.appendChild(k);
+        made.push(k);
+      }
+      spec.lines.forEach((text, i) => {
+        const p = document.createElement('p');
+        p.className = i === 0 ? 'line' : 'line sub';
+        p.textContent = text;
+        p.style.fontSize = Math.round(unit * (i === 0 ? 0.92 : 0.6)) + 'px';
+        box.appendChild(p);
+        made.push(p);
+      });
+
+      const tl = gsap.timeline({paused: true});
+      tl.fromTo('#veil', {yPercent: 0}, {yPercent: -100, duration: 0.6,
+                                         ease: 'power3.inOut'}, 0);
+      tl.fromTo(photo, {scale: 1.04, xPercent: 0},
+                {scale: 1.1, xPercent: -1.2, duration: spec.duration,
+                 ease: 'none'}, 0);
+      made.forEach((node, i) => {
+        tl.fromTo(node, {y: Math.round(unit * 0.4), opacity: 0},
+                  {y: 0, opacity: 1, duration: 0.42, ease: 'power3.out'},
+                  0.45 + i * 0.14);
+      });
+      window.__timelines['photo'] = tl;
+    </script>
+  </body>
+</html>

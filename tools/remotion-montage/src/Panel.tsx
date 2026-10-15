@@ -1111,6 +1111,10 @@ export const Panel: React.FC<{
   // Секунда готового ролика, в которой панель начинается. Блоки живут в
   // абсолютных секундах, а Sequence отсчитывает от своего начала.
   offset: number;
+  // Готовая дорожка: вся панель одним клипом. Есть — играем её и ничего
+  // не рисуем, внутри уже и фон, и переходы между сценами.
+  trackPath?: string;
+  trackStart?: number;
 }> = ({
   blocks,
   panelColor,
@@ -1120,6 +1124,8 @@ export const Panel: React.FC<{
   textColor,
   panelHeight,
   offset,
+  trackPath,
+  trackStart = 0,
 }) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
@@ -1128,6 +1134,24 @@ export const Panel: React.FC<{
   // полминуты превращается в грязь на матрице — глаз перестаёт читать
   // его как свет и начинает как дефект кадра.
   const breath = 0.5 + 0.5 * Math.sin((frame / fps) * ((Math.PI * 2) / 8));
+
+  if (trackPath) {
+    return (
+      <AbsoluteFill style={{background: panelColor, overflow: 'hidden'}}>
+        <Sequence
+          from={Math.round((trackStart - offset) * fps)}
+          name="Дорожка панели"
+        >
+          <Video
+            src={staticFile(trackPath)}
+            muted
+            objectFit="cover"
+            style={{position: 'absolute', inset: 0, width: '100%', height: '100%'}}
+          />
+        </Sequence>
+      </AbsoluteFill>
+    );
+  }
 
   return (
     <AbsoluteFill style={{background: panelColor, overflow: 'hidden'}}>

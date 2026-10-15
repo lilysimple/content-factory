@@ -3,43 +3,26 @@
   <head>
     <meta charset="UTF-8" />
     <title>Карточка со скрином</title>
+    <link rel="stylesheet" href="./fonts/__FONTCSS__" />
     <script src="./vendor/gsap.min.js"></script>
     <style>
-      /* Manrope — тот же шрифт, которым Remotion набирает субтитры и
-         заголовок обложки. Файл лежит рядом, а не тянется из сети:
-         рендер идёт без интернета, а правило `font_family_without_font_face`
-         именованную гарнитуру без локального файла не пропускает. Две
-         подрезки: кириллица и латиница — в карточках обе. */
-      @font-face {
-        font-family: 'Manrope';
-        font-style: normal;
-        font-weight: 400 800;
-        src: url('./fonts/manrope-cyrillic.woff2') format('woff2');
-        unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
-      }
-      @font-face {
-        font-family: 'Manrope';
-        font-style: normal;
-        font-weight: 400 800;
-        src: url('./fonts/manrope-latin.woff2') format('woff2');
-      }
       body { margin: 0; }
       #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
       .clip { position: absolute; inset: 0; }
       #pad {
         position: absolute; inset: 0; display: flex; align-items: center;
         box-sizing: border-box; gap: 0;
-        font-family: 'Manrope', system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+        font-family: '__FONT__', system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
         font-synthesis-weight: none;
       }
       #words { flex: 0 0 42%; display: flex; flex-direction: column; }
       #stage-box { flex: 1 1 auto; position: relative; height: 100%; }
       .kicker {
-        font-size: 26px; font-weight: 700; letter-spacing: 0.18em;
+        font-size: 26px; font-weight: 800; letter-spacing: 0.18em;
         text-transform: uppercase; margin: 0 0 16px;
       }
       .line { font-weight: 800; margin: 0 0 8px; line-height: 1.1; }
-      .line.sub { font-weight: 600; opacity: 0.74; }
+      .line.sub { font-weight: 500; opacity: 0.74; }
     </style>
   </head>
   <body>

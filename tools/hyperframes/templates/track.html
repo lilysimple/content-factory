@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Дорожка панели</title>
+    <link rel="stylesheet" href="./fonts/__FONTCSS__" />
+    <script src="./vendor/gsap.min.js"></script>
+    <style>
+      body { margin: 0; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+      .clip { position: absolute; inset: 0; }
+      /* Фон живёт всю дорожку и не принадлежит ни одной сцене: это и
+         есть разница между потоком и шестью клипами встык. */
+      #glow { position: absolute; inset: -20%; display: block; }
+      #bar { position: absolute; left: 0; bottom: 0; height: 5px; }
+      .scene {
+        position: absolute; inset: 0; display: flex; flex-direction: column;
+        justify-content: center; box-sizing: border-box;
+        font-family: '__FONT__', system-ui, -apple-system, Arial, sans-serif;
+        font-synthesis-weight: none;
+      }
+      .kicker { font-weight: 800; letter-spacing: 0.18em;
+                text-transform: uppercase; margin: 0 0 16px; }
+      .line { font-weight: 800; margin: 0 0 8px; line-height: 1.08; }
+      .line.sub { font-weight: 500; opacity: 0.74; }
+      .items { margin: 12px 0 0; padding: 0; list-style: none; }
+      .item { display: flex; align-items: baseline; font-weight: 500;
+              margin: 0 0 10px; line-height: 1.2; }
+      .dot { display: block; border-radius: 50%; flex: none; }
+      .count { font-weight: 800; line-height: 1; margin: 0; }
+      /* Плашки-слова: каждая влетает на своём слове. Это и есть
+         «анимация по словам» — панель меняется в темпе речи, а не раз
+         в семь секунд. */
+      .chips { display: flex; flex-wrap: wrap; margin: 0; padding: 0;
+               list-style: none; }
+      .chip { font-weight: 800; border-radius: 999px; white-space: nowrap; }
+      /* Фраза с подсветкой: слово загорается ровно тогда, когда звучит. */
+      .mark { font-weight: 800; line-height: 1.12; margin: 0; }
+      .mark span { transition: none; }
+      /* Поток: три-четыре шага со стрелками. Это самая частая
+         инфографика по тексту — «из папки → Клод → черновик». */
+      .flow { display: flex; align-items: stretch; margin: 0; padding: 0;
+              list-style: none; }
+      .node { flex: 1 1 0; display: flex; flex-direction: column;
+              justify-content: center; border-radius: 22px;
+              font-weight: 800; text-align: center; }
+      .arrow { flex: none; align-self: center; font-weight: 800; }
+      /* Плитки: иконка и подпись, появляются по очереди. */
+      .grid { display: grid; margin: 0; padding: 0; list-style: none; }
+      .tile { border-radius: 22px; display: flex; flex-direction: column;
+              justify-content: center; font-weight: 500; }
+      .tile b { font-weight: 800; display: block; }
+      /* Окно терминала: строки печатаются по одной. */
+      .term { border-radius: 18px; overflow: hidden; display: flex;
+              flex-direction: column; font-family: ui-monospace, Menlo, monospace; }
+      .term-bar { display: flex; align-items: center; flex: none; }
+      .term-body { flex: 1 1 auto; }
+      /* Строка держит свою высоту до того, как напечатается: иначе
+         окно терминала растёт по ходу печати и дёргает весь блок. */
+      .term-line { margin: 0; white-space: nowrap; overflow: hidden;
+                   min-height: 1.3em; }
+      /* Столбики: значение набегает вместе с высотой. */
+      .bars { display: flex; align-items: flex-end; margin: 0; padding: 0;
+              list-style: none; }
+      .bar { flex: 1 1 0; display: flex; flex-direction: column;
+             justify-content: flex-end; align-items: center; }
+      .bar i { display: block; width: 62%; border-radius: 10px 10px 0 0; }
+      .bar span { font-weight: 500; }
+      .rail { position: relative; height: 6px; border-radius: 3px; margin: 8px 0 0; }
+      .knob { position: absolute; border-radius: 50%; top: 50%; left: 0; }
+      .steps { display: flex; margin: 0; padding: 0; list-style: none; }
+      .step { flex: 1 1 0; text-align: center; font-weight: 500; }
+      /* Картинка сцены: кадр во всю её высоту справа, слова слева. На
+         панели в треть холста фото во весь кадр съедает текст. */
+      .shot { position: absolute; top: 0; bottom: 0; right: 0;
+              overflow: hidden; border-radius: 28px; }
+      .shot img { display: block; width: 100%; height: 100%; object-fit: cover; }
+      .frame { position: absolute; top: 0; bottom: 0; right: 0;
+               overflow: hidden; border-radius: 22px; display: flex;
+               flex-direction: column; }
+      .bar-top { display: flex; align-items: center; gap: 8px; flex: none; }
+      .pill { flex: 1 1 auto; border-radius: 999px; text-align: center;
+              font-family: ui-monospace, Menlo, monospace; overflow: hidden;
+              white-space: nowrap; text-overflow: ellipsis; }
+      .lamp { border-radius: 50%; flex: none; }
+      .page { flex: 1 1 auto; overflow: hidden; }
+      .page img { display: block; width: 100%; height: auto; }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="track"
+      data-start="0"
+      data-width="__W__"
+      data-height="__H__"
+      data-fps="__FPS__"
+      data-duration="__DUR__"
+    >
+      <section id="track" class="clip" data-start="0" data-duration="__DUR__">
+        <span id="glow"></span>
+        <div id="stage"></div>
+        <span id="bar"></span>
+      </section>
+    </div>
+    <script type="application/json" id="spec">__SPEC__</script>
+    <script>
+      // Дорожка панели: один клип на весь ролик. Карточки здесь не
+      // клипы, а сцены внутри общего времени — поэтому между ними есть
+      // переход, а фон под ними не прерывается. Секунды сцен считает
+      // питон от начала дорожки.
+      const spec = JSON.parse(document.getElementById('spec').textContent);
+      const unit = Math.min(spec.height / 12, spec.width / 14);
+      const stage = document.getElementById('stage');
+      const glow = document.getElementById('glow');
+      const bar = document.getElementById('bar');
+
+      document.body.style.background = spec.panelColor;
+      glow.style.background = 'radial-gradient(circle at 38% 46%, '
+        + spec.glowColor + ' 0%, rgba(0,0,0,0) 62%)';
+      bar.style.background = spec.accentColor;
+      bar.style.opacity = '0.5';
+      bar.style.width = '0%';
+
+      // Значок рисуется линией: путь пришёл в задании, цвет берётся от
+      // текста рядом. Пустой путь значит, что имени не было в наборе —
+      // тогда значка просто нет, место под него не остаётся.
+      const svg = (d, size, color) => {
+        if (!d) { return null; }
+        const n = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        n.setAttribute('viewBox', '0 0 24 24');
+        n.setAttribute('fill', 'none');
+        n.setAttribute('stroke', color);
+        n.setAttribute('stroke-width', '1.8');
+        n.setAttribute('stroke-linecap', 'round');
+        n.setAttribute('stroke-linejoin', 'round');
+        n.style.cssText = 'width:' + size + 'px;height:' + size
+          + 'px;flex:none;display:block';
+        d.split(' M').forEach((part, i) => {
+          const path = document.createElementNS(
+            'http://www.w3.org/2000/svg', 'path');
+          path.setAttribute('d', (i ? 'M' : '') + part);
+          n.appendChild(path);
+        });
+        return n;
+      };
+
+      const el = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text !== undefined) n.textContent = text;
+        return n;
+      };
+      const px = (k) => Math.round(unit * k) + 'px';
+
+      const side = Math.round(unit * 1.1);
+      const scenes = [];
+      // Простым списком с точками рисуются только эти сорта: у
+      // остальных пункты уже нарисованы своей графикой, и второй
+      // список под ней — дубль, который видно на готовом кадре.
+      const PLAIN_LIST = new Set(['card', 'icon', 'art', 'counter']);
+
+      spec.scenes.forEach((s, i) => {
+        const box = el('div', 'scene');
+        box.style.color = spec.textColor;
+        box.style.padding = px(0.8) + ' ' + side + 'px '
+          + (Math.round(unit * 0.8) + (spec.reserve || 0)) + 'px ' + side + 'px';
+
+        // Картинка занимает правую половину и держит её всю сцену: так
+        // кадр успевает прочитаться, а слова не скачут по ширине.
+        const wide = s.imageSrc ? 0.46 : 0;
+        if (wide) { box.style.paddingRight = Math.round(spec.width * wide + side) + 'px'; }
+
+        const inner = [];
+        if (s.kicker || s.icon) {
+          const head = el('div', '');
+          head.style.cssText = 'display:flex;align-items:center;gap:'
+            + px(0.22) + ';margin:0 0 ' + px(0.3);
+          const mark = svg(s.icon, Math.round(unit * 0.6), spec.accentColor);
+          if (mark) { head.appendChild(mark); }
+          if (s.kicker) {
+            const k = el('p', 'kicker', s.kicker);
+            k.style.color = spec.accentColor;
+            k.style.fontSize = px(0.38);
+            k.style.margin = '0';
+            head.appendChild(k);
+          }
+          box.appendChild(head);
+          inner.push({node: head, at: 0});
+        }
+        if (s.kind === 'flow') {
+          const row = el('ul', 'flow');
+          row.style.gap = px(0.2);
+          row.style.height = px(2.6);
+          (s.items || []).forEach((it, j) => {
+            const node = el('li', 'node');
+            const mark = svg(it.icon, Math.round(unit * 0.66), spec.accentColor);
+            if (mark) {
+              mark.style.margin = '0 auto ' + px(0.18);
+              node.appendChild(mark);
+            }
+            node.appendChild(document.createTextNode(it.text));
+            node.style.background = spec.cardColor;
+            node.style.color = spec.textColor;
+            node.style.fontSize = px(wide ? 0.4 : 0.48);
+            node.style.padding = px(0.3);
+            row.appendChild(node);
+            inner.push({node: node, at: Math.max(0, it.at)});
+            if (j < (s.items || []).length - 1) {
+              const a = el('span', 'arrow', '→');
+              a.style.color = spec.accentColor;
+              a.style.fontSize = px(0.7);
+              row.appendChild(a);
+              inner.push({node: a, at: Math.max(0, it.at) + 0.12});
+            }
+          });
+          box.appendChild(row);
+        } else if (s.kind === 'grid') {
+          const grid = el('ul', 'grid');
+          const cols = (s.items || []).length > 4 ? 3 : 2;
+          grid.style.gridTemplateColumns = 'repeat(' + cols + ', 1fr)';
+          grid.style.gap = px(0.22);
+          grid.style.flex = '1 1 auto';
+          grid.style.gridAutoRows = '1fr';
+          (s.items || []).forEach((it) => {
+            const tile = el('li', 'tile');
+            tile.style.background = spec.cardColor;
+            tile.style.padding = px(0.3);
+            tile.style.minHeight = px(1.1);
+            const mark = svg(it.icon, Math.round(unit * 0.62), spec.accentColor);
+            if (mark) { mark.style.marginBottom = px(0.16); tile.appendChild(mark); }
+            const head = document.createElement('b');
+            head.textContent = it.text;
+            head.style.fontSize = px(wide ? 0.42 : 0.5);
+            head.style.color = spec.textColor;
+            tile.appendChild(head);
+            if (it.note) {
+              const sub = el('span', '', it.note);
+              sub.style.fontSize = px(0.34);
+              sub.style.opacity = '0.72';
+              tile.appendChild(sub);
+            }
+            grid.appendChild(tile);
+            inner.push({node: tile, at: Math.max(0, it.at)});
+          });
+          box.appendChild(grid);
+        } else if (s.kind === 'terminal') {
+          const win = el('div', 'term');
+          win.style.background = spec.textColor;
+          win.style.color = spec.panelColor;
+          const bar = el('div', 'term-bar');
+          bar.style.padding = px(0.2);
+          bar.style.gap = px(0.14);
+          for (let d = 0; d < 3; d++) {
+            const lamp = el('span', '');
+            lamp.style.width = lamp.style.height = px(0.12);
+            lamp.style.borderRadius = '50%';
+            lamp.style.background = spec.panelColor;
+            lamp.style.opacity = '0.45';
+            bar.appendChild(lamp);
+          }
+          const body = el('div', 'term-body');
+          body.style.padding = '0 ' + px(0.3) + ' ' + px(0.3);
+          (s.items || []).forEach((it) => {
+            const line = el('p', 'term-line', it.text);
+            line.style.fontSize = px(wide ? 0.34 : 0.4);
+            line.style.margin = px(0.12) + ' 0';
+            body.appendChild(line);
+            inner.push({node: line, at: Math.max(0, it.at), type: true});
+          });
+          win.appendChild(bar);
+          win.appendChild(body);
+          box.appendChild(win);
+          s.typeNodes = inner.filter((m) => m.type);
+        } else if (s.kind === 'bars') {
+          const row = el('ul', 'bars');
+          row.style.gap = px(0.3);
+          row.style.height = px(2.4);
+          const top = Math.max(...(s.items || []).map((it) => it.value || 1));
+          (s.items || []).forEach((it) => {
+            const bar = el('li', 'bar');
+            const fill = document.createElement('i');
+            fill.style.background = spec.accentColor;
+            fill.style.height = Math.round(((it.value || 0) / top) * 100) + '%';
+            const cap = el('span', '', it.text);
+            cap.style.fontSize = px(0.34);
+            cap.style.marginTop = px(0.16);
+            bar.appendChild(fill);
+            bar.appendChild(cap);
+            row.appendChild(bar);
+            inner.push({node: bar, at: Math.max(0, it.at), grow: fill});
+          });
+          box.appendChild(row);
+          s.growNodes = inner.filter((m) => m.grow);
+        } else if (s.kind === 'chips') {
+          const list = el('ul', 'chips');
+          list.style.gap = px(0.22);
+          (s.items || []).forEach((it) => {
+            const li = el('li', 'chip');
+            li.style.display = 'flex';
+            li.style.alignItems = 'center';
+            li.style.gap = px(0.18);
+            const mark = svg(it.icon, Math.round(unit * 0.5), spec.accentColor);
+            if (mark) { li.appendChild(mark); }
+            li.appendChild(document.createTextNode(it.text));
+            li.style.fontSize = px(wide ? 0.46 : 0.56);
+            li.style.padding = px(0.16) + ' ' + px(0.34);
+            li.style.background = spec.cardColor;
+            li.style.color = spec.textColor;
+            list.appendChild(li);
+            inner.push({node: li, at: Math.max(0, it.at), pop: true});
+          });
+          box.appendChild(list);
+          s.chipNodes = inner.filter((m) => m.pop).map((m) => m.node);
+        } else if (s.kind === 'mark') {
+          // Фраза разбирается на слова один раз, и каждое слово — свой
+          // узел: подсветить подстроку в готовом тексте нечем.
+          const p = el('p', 'mark');
+          p.style.fontSize = px(wide ? 0.66 : 0.86);
+          const words = (s.lines[0] || '').split(' ');
+          s.wordNodes = [];
+          words.forEach((w, j) => {
+            const sp = el('span', '', w + (j < words.length - 1 ? ' ' : ''));
+            p.appendChild(sp);
+            s.wordNodes.push(sp);
+          });
+          box.appendChild(p);
+          inner.push({node: p, at: 0});
+          (s.lines.slice(1) || []).forEach((text, j) => {
+            const sub = el('p', 'line sub', text);
+            sub.style.fontSize = px(wide ? 0.46 : 0.56);
+            box.appendChild(sub);
+            inner.push({node: sub, at: 0.2 + j * 0.12});
+          });
+        } else if (s.kind === 'counter') {
+          const c = el('p', 'count', '0');
+          c.style.color = spec.accentColor;
+          c.style.fontSize = px(3.2);
+          box.appendChild(c);
+          s.countNode = c;
+        }
+        (s.lines || []).forEach((text, j) => {
+          const p = el('p', j === 0 ? 'line' : 'line sub', text);
+          p.style.fontSize = px(j === 0 ? (wide ? 0.72 : 0.92) : (wide ? 0.5 : 0.6));
+          box.appendChild(p);
+          inner.push({node: p, at: 0.12 + j * 0.14});
+        });
+        if (s.kind === 'scale') {
+          const rail = el('div', 'rail');
+          rail.style.background = spec.cardColor;
+          const knob = el('span', 'knob');
+          knob.style.background = spec.accentColor;
+          const ring = Math.round(unit * 0.5);
+          knob.style.width = knob.style.height = ring + 'px';
+          knob.style.marginTop = -ring / 2 + 'px';
+          rail.appendChild(knob);
+          const steps = el('ul', 'steps');
+          (s.items || []).forEach((it) => {
+            const li = el('li', 'step', it.text);
+            li.style.fontSize = px(0.38);
+            steps.appendChild(li);
+          });
+          box.appendChild(rail);
+          box.appendChild(steps);
+          s.knob = knob;
+          s.railNode = rail;
+          s.ring = ring;
+        } else if ((s.items || []).length && PLAIN_LIST.has(s.kind)) {
+          const list = el('ul', 'items');
+          (s.items || []).forEach((it) => {
+            const li = el('li', 'item');
+            const dot = el('span', 'dot');
+            dot.style.background = spec.accentColor;
+            dot.style.width = dot.style.height = px(0.2);
+            dot.style.marginRight = px(0.3);
+            const t = el('span', '', it.text);
+            t.style.fontSize = px(wide ? 0.48 : 0.56);
+            li.appendChild(dot);
+            li.appendChild(t);
+            list.appendChild(li);
+            inner.push({node: li, at: Math.max(0, it.at)});
+          });
+          box.appendChild(list);
+        }
+
+        if (s.imageSrc) {
+          const w = Math.round(spec.width * wide);
+          const pad = Math.round(unit * 0.7);
+          if (s.frame === 'browser') {
+            // Окно браузера рисуется здесь, а не берётся блоком каталога:
+            // блок — подкомпозиция с одним слотом на композицию, а в
+            // дорожке окон бывает несколько и скрины у них разные.
+            const win = el('div', 'frame');
+            win.style.width = w + 'px';
+            win.style.top = pad + 'px';
+            win.style.bottom = (pad + (spec.reserve || 0)) + 'px';
+            win.style.right = side + 'px';
+            win.style.background = spec.cardColor;
+            win.style.border = '1px solid ' + spec.cardColor;
+            const top = el('div', 'bar-top');
+            top.style.padding = px(0.22);
+            top.style.gap = px(0.14);
+            for (let d = 0; d < 3; d++) {
+              const lamp = el('span', 'lamp');
+              lamp.style.width = lamp.style.height = px(0.12);
+              lamp.style.background = spec.cardColor;
+              lamp.style.filter = 'brightness(0.8)';
+              top.appendChild(lamp);
+            }
+            const pill = el('span', 'pill', s.stageTitle || '');
+            pill.style.fontSize = px(0.22);
+            pill.style.padding = px(0.1) + ' ' + px(0.3);
+            pill.style.background = spec.panelColor;
+            pill.style.color = spec.textColor;
+            pill.style.opacity = '0.75';
+            top.appendChild(pill);
+            const page = el('div', 'page');
+            const img = document.createElement('img');
+            img.src = s.imageSrc;
+            img.alt = '';
+            page.appendChild(img);
+            win.appendChild(top);
+            win.appendChild(page);
+            box.appendChild(win);
+            s.shotNode = win;
+            s.pageNode = img;
+          } else {
+            const hold = el('div', 'shot');
+            hold.style.width = w + 'px';
+            hold.style.top = pad + 'px';
+            hold.style.bottom = (pad + (spec.reserve || 0)) + 'px';
+            hold.style.right = side + 'px';
+            const img = document.createElement('img');
+            img.src = s.imageSrc;
+            img.alt = '';
+            hold.appendChild(img);
+            box.appendChild(hold);
+            s.shotNode = hold;
+            s.pageNode = img;
+          }
+        }
+
+        s.node = box;
+        s.inner = inner;
+        stage.appendChild(box);
+        scenes.push(s);
+      });
+
+      const tl = gsap.timeline({paused: true});
+
+      // Фон дышит и плывёт всю дорожку: неподвижное пятно за полминуты
+      // читается грязью на матрице, а не светом.
+      tl.fromTo(glow, {xPercent: -4, yPercent: -3, scale: 1.0},
+                {xPercent: 6, yPercent: 4, scale: 1.12,
+                 duration: spec.duration, ease: 'sine.inOut'}, 0);
+      tl.to(bar, {width: '100%', duration: spec.duration, ease: 'none'}, 0);
+
+      scenes.forEach((s) => {
+        const live = Math.max(0.1, s.end - s.start);
+        gsap.set(s.node, {opacity: 0, y: Math.round(unit * 0.5)});
+        gsap.set(s.inner.map((m) => m.node), {opacity: 0});
+        // Сцена приходит снизу и уходит вверх: две соседние на секунду
+        // перекрываются, и шва между ними нет.
+        tl.to(s.node, {opacity: 1, y: 0, duration: 0.5, ease: 'power3.out'},
+              s.start);
+        s.inner.forEach((m) => {
+          tl.fromTo(m.node, {opacity: 0, y: Math.round(unit * 0.35)},
+                    {opacity: 1, y: 0, duration: 0.42, ease: 'power3.out'},
+                    s.start + 0.18 + m.at);
+        });
+        if (s.shotNode) {
+          tl.fromTo(s.shotNode, {opacity: 0, x: Math.round(unit * 0.8)},
+                    {opacity: 1, x: 0, duration: 0.6, ease: 'power3.out'},
+                    s.start + 0.1);
+          // Кадр едет всю сцену: стоящая картинка внутри потока
+          // выглядит пропавшим кадром.
+          tl.fromTo(s.pageNode, {scale: 1.0, yPercent: 0},
+                    {scale: 1.06, yPercent: s.frame === 'browser' ? -6 : -2,
+                     duration: live, ease: 'none'}, s.start);
+        }
+        if (s.typeNodes) {
+          // Строка печатается, а не проявляется: терминал, который
+          // возникает целиком, читается картинкой, а не работой.
+          s.typeNodes.forEach((m) => {
+            const full = m.node.textContent;
+            m.node.textContent = '';
+            const box = {n: 0};
+            tl.to(box, {n: full.length, duration: Math.min(1.2, full.length * 0.035),
+                        ease: 'none',
+                        onUpdate: () => {
+                          m.node.textContent = full.slice(0, Math.round(box.n));
+                        }}, s.start + 0.2 + m.at);
+          });
+        }
+        if (s.growNodes) {
+          s.growNodes.forEach((m) => {
+            const h = m.grow.style.height;
+            tl.fromTo(m.grow, {height: '0%'}, {height: h, duration: 0.6,
+                                               ease: 'power3.out'},
+                      s.start + 0.2 + m.at);
+          });
+        }
+        if (s.chipNodes) {
+          // Плашка не просто появляется, а приходит с подскоком: в
+          // потоке мягкое проявление читается подгрузкой, а не ритмом.
+          s.chipNodes.forEach((node) => {
+            tl.fromTo(node, {scale: 0.82}, {scale: 1, duration: 0.34,
+                                            ease: 'back.out(2.2)'},
+                      s.start + 0.18 + 0);
+          });
+        }
+        if (s.wordNodes) {
+          // Слово загорается акцентом на своей секунде и остаётся
+          // гореть: гаснущая подсветка читается ошибкой рендера.
+          (s.items || []).forEach((it) => {
+            const want = String(it.text || '').toLowerCase();
+            s.wordNodes.forEach((node) => {
+              const plain = node.textContent.trim().toLowerCase()
+                .replace(/[.,:;!?»«]/g, '');
+              if (!want || plain !== want) { return; }
+              tl.to(node, {color: spec.accentColor, duration: 0.2},
+                    s.start + Math.max(0, it.at));
+            });
+          });
+        }
+        if (s.countNode) {
+          const box = {n: 0};
+          tl.to(box, {n: s.value, duration: 0.9, ease: 'power2.out',
+                      onUpdate: () => {
+                        s.countNode.textContent = String(Math.round(box.n));
+                      }}, s.start + Math.max(0, s.valueAt));
+          tl.fromTo(s.countNode, {opacity: 0, scale: 0.86},
+                    {opacity: 1, scale: 1, duration: 0.5, ease: 'power3.out'},
+                    s.start + Math.max(0, s.valueAt));
+        }
+        if (s.knob) {
+          const n = (s.items || []).length || 1;
+          (s.items || []).forEach((it, j) => {
+            const x = Math.round(s.railNode.clientWidth * ((j + 0.5) / n)
+                                 - s.ring / 2);
+            tl.to(s.knob, {x: x, duration: 0.5, ease: 'power2.inOut'},
+                  s.start + Math.max(0, it.at));
+          });
+        }
+        if (s.end < spec.duration - 0.05) {
+          tl.to(s.node, {opacity: 0, y: -Math.round(unit * 0.45),
+                         duration: 0.45, ease: 'power2.in'},
+                Math.max(0, s.end - 0.2));
+        }
+      });
+
+      window.__timelines['track'] = tl;
+    </script>
+  </body>
+</html>

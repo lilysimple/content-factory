@@ -29,7 +29,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from orchestrator import agent, desk, panelshot
+from orchestrator import agent, desk, frames, panelshot
+# Разбор пункта живёт в монтаже: он же считает их секунды. Импорт
+# отложенный — монтаж сам читает `cut`, и прямой импорт замкнул бы круг.
+
+
+def montage_point(text: str) -> dict:
+    from orchestrator.montage import point
+    return point(text)
 from orchestrator.desk import NoWork
 
 log = logging.getLogger("cut")
@@ -225,7 +232,15 @@ async def fragments(chat_id: int, words: list[Any], duration: float, *,
 # видела и посчитать не может. Просить у неё арифметику, которую она не
 # в состоянии проверить, значит получить её выдуманной.
 
-PANEL_KINDS = ("card", "icon", "counter", "scale", "media", "art")
+PANEL_KINDS = ("card", "icon", "counter", "scale", "media", "art",
+               # Инфографика: поток со стрелками, плитки, окно
+               # терминала, плашки-слова и фраза с подсветкой слова.
+               # Все пять живут пунктами, и каждый пункт приходит на
+               # своём слове (`montage.point`).
+               "flow", "grid", "terminal", "chips", "mark", "bars")
+# Сорта, у которых пункты — вся карточка: без них показывать нечего.
+POINT_KINDS = ("flow", "grid", "terminal", "chips", "bars")
+POINTS_MIN = 2
 # Картинок по теме на ролик. Каждая это вызов Nano Banana за деньги и
 # полминуты ожидания (три идут разом), поэтому потолок есть, но высокий:
 # около одной на шесть секунд ролика. Было три — решение человека 16.09.
@@ -250,6 +265,7 @@ PANEL_SCHEMA = {
                     "phrase": {"type": "string"},
                     "kind": {"type": "string", "enum": list(PANEL_KINDS)},
                     "kicker": {"type": "string"},
+                    "icon": {"type": "string"},
                     "lines": {"type": "array", "items": {"type": "string"}},
                     "items": {"type": "array", "items": {"type": "string"}},
                     "value": {"type": "number"},
@@ -297,6 +313,8 @@ class Slide:
     """
     phrase: str
     kind: str = "card"
+    # Значок сцены: имя из набора `frames.ICONS`, проверено при разборе.
+    icon: str = ""
     kicker: str = ""
     lines: list[str] = field(default_factory=list)
     items: list[str] = field(default_factory=list)
@@ -370,10 +388,31 @@ def _slides(raw: list[dict[str, Any]], *, materials: int = 0,
         if kind == "counter" and not value:
             lost.append(f"{name}: счётчик без числа")
             continue
+        if kind in POINT_KINDS and len(items) < POINTS_MIN:
+            lost.append(f"{name}: у сорта «{kind}» пунктов {len(items)}, "
+                        f"нужно хотя бы {POINTS_MIN} — пустая карточка")
+            continue
+        if kind == "bars":
+            # Столбик без числа рисовать нечем: высота берётся из него.
+            flat = [it for it in items
+                    if montage_point(it).get("value") is None]
+            if flat:
+                lost.append(f"{name}: у столбиков нет числа — "
+                            + ", ".join(f"«{t[:24]}»" for t in flat[:3]))
+                continue
+        if kind == "mark" and not lines:
+            lost.append(f"{name}: «mark» это фраза, которую подсвечивают, "
+                        "а строк нет")
+            continue
         if kind == "scale" and len(items) < SCALE_MIN:
             lost.append(f"{name}: ступеней в шкале {len(items)}, "
                         f"нужно хотя бы {SCALE_MIN}")
             continue
+        mark = str(d.get("icon") or "").strip().lower()
+        if mark and not frames.icon(mark):
+            lost.append(f"{name}: значка «{mark}» в наборе нет — "
+                        "карточка пойдёт без него")
+            mark = ""
         if kind in ("card", "icon") and not lines and not items:
             lost.append(f"{name}: пустая карточка")
             continue
@@ -426,7 +465,7 @@ def _slides(raw: list[dict[str, Any]], *, materials: int = 0,
             url = ""
 
         good.append(Slide(
-            phrase=phrase, kind=kind,
+            phrase=phrase, kind=kind, icon=mark,
             kicker=str(d.get("kicker") or "").strip(),
             lines=lines, items=items, value=value,
             value_phrase=str(d.get("value_phrase") or "").strip(),
