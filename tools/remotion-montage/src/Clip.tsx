@@ -41,6 +41,28 @@ function clamp(v: number, min: number, max: number) {
   return Math.min(max, Math.max(min, v));
 }
 
+// Куда и каким размером ложится кадр дубля внутри коробки. Считается в
+// двух местах — самим клипом и маскотом, которому нужно вырезать себя
+// силуэтом, — и потому живёт функцией: разъехаться этим двум расчётам
+// значит получить маску, сдвинутую относительно картинки.
+export function boxOf(
+  videoWidth: number,
+  videoHeight: number,
+  width: number,
+  height: number,
+  focus: {x: number; y: number},
+) {
+  const scale = Math.max(width / videoWidth, height / videoHeight);
+  const boxW = videoWidth * scale;
+  const boxH = videoHeight * scale;
+  return {
+    boxW,
+    boxH,
+    left: clamp(width / 2 - focus.x * boxW, width - boxW, 0),
+    top: clamp(height / 2 - focus.y * boxH, height - boxH, 0),
+  };
+}
+
 export const Clip: React.FC<{
   src: string;
   from: number;
@@ -70,13 +92,9 @@ export const Clip: React.FC<{
 
   // Во сколько раз растянуть исходный кадр, чтобы он закрыл коробку по
   // обеим сторонам, и насколько он при этом вылезет за края.
-  const scale = Math.max(width / videoWidth, height / videoHeight);
-  const boxW = videoWidth * scale;
-  const boxH = videoHeight * scale;
-
-  const {x, y} = focusAt(track, offset + frame / fps);
-  const left = clamp(width / 2 - x * boxW, width - boxW, 0);
-  const top = clamp(height / 2 - y * boxH, height - boxH, 0);
+  const {boxW, boxH, left, top} = boxOf(
+    videoWidth, videoHeight, width, height,
+    focusAt(track, offset + frame / fps));
 
   return (
     <AbsoluteFill style={{overflow: 'hidden'}}>

@@ -493,12 +493,110 @@ const Backdrop: React.FC<{src: string; panelColor?: string}> = ({src}) => {
 // сам. В референсе это главное на панели — промпт печатается в окне, пока
 // автор про него говорит. Кадр вписывается целиком со скруглением, без
 // рамки браузера: это не сайт, а экран автора.
+// Скриншот, на котором подчёркнуто названное слово.
+//
+// Окно на панели видно целиком, а речь идёт про одну строку в нём. Пока
+// зритель ищет глазами, о чём вообще речь, блок кончается. Поэтому кадр
+// не просто показывается: он наезжает на найденное слово и подчёркивает
+// его — рамку слова считает Vision на стороне питона (`montage._mark`).
+//
+// Наезд плавный и до половины блока: рывок к слову читается ошибкой
+// склейки, а мгновенный зум не даёт увидеть, откуда это слово взялось.
+// Подчёркивание идёт следом, слева направо, как ведут пальцем.
+const MARK_SHARE = 0.42;   // какую долю ширины займёт слово после наезда
+const MARK_MAX = 3.2;      // дальше интерфейс рассыпается на пиксели
+
+function clamp(v: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, v));
+}
+
+const Marked: React.FC<{
+  src: string;
+  spot: {x: number; y: number; w: number; h: number};
+  boxW: number;
+  boxH: number;
+  life: number;
+  accentColor: string;
+}> = ({src, spot, boxW, boxH, life, accentColor}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const sec = frame / fps;
+
+  const target = Math.min(MARK_MAX, Math.max(1.2, MARK_SHARE / Math.max(0.02, spot.w)));
+  // Наезд занимает половину блока, но не дольше полутора секунд: на
+  // длинном блоке кадр должен успеть постоять на слове.
+  const push = interpolate(sec, [0.15, Math.min(1.6, 0.15 + life * 0.5)],
+    [1, target], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+
+  // Центр слова уезжает в центр коробки ровно настолько, насколько уже
+  // случился наезд: масштаб и сдвиг идут одной рукой, иначе кадр сперва
+  // растёт, а потом прыгает к слову.
+  const k = (push - 1) / Math.max(0.001, target - 1);
+  const cx = spot.x + spot.w / 2;
+  const cy = spot.y + spot.h / 2;
+  // Сдвиг ограничен тем, что кадр всё ещё закрывает коробку. Без этого
+  // потолка слово у края уводило картинку за рамку, и в карточке
+  // открывалась полоса фона — видно на первом сплите 22.09.
+  const roomX = ((push - 1) * boxW) / 2;
+  const roomY = ((push - 1) * boxH) / 2;
+  const shiftX = clamp((0.5 - cx) * boxW * push * k, -roomX, roomX);
+  const shiftY = clamp((0.5 - cy) * boxH * push * k, -roomY, roomY);
+
+  const bar = interpolate(sec, [0.5, 1.5], [0, 1],
+    {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+  const thick = Math.max(2, boxH * 0.012) / push;
+  const pad = spot.h * boxH * 0.22;
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        transform: `translate(${shiftX}px, ${shiftY}px) scale(${push})`,
+        transformOrigin: 'center center',
+        // Скриншот приходит на смену записи: без растворения переход
+        // читается склейкой двух разных материалов, а это один и тот же.
+        opacity: interpolate(sec, [0, 0.3], [0, 1],
+          {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'}),
+      }}
+    >
+      <Img src={staticFile(src)} style={{width: '100%', height: '100%', objectFit: 'cover'}} />
+      {/* Выделение: слово подсвечено акцентом бренда и подчёркнуто. */}
+      <div
+        style={{
+          position: 'absolute',
+          left: (spot.x * boxW) - pad,
+          top: (spot.y * boxH) - pad * 0.6,
+          width: (spot.w * boxW) + pad * 2,
+          height: (spot.h * boxH) + pad * 1.2,
+          borderRadius: thick * 2,
+          background: accentColor,
+          opacity: interpolate(bar, [0, 1], [0, 0.22]),
+          mixBlendMode: 'multiply',
+        }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          left: (spot.x * boxW) - pad,
+          top: (spot.y + spot.h) * boxH + pad * 0.5,
+          width: ((spot.w * boxW) + pad * 2) * bar,
+          height: thick,
+          borderRadius: thick,
+          background: accentColor,
+        }}
+      />
+    </div>
+  );
+};
+
 const Screen: React.FC<{
   block: MotionBlock;
   textColor: string;
   panelHeight: number;
   maxHeight: number;
-}> = ({block, textColor, panelHeight, maxHeight}) => {
+  accentColor: string;
+}> = ({block, textColor, panelHeight, maxHeight, accentColor}) => {
   const frame = useCurrentFrame();
   const {fps, width, height} = useVideoConfig();
   const rise = spring({frame, fps, config: {damping: 16, mass: 0.6}});
@@ -519,9 +617,16 @@ const Screen: React.FC<{
   // Длиннее блока — ускоряем, но не больше чем вдвое: быстрее интерфейс
   // уже не читается. Короче — последний кадр стоит до конца блока.
   const blockSec = block.end - block.start;
-  const len = block.videoSeconds ?? blockSec;
-  const rate = Math.min(2, Math.max(1, len / Math.max(0.1, blockSec)));
+  // Слово подчёркивается на скриншоте, но запись при этом никуда не
+  // девается: она идёт первой половиной блока, скриншот с наездом —
+  // второй. Подменить запись стоп-кадром значит выбросить то, ради чего
+  // человек её снимал, — поймано на первом сплите 22.09.
+  const marked = Boolean(block.markPath && block.spot);
+  const playSec = marked ? Math.max(1.2, blockSec * 0.5) : blockSec;
+  const len = block.videoSeconds ?? playSec;
+  const rate = Math.min(2, Math.max(1, len / Math.max(0.1, playSec)));
   const lastFrame = Math.max(0, Math.floor((len / rate) * fps) - 2);
+  const markFrom = Math.round(playSec * fps);
 
   return (
     <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center'}}>
@@ -543,15 +648,40 @@ const Screen: React.FC<{
         }}
       >
         {block.videoPath ? (
-          <Freeze frame={lastFrame} active={(f) => f >= lastFrame}>
-            <Video
-              src={staticFile(block.videoPath)}
-              muted
-              playbackRate={rate}
-              objectFit="cover"
-              style={{position: 'absolute', inset: 0, width: '100%', height: '100%'}}
-            />
-          </Freeze>
+          <>
+            <Freeze frame={lastFrame} active={(f) => f >= lastFrame}>
+              <Video
+                src={staticFile(block.videoPath)}
+                muted
+                playbackRate={rate}
+                objectFit="cover"
+                style={{position: 'absolute', inset: 0, width: '100%', height: '100%'}}
+              />
+            </Freeze>
+            {marked && block.markPath && block.spot ? (
+              <Sequence from={markFrom} name="Слово">
+                <AbsoluteFill>
+                  <Marked
+                    src={block.markPath}
+                    spot={block.spot}
+                    boxW={w}
+                    boxH={h}
+                    life={Math.max(0.5, blockSec - playSec)}
+                    accentColor={accentColor}
+                  />
+                </AbsoluteFill>
+              </Sequence>
+            ) : null}
+          </>
+        ) : block.imagePath && block.spot ? (
+          <Marked
+            src={block.imagePath}
+            spot={block.spot}
+            boxW={w}
+            boxH={h}
+            life={blockSec}
+            accentColor={accentColor}
+          />
         ) : block.imagePath ? (
           <Img
             src={staticFile(block.imagePath)}
@@ -920,6 +1050,7 @@ const BlockView: React.FC<{
           <Screen
             block={block}
             textColor={textColor}
+            accentColor={accentColor}
             panelHeight={panelHeight}
             // Ниже отведённого карточкам: запись ещё въезжает снизу и
             // наезжает, и на 0.76 горизонтальный скринкаст упирался в
@@ -1019,14 +1150,27 @@ export const Panel: React.FC<{
             durationInFrames={durationInFrames}
             name={`Панель ${i + 1}`}
           >
-            <BlockView
-              block={b}
-              panelHeight={panelHeight}
-              panelColor={panelColor}
-              accentColor={accentColor}
-              cardColor={cardColor}
-              textColor={textColor}
-            />
+            {b.clipPath ? (
+              // Клип собран ровно на длину блока и на тот же холст, так
+              // что вписывать его нечем: он и есть карточка целиком.
+              <AbsoluteFill style={{background: panelColor}}>
+                <Video
+                  src={staticFile(b.clipPath)}
+                  muted
+                  objectFit="cover"
+                  style={{position: 'absolute', inset: 0, width: '100%', height: '100%'}}
+                />
+              </AbsoluteFill>
+            ) : (
+              <BlockView
+                block={b}
+                panelHeight={panelHeight}
+                panelColor={panelColor}
+                accentColor={accentColor}
+                cardColor={cardColor}
+                textColor={textColor}
+              />
+            )}
           </Sequence>
         );
       })}

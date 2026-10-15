@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Карточка со скрином</title>
+    <script src="./vendor/gsap.min.js"></script>
+    <style>
+      /* Manrope — тот же шрифт, которым Remotion набирает субтитры и
+         заголовок обложки. Файл лежит рядом, а не тянется из сети:
+         рендер идёт без интернета, а правило `font_family_without_font_face`
+         именованную гарнитуру без локального файла не пропускает. Две
+         подрезки: кириллица и латиница — в карточках обе. */
+      @font-face {
+        font-family: 'Manrope';
+        font-style: normal;
+        font-weight: 400 800;
+        src: url('./fonts/manrope-cyrillic.woff2') format('woff2');
+        unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+      }
+      @font-face {
+        font-family: 'Manrope';
+        font-style: normal;
+        font-weight: 400 800;
+        src: url('./fonts/manrope-latin.woff2') format('woff2');
+      }
+      body { margin: 0; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+      .clip { position: absolute; inset: 0; }
+      #pad {
+        position: absolute; inset: 0; display: flex; align-items: center;
+        box-sizing: border-box; gap: 0;
+        font-family: 'Manrope', system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+        font-synthesis-weight: none;
+      }
+      #words { flex: 0 0 42%; display: flex; flex-direction: column; }
+      #stage-box { flex: 1 1 auto; position: relative; height: 100%; }
+      .kicker {
+        font-size: 26px; font-weight: 700; letter-spacing: 0.18em;
+        text-transform: uppercase; margin: 0 0 16px;
+      }
+      .line { font-weight: 800; margin: 0 0 8px; line-height: 1.1; }
+      .line.sub { font-weight: 600; opacity: 0.74; }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="shot"
+      data-start="0"
+      data-width="__W__"
+      data-height="__H__"
+      data-fps="__FPS__"
+      data-duration="__DUR__"
+    >
+      <section id="card" class="clip" data-start="0" data-duration="__DUR__">
+        <div id="pad">
+          <div id="words"></div>
+          <div id="stage-box">
+            <!-- Окно браузера — готовый блок каталога HyperFrames
+                 (`browser-device-stage`): рисовать своё окно значит
+                 рисовать чужую работу второй раз и хуже. Скрин едет в
+                 его слот картинкой. -->
+            <div
+              id="stage"
+              data-composition-id="browser-device-stage"
+              data-composition-src="components/browser-device-stage.html"
+              data-start="0"
+              data-duration="__DUR__"
+              data-width="__SW__"
+              data-height="__SH__"
+              data-variable-values='__VARS__'
+            ></div>
+          </div>
+        </div>
+      </section>
+    </div>
+    <!-- Слот окна: содержимое `<template>` инертно, из скрипта его не
+         достать — адрес картинки подставляет питон до рендера. -->
+    <template data-slot="browser-device-stage-screen">
+      <img src="__IMG__" alt="" />
+    </template>
+    <script type="application/json" id="spec">__SPEC__</script>
+    <script>
+      const spec = JSON.parse(document.getElementById('spec').textContent);
+      const unit = Math.min(spec.height / 12, spec.width / 14);
+      const pad = document.getElementById('pad');
+      const box = document.getElementById('words');
+
+      // Токены блока каталога: он рисует хром по ним, и без подстановки
+      // окно приедет чужой палитрой, а не палитрой панели.
+      const css = document.documentElement.style;
+      css.setProperty('--bg', spec.panelColor);
+      css.setProperty('--fg', spec.textColor);
+      css.setProperty('--muted', spec.cardColor);
+      css.setProperty('--surface', spec.cardColor);
+      css.setProperty('--border', spec.cardColor);
+      css.setProperty('--brand', spec.accentColor);
+      css.setProperty('--accent', spec.accentColor);
+      css.setProperty('--accent-2', spec.accentColor);
+      css.setProperty('--bds-accent', spec.accentColor);
+      css.setProperty('--radius', Math.round(unit * 0.3) + 'px');
+      css.setProperty('--space-1', Math.round(unit * 0.12) + 'px');
+      css.setProperty('--space-2', Math.round(unit * 0.22) + 'px');
+      css.setProperty('--space-3', Math.round(unit * 0.34) + 'px');
+      css.setProperty('--font-body', 'system-ui, sans-serif');
+      css.setProperty('--font-mono', 'ui-monospace, Menlo, monospace');
+
+      document.body.style.background = spec.panelColor;
+      pad.style.color = spec.textColor;
+      const side = Math.round(unit * 1.1);
+      pad.style.padding = Math.round(unit * 0.7) + 'px ' + side + 'px '
+        + (Math.round(unit * 0.5) + (spec.reserve || 0)) + 'px ' + side + 'px';
+
+      const made = [];
+      if (spec.kicker) {
+        const k = document.createElement('p');
+        k.className = 'kicker';
+        k.textContent = spec.kicker;
+        k.style.color = spec.accentColor;
+        k.style.fontSize = Math.round(unit * 0.4) + 'px';
+        box.appendChild(k);
+        made.push(k);
+      }
+      spec.lines.forEach((text, i) => {
+        const p = document.createElement('p');
+        p.className = i === 0 ? 'line' : 'line sub';
+        p.textContent = text;
+        p.style.fontSize = Math.round(unit * (i === 0 ? 0.8 : 0.54)) + 'px';
+        box.appendChild(p);
+        made.push(p);
+      });
+
+      const tl = gsap.timeline({paused: true});
+      made.forEach((node, i) => {
+        tl.fromTo(node, {y: Math.round(unit * 0.4), opacity: 0},
+                  {y: 0, opacity: 1, duration: 0.42, ease: 'power3.out'},
+                  0.1 + i * 0.14);
+      });
+      window.__timelines['shot'] = tl;
+    </script>
+  </body>
+</html>

@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 .env
+# Копии окружения: в них те же токены, а `.env` их не прикрывает.
+.env.bak*
+.env.local
 *.db
 # WAL и shm под «*.db» не попадают: имя кончается на -wal и -shm.
 # Без этих двух строк состояние тенанта уезжает в репозиторий.
@@ -25,5 +28,16 @@ tools/remotion-montage/node_modules/
 # но упавший рендер оставляет их за собой. Копии видео в public/
 # закрыты своим tools/remotion-montage/.gitignore, второй раз не пишем.
 tools/remotion-montage/.props-*.json
+tools/remotion-montage/.props-mini/
 tools/remotion-montage/.out-*.mp4
 tools/remotion-montage/.still-*.png
+# Метка кадра: её оставляет рендер панели рядом со своими пропсами.
+tools/remotion-montage/.mark-*.png
+
+# HyperFrames: node_modules со своим Chrome внутри (110 МБ), папки
+# заданий и выход рендера. Ставится командой `npm install`, а клипы
+# лежат в папке бренда (`montage/frames/`), не в репозитории завода.
+tools/hyperframes/node_modules/
+tools/hyperframes/jobs/
+tools/hyperframes/renders/
+tools/hyperframes/meta.json

@@ -38,7 +38,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from config import ROOT
-from orchestrator import cli, design, desk, editor, research, strategy
+from orchestrator import cli, design, desk, editor, research, strategy, trends
 from storage import brand as brand_store
 from storage import db
 
@@ -94,6 +94,7 @@ WORKFLOWS = {
     "research": "сводка недели и разбор статистики",
     "design":   "макет по готовому тексту",
     "idea":     "раскачать тему до заходов",
+    "trend":    "разбор залетевших рилсов ниши",
 }
 
 
@@ -526,7 +527,7 @@ def _themes(chat_id: int) -> list[str]:
     дословно («ИНСТРУМЕНТ» против «Инструмент недели»), но это везение:
     рубрика лежала в базе и её просто не показали.
     """
-    rows = db.q("SELECT id, date, plat, format, rubric, status, title "
+    rows = db.q("SELECT id, date, plat, format, rubric, status, title, notes "
                 "FROM themes "
                 "WHERE chat_id = ? AND status IN ('idea', 'draft', 'ready') "
                 "ORDER BY date, id", chat_id)
@@ -549,6 +550,18 @@ def _themes(chat_id: int) -> list[str]:
         out.append(f"Показаны первые {MAX_THEMES} из {len(rows)}.")
     out += ["", "Статусы: `idea` не начата, `draft` текст есть и не принят, "
             "`ready` принят. Тему берут по `id` — придумывать его не надо."]
+
+    # Тема, заведённая рукой, несёт просьбу человека своими словами
+    # (`themes.notes`). Колонкой в таблице она не едет: у плановых тем
+    # поле пустое, а длинная колонка пустых значений стоит контекста на
+    # каждом прогоне. Строкой — только там, где есть что сказать.
+    asked = [r for r in rows[:MAX_THEMES] if (r["notes"] or "").strip()]
+    if asked:
+        out += ["", "### Просьба человека по теме", "",
+                "Это он написал сам, заводя тему. Пиши про это, а не про "
+                "то, что подсказывает заголовок:", ""]
+        out += [f"- `{r['id']}`: " + " ".join((r["notes"] or "").split())
+                for r in asked]
     return out
 
 
@@ -880,6 +893,28 @@ def _refs(chat_id: int) -> list[str]:
     return out
 
 
+def _trends(chat_id: int) -> list[str]:
+    """Выбросы по чужим рилсам: кратность, медиана источника, метрика.
+
+    Числа кладёт код по той же причине, что и свободные слоты плану:
+    иначе роль посчитает их сама, вторым счётом, и разойдётся с первым
+    молча. Что считать залетевшим, решает `trends.HOT`, а не тон промпта.
+
+    Партий может не быть вовсе — ключа Apify нет, кэш не снят, кэш стар.
+    Это дыра строкой, а не отказ: разбор по части ниши честнее молчания,
+    а выдуманный чужой ролик ловится первым нажатием на ссылку.
+    """
+    b = desk.brand(chat_id)
+    if b is None:
+        return []
+    out, gaps = trends.digest(b)
+    if gaps:
+        out += ["", "**Чего не хватило в чужих рилсах** — назови это "
+                    "человеку строкой, не проглатывай:", ""]
+        out += [f"- {g}" for g in gaps]
+    return out
+
+
 # Какие факты кладутся в `input.md` под какой workflow. Факты, не роли:
 # свободный слот и незакрытая тема — это данные задачи, как папка бренда.
 CONTEXT = {
@@ -889,6 +924,10 @@ CONTEXT = {
     "design":   (_themes, _index, _refs),
     "idea":     (_themes, _index, _digest, _history),
     "research": (_index,),
+    # Своей статистики здесь нет намеренно: сравнивать чужую кратность со
+    # своей медианой роль обязана, но берёт её из папки бренда, а не из
+    # снимка окна недели — тренд не привязан к ISO-неделе вовсе.
+    "trend":    (_trends, _index),
 }
 
 
@@ -966,6 +1005,7 @@ AGENT_NAMES = {
     "writer": "Редактор",
     "reels": "Редактор Reels",
     "designer": "Дизайнер",
+    "trendwatcher": "Trend Watcher",
 }
 
 # Куда сообщать о ходе прогона. Возвращать ничего не надо, упасть — нельзя:

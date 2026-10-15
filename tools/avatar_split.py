@@ -51,7 +51,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from orchestrator import footage, montage                         # noqa: E402
+from orchestrator import (footage, frames, montage,               # noqa: E402
+                          panelshot)
 
 # Воздух между карточками: панель гаснет до того, как человек назвал
 # следующую. Без него карточка подменяется на полуслове, и глаз читает
@@ -118,6 +119,11 @@ def _blocks(cards: list[dict], words: list[dict],
         }
         if card.get("kicker"):
             block["kicker"] = str(card["kicker"])
+        if card.get("image") or card.get("url"):
+            # Карточка со скрином: сам файл приедет отдельно (`shots`),
+            # здесь только отметка, что картинка у блока есть.
+            block["imagePath"] = "shot.png"
+            block["stageTitle"] = str(card.get("title") or "")
         if card.get("value") is not None:
             block["value"] = int(card["value"])
             phrase = str(card.get("at") or "").strip()
@@ -187,15 +193,58 @@ async def build(video: Path, cards: list[dict], out: Path, *,
     blocks = _blocks(cards, words, probe.duration)
     pages = footage.pages(words)
 
+    # Карточки, нарисованные словами, собирает HyperFrames: список
+    # набирается под речь, число набегает от нуля. Кэш ложится рядом с
+    # выходом — бренда у этого входа нет (`frames.Local`), а перегенерация
+    # головы не должна рендерить те же карточки заново.
+    cache = frames.Local(out.parent / ".frames")
+    shots: dict[int, Path] = {}
+    for i, card in enumerate(cards):
+        if card.get("image"):
+            shots[i] = Path(str(card["image"])).expanduser()
+        elif card.get("url"):
+            # Страницу снимает код, а не человек руками: адрес проверяется
+            # (публичный хост, страница ответила), и снятое кэшируется по
+            # адресу — перегенерация головы в сеть второй раз не ходит.
+            try:
+                shots[i] = await panelshot.take(cache, str(card["url"]), "card")
+            except panelshot.NoShot as e:
+                notes.append(f"карточка {i + 1} без скрина — {e}")
+
+    clips, gaps = await frames.panel_clips(
+        cache, blocks, size=(1080, 1920), fps=fps,
+        colors=montage.panel_colors(), split=split, images=shots)
+    notes.extend(gaps)
+    for i, clip in clips.items():
+        blocks[i]["clipPath"] = f"clip-{out.stem}-{i}.mp4"
+
+    # Отметка «картинка у блока есть» ставилась до рендера, а файла с
+    # таким именем в public/ нет. Клип собрался — она лишняя; не
+    # собрался — на её место едет сам скрин, и блок рисует Remotion.
+    extra: dict[str, Path] = {}
+    for i, block in enumerate(blocks):
+        if "imagePath" not in block:
+            continue
+        if i in clips or i not in shots:
+            block.pop("imagePath", None)
+            continue
+        name = f"shot-{out.stem}-{i}{shots[i].suffix.lower()}"
+        block["imagePath"] = name
+        extra[name] = shots[i]
+
     name = f"avatar-{out.stem}{video.suffix}"
     payload = props(name, probe, blocks, pages, fps=fps, head=head,
                     split=split)
-    frames = max(1, round(probe.duration * fps))
+    frame_count = max(1, round(probe.duration * fps))
+
+    staged = {name: video}
+    staged.update({blocks[i]["clipPath"]: clip for i, clip in clips.items()})
+    staged.update(extra)
 
     await montage._ready()
-    with montage._staged({name: video}):
+    with montage._staged(staged):
         made = await montage._render("Motion", payload, key=out.stem,
-                                     frames=frames)
+                                     frames=frame_count)
     out.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(made), out)
     return notes

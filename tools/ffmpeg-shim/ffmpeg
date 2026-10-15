@@ -1,0 +1,6 @@
+#!/bin/sh
+# Системного ffmpeg на машине нет; берём бинарь, который привозит Remotion.
+# Без DYLD_LIBRARY_PATH он не находит свои dylib и падает на запуске.
+BIN="$(cd "$(dirname "$0")/../remotion-montage/node_modules/@remotion/compositor-darwin-arm64" && pwd)"
+DYLD_LIBRARY_PATH="$BIN${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" export DYLD_LIBRARY_PATH
+exec "$BIN/ffmpeg" "$@"

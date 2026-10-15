@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -32,13 +32,28 @@ BRIEF_FIELDS = (("id", "id"), ("дата", "date"), ("площадка", "plat")
                 ("формат", "format"), ("рубрика", "rubric"), ("цель", "goal"),
                 ("архетип", "arch"), ("рабочий заголовок", "title"),
                 ("хук", "hook"), ("кому и зачем", "why"), ("угол", "angle"),
-                ("ведущий заряд", "charge"))
+                ("ведущий заряд", "charge"), ("просьба человека", "notes"))
 
 
 def brand(chat_id: int):
     """Профиль бренда тенанта. None — профиль ещё не собран."""
     row = db.one("SELECT brand_slug FROM tenants WHERE chat_id = ?", chat_id)
     return store.get(row["brand_slug"]) if row and row["brand_slug"] else None
+
+
+def zone(chat_id: int):
+    """Пояс тенанта как `ZoneInfo`, или `None`, если он кривой.
+
+    Нужен тем, кто собирает момент не из «сейчас», а из даты и времени
+    слота: без пояса получается наивное время, а сравнивать его с `now`
+    нельзя — Python роняет такое сравнение `TypeError`, и падает это
+    внутри тика часов, то есть выглядит как молчащее расписание.
+    """
+    row = db.one("SELECT tz FROM tenants WHERE chat_id = ?", chat_id)
+    try:
+        return ZoneInfo((row["tz"] if row else None) or cfg.default_tz)
+    except Exception:                                        # noqa: BLE001
+        return None
 
 
 def now(chat_id: int) -> datetime:
@@ -215,9 +230,18 @@ def drafted(chat_id: int, theme_id: str, asset: str) -> None:
 # работа по теме. Первым так стал монтаж; дом у этого правила один,
 # здесь: вторая копия INSERT разъехалась бы с первой на первой починке.
 #
-# Дата остаётся пустой намеренно: тема не из плана и чужой день занимать
-# не должна. `src = 'adhoc'` отличает её от плановой навсегда — по нему
-# видно, что слот под неё никто не ставил.
+# Дата по умолчанию остаётся пустой: тема не из плана и чужой день
+# занимать не должна. `src = 'adhoc'` отличает её от плановой навсегда —
+# по нему видно, что слот под неё никто не ставил.
+#
+# Исключение одно, и оно названо явно: `day`. Тему рукой человек заводит
+# именно затем, чтобы она вышла в свой день — без даты её не возьмёт ни
+# очередь (`publisher.due`), ни автомат (`publisher.due_now`), и «добавь
+# в автопостинг» означало бы «публикуй по кнопке». Свободен ли слот,
+# решает не здесь: правило «слот это пара дата плюс площадка» живёт в
+# `strategy` (`hand_slot`), и вторая копия разъехалась бы с первой.
+# Здесь проверяется только то, что без чужого кода видно: формат даты и
+# что она не в прошлом.
 
 # Площадки, под которые в заводе есть холст, шаблоны и пути к артефактам.
 # Список закрыт: `plat` уезжает в id темы и в имена файлов, и опечатка
@@ -241,12 +265,17 @@ def next_id(chat_id: int, day: str, plat: str) -> str:
 
 
 def adhoc(chat_id: int, *, plat: str, fmt: str, title: str, hook: str = "",
-          why: str = "", rubric: str = "", status: str = "idea") -> dict[str, Any]:
+          why: str = "", rubric: str = "", status: str = "idea",
+          notes: str = "", day: str = "") -> dict[str, Any]:
     """Завести тему вне плана. Возвращает тему строкой базы.
 
     Отказ здесь громкий, а не тихий дефолт: тема с чужой площадкой или
     без заголовка доедет до Дизайнера холстом не того размера и до
     Публикатора комплектом без имени.
+
+    `notes` — что человек просил рассказать своими словами. Поле своё, а
+    не `why`: «кому и зачем» это рассуждение Стратега, и подменять его
+    просьбой человека значит соврать обеим ролям, которые его читают.
     """
     plat = (plat or "").strip().lower()
     if plat not in PLATS:
@@ -258,19 +287,30 @@ def adhoc(chat_id: int, *, plat: str, fmt: str, title: str, hook: str = "",
     if status not in ADHOC_STATUS:
         raise NoWork(f"статус «{status}» теме вне плана не ставится: "
                      + ", ".join(ADHOC_STATUS))
+    if day := (day or "").strip():
+        try:
+            when = date.fromisoformat(day)
+        except ValueError:
+            raise NoWork(f"дата «{day}» не разобралась: нужен ГГГГ-ММ-ДД")
+        if when.isoformat() < today(chat_id):
+            raise NoWork(f"{day} уже прошло: задним числом завод не "
+                         "публикует")
 
     tid = next_id(chat_id, today(chat_id), plat)
     with db.tx() as c:
-        c.execute("INSERT INTO themes (id, chat_id, plat, format, rubric, "
-                  "title, hook, why, src, status) "
-                  "VALUES (?,?,?,?,?,?,?,?,'adhoc',?)",
-                  (tid, chat_id, plat, (fmt or "").strip(), rubric.strip(),
-                   title, hook.strip(), why.strip(), status))
-    log.info("тема вне плана %s: %s / %s", tid, plat, fmt or "без формата")
+        c.execute("INSERT INTO themes (id, chat_id, date, plat, format, "
+                  "rubric, title, hook, why, notes, src, status) "
+                  "VALUES (?,?,?,?,?,?,?,?,?,?,'adhoc',?)",
+                  (tid, chat_id, day or None, plat, (fmt or "").strip(),
+                   rubric.strip(), title, hook.strip(), why.strip(),
+                   notes.strip(), status))
+    log.info("тема вне плана %s: %s / %s, слот %s", tid, plat,
+             fmt or "без формата", day or "без даты")
     row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
                  tid, chat_id)
     return dict(row) if row else {"id": tid, "chat_id": chat_id, "plat": plat,
-                                  "format": fmt, "title": title, "hook": hook}
+                                  "format": fmt, "title": title, "hook": hook,
+                                  "notes": notes, "date": day or None}
 
 
 def brief(theme: dict[str, Any]) -> list[str]:

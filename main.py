@@ -1,4 +1,4 @@
-"""Точка входа: семь ботов, два диспетчера.
+"""Точка входа: семь ботов завода, два диспетчера и распаковщик.
 
 Разные allowed_updates — не оптимизация, а необходимость. callback_query
 доставляется тому боту, который отправил сообщение с кнопкой, поэтому
@@ -11,7 +11,7 @@ import logging
 
 from aiogram import Dispatcher
 
-from bots import handlers
+from bots import handlers, intake_bot
 from bots.registry import registry
 from config import cfg
 from orchestrator import bridge
@@ -78,6 +78,10 @@ async def amain() -> None:
             # Часы: тик раз в минуту, автопубликация по времени слота.
             # Тенант с выключенным автоматом не платит за них ничем.
             handlers.clock(),
+            # Распаковщик клиента: своё лицо, свой диспетчер, личка.
+            # Токена нет — корутина сразу возвращается, и это норма:
+            # собранному бренду распаковка не нужна.
+            intake_bot.run(),
         )
     finally:
         await registry.close()

@@ -48,8 +48,14 @@ def _slug(text: str, n: int) -> str:
     return f"{n:02d}-{tail[:48]}.md"
 
 
-def adopt(chat_id: int, brand) -> tuple[int, int]:
-    """Перенести файлы и тексты в папку бренда. Возвращает (файлов, образцов)."""
+def adopt(chat_id: int, brand, raw: list | None = None) -> tuple[int, int]:
+    """Перенести файлы и тексты в папку бренда. Возвращает (файлов, образцов).
+
+    `raw` передаётся, когда сырьё лежит не в `onboarding`: распаковка
+    клиента в личке ведёт своё состояние в таблице `intake`. Без этого
+    параметра образцов у неё всегда ноль, и молча: файлы переносятся,
+    голос бренда не на чем калибровать, а человеку сказано «готово».
+    """
     moved = samples = 0
 
     # 1. Присланные файлы → sources/uploads/
@@ -63,9 +69,10 @@ def adopt(chat_id: int, brand) -> tuple[int, int]:
                 moved += 1
 
     # 2. Присланные тексты → voice-samples/
-    row = db.one("SELECT raw_inputs_json FROM onboarding WHERE chat_id = ?",
-                 chat_id)
-    raw = json.loads(row["raw_inputs_json"]) if row else []
+    if raw is None:
+        row = db.one("SELECT raw_inputs_json FROM onboarding WHERE chat_id = ?",
+                     chat_id)
+        raw = json.loads(row["raw_inputs_json"]) if row else []
     folder = brand.path("voice-samples")
     folder.mkdir(parents=True, exist_ok=True)
 

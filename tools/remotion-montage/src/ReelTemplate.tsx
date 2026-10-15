@@ -1,4 +1,5 @@
 import React from 'react';
+import {Video} from '@remotion/media';
 import {
   AbsoluteFill,
   CanvasImage,
@@ -10,8 +11,9 @@ import {
   useVideoConfig,
 } from 'remotion';
 import {Captions} from './Captions';
-import {Clip} from './Clip';
+import {boxOf, Clip, focusAt} from './Clip';
 import {Cover} from './Cover';
+import {Mascot} from './Mascot';
 import type {ReelProps} from './props';
 
 const FONT = 'system-ui, -apple-system, Helvetica, sans-serif';
@@ -47,6 +49,56 @@ const HookCaption: React.FC<{text: string}> = ({text}) => {
       >
         {text}
       </div>
+    </AbsoluteFill>
+  );
+};
+
+// ── накладка: фото поверх кадра ──────────────────────────────────────
+//
+// Второй способ показать присланное человеком, кроме панели сплита.
+// Холст здесь не делится: дубль идёт во весь кадр, а фото выезжает
+// сверху на своей фразе и уходит тем же движением. Поэтому пустых
+// секунд у верхней половины не бывает — показывать нечего, значит в
+// кадре просто человек.
+//
+// Ширина в долях холста, а не в пикселях: тот же шаблон рендерится и в
+// 1080×1920, и в квадрат, и жёсткие пиксели там разъехались бы.
+
+const INSERT_TOP = 0.05;     // отступ сверху, доля высоты
+const INSERT_SLIDE = 0.32;   // секунды на выезд и на уход
+
+const Insert: React.FC<{src: string; share: number}> = ({src, share}) => {
+  const frame = useCurrentFrame();
+  const {fps, durationInFrames, width, height} = useVideoConfig();
+  const wing = Math.max(1, Math.round(INSERT_SLIDE * fps));
+
+  const ease = {
+    extrapolateLeft: 'clamp' as const,
+    extrapolateRight: 'clamp' as const,
+    easing: Easing.bezier(0.16, 1, 0.3, 1),
+  };
+  const shown = Math.min(
+    interpolate(frame, [0, wing], [0, 1], ease),
+    interpolate(frame, [durationInFrames - wing, durationInFrames], [1, 0],
+                ease),
+  );
+
+  return (
+    <AbsoluteFill style={{justifyContent: 'flex-start', alignItems: 'center'}}>
+      <CanvasImage
+        src={staticFile(src)}
+        style={{
+          width: width * share,
+          marginTop: height * INSERT_TOP,
+          opacity: shown,
+          // Уезжает вверх, за свой же край: так уход читается движением,
+          // а не морганием.
+          translate: `0 ${((shown - 1) * height * 0.06).toFixed(1)}px`,
+          borderRadius: 28,
+          boxShadow: '0 18px 60px rgba(0,0,0,0.35)',
+          objectFit: 'contain',
+        }}
+      />
     </AbsoluteFill>
   );
 };
@@ -126,6 +178,57 @@ export const ReelTemplate: React.FC<ReelProps> = (props) => {
   });
   const bodyFrames = pieces.reduce((n, p) => n + p.frames, 0);
 
+  // Адрес маски по секунде исходника. Номер считается тем же способом,
+  // что и имя файла в питоне: кадр при `fps` масок, от нуля.
+  const maskOf = props.personMask
+    ? {
+        url: (sourceSeconds: number) => {
+          const n = Math.max(
+            0,
+            Math.round(sourceSeconds * (props.personMask?.fps ?? 30)),
+          );
+          return staticFile(
+            `${props.personMask?.dir}/mask-${String(n).padStart(5, '0')}.png`,
+          );
+        },
+      }
+    : undefined;
+
+  // Силуэт под маскотом: по секунде тела находим кусок, его время в
+  // исходнике и окно кадра — тем же расчётом, каким кладёт картинку сам
+  // клип (`boxOf`), иначе маска поехала бы относительно видео.
+  const veilAt = maskOf
+    ? (bodySeconds: number) => {
+        const p = pieces.find(
+          (piece) => bodySeconds >= piece.offset
+            && bodySeconds < piece.offset + piece.frames / fps,
+        ) ?? pieces[0];
+        if (!p) return null;
+        const box = boxOf(props.videoWidth, props.videoHeight,
+                          props.width, props.height,
+                          focusAt(props.pan, bodySeconds));
+        return {
+          url: maskOf.url(p.from + (bodySeconds - p.offset)),
+          left: box.left,
+          top: box.top,
+          boxW: box.boxW,
+          boxH: box.boxH,
+        };
+      }
+    : undefined;
+
+  // Сколько кадров маскот живёт в ролике.
+  // Без `until` — до конца записи.
+  const mascotFrames = Math.max(
+    1,
+    Math.min(
+      bodyFrames,
+      props.mascot?.until
+        ? Math.round(props.mascot.until * fps)
+        : bodyFrames,
+    ),
+  );
+
   const hasIntro = Boolean(
     props.coverPath || props.title || props.coverLines.length > 0,
   );
@@ -134,7 +237,17 @@ export const ReelTemplate: React.FC<ReelProps> = (props) => {
     <AbsoluteFill style={{backgroundColor: '#000'}}>
       {hasIntro ? (
         <Sequence from={0} durationInFrames={introFrames} name="Первый кадр">
-          {props.coverPath ? (
+          {props.coverClipPath ? (
+            // Обложка пришла готовым клипом: наезд уже внутри него, и
+            // ни затемнения, ни слов поверх она не ждёт — на картинке
+            // стоит то, что человек утвердил кнопкой.
+            <Video
+              src={staticFile(props.coverClipPath)}
+              muted
+              objectFit="cover"
+              style={{position: 'absolute', inset: 0, width: '100%', height: '100%'}}
+            />
+          ) : props.coverPath ? (
             <>
               <CanvasImage
                 src={staticFile(props.coverPath)}
@@ -171,6 +284,7 @@ export const ReelTemplate: React.FC<ReelProps> = (props) => {
           ) : (
             <AbsoluteFill style={{background: props.brandColor}} />
           )}
+          {props.coverClipPath ? null : (
           <Cover
             lines={props.coverLines}
             title={props.title}
@@ -182,6 +296,7 @@ export const ReelTemplate: React.FC<ReelProps> = (props) => {
             anchor={props.coverAnchor}
             inset={props.coverInset || props.height * 0.11}
           />
+          )}
         </Sequence>
       ) : null}
 
@@ -204,9 +319,42 @@ export const ReelTemplate: React.FC<ReelProps> = (props) => {
         </Sequence>
       ))}
 
+      {/* Накладки идут после кусков: фото поверх кадра, но ниже
+          субтитров — они внизу, и спорить им не за что. */}
+      {props.inserts.map((ins, i) => {
+        const from = introFrames + Math.round(ins.start * fps);
+        const frames = Math.max(1, Math.round((ins.end - ins.start) * fps));
+        return (
+          <Sequence
+            key={`${ins.src}-${i}`}
+            from={from}
+            durationInFrames={frames}
+            name={`Накладка ${i + 1}`}
+          >
+            <Insert src={ins.src} share={ins.width} />
+          </Sequence>
+        );
+      })}
+
+      {/* Маскот идёт после кусков и до слов: он поверх картинки, но под
+          караоке — субтитры читаются всегда, знак им не конкурент. */}
+      {props.mascot ? (
+        <Sequence
+          from={introFrames}
+          durationInFrames={mascotFrames}
+          name="Маскот"
+        >
+          <Mascot look={props.mascot} veil={veilAt} />
+        </Sequence>
+      ) : null}
+
       <Sequence from={introFrames} durationInFrames={bodyFrames} name="Слова">
         {props.pages.length > 0 ? (
-          <Captions pages={props.pages} accent={props.accentColor} />
+          <Captions
+            pages={props.pages}
+            accent={props.accentColor}
+            textColor={props.captionTextColor}
+          />
         ) : props.hook ? (
           <Sequence from={0} durationInFrames={Math.min(bodyFrames, 3 * fps)}>
             <HookCaption text={props.hook} />

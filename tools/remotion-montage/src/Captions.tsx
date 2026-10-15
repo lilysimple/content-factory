@@ -26,6 +26,15 @@ export type CaptionStyle = {
   // тоже нет — чёрная плашка читалась титром поверх ролика, — поэтому
   // слова держат плотная обводка и тень.
   plate?: boolean;
+  // Чем буквы отбиты от фона, когда градиента нет (`plate`). Кремовое
+  // свечение задумано под тёмный субтитр на кремовой панели. Субтитр,
+  // стоящий на самом дубле, отбивается тенью: светлые буквы на живом
+  // кадре без неё теряются на первом же светлом плане.
+  shadow?: 'cream' | 'dark';
+  // Чем отбита строка в окнах `lowered`: там панели под ней нет, строка
+  // стоит на живом кадре, и кремовое свечение её не держит. Не задан —
+  // тот же `shadow`.
+  lowShadow?: 'cream' | 'dark';
   // Строка висит **над** линией `top`, а не под ней. Нужно на сплите:
   // под швом начинается дубль, и в вертикальном кадре лицо стоит ровно
   // там — слова ложились человеку на лицо. Над швом у панели пустое
@@ -41,20 +50,33 @@ export type CaptionStyle = {
 const CaptionPage: React.FC<{
   page: Page;
   accent: string;
+  textColor: string;
+  // Цвет строки в окнах `lowered`. Нужен сплиту: на кремовой панели
+  // строка тёмная, а опустившись на дубль, она обязана стать светлой —
+  // тёмные буквы на живом кадре тонут в тенях. Не задан — тот же цвет.
+  lowTextColor?: string;
   look: CaptionStyle;
-}> = ({page, accent, look: given}) => {
+}> = ({page, accent, textColor, lowTextColor, look: given}) => {
   let look = given;
   const frame = useCurrentFrame();
   const {fps, height} = useVideoConfig();
   // Время внутри страницы — своё, от начала её Sequence. Абсолютное
   // получаем сложением, иначе подсветка уедет на второй же странице.
   const now = page.start + frame / fps;
+  // Страница, начавшаяся до окна и дожившая до него, опускается вместе
+  // с ним: на финале ролика такая строка оставалась на месте шва и
+  // ложилась человеку на лицо, потому что началась за полсекунды до
+  // того, как панель ушла (дубль 22.09).
   const low = (look.lowered ?? []).some(
-    (r) => page.start >= r.from && page.start < r.to,
+    (r) => page.start < r.to && page.end > r.from,
   );
   if (low && look.lowTop !== undefined) {
     look = {...look, top: look.lowTop};
   }
+  if (low && look.lowShadow !== undefined) {
+    look = {...look, shadow: look.lowShadow};
+  }
+  const color = low && lowTextColor !== undefined ? lowTextColor : textColor;
   const anchored = look.top !== undefined;
 
   const above = anchored && look.above;
@@ -95,19 +117,28 @@ const CaptionPage: React.FC<{
           color: '#fff',
           whiteSpace: 'pre-wrap',
           textTransform: look.uppercase ? 'uppercase' : undefined,
+          // Обводки у слова нет: чёрный контур утолщает букву и читается
+          // шрифтом из бесплатного шаблона. Отделяет текст от кадра одна
+          // мягкая тень — её на светлом кадре подпирает подложка выше.
+          //
+          // На плашке (сплит) тень бывает двух родов, и выбирает её то,
+          // на чём стоит строка. На кремовой панели чёрная тень спорила
+          // с пастельной темой — там мягкое кремовое свечение (решение
+          // человека 23.09). На самом дубле наоборот: строка светлая,
+          // кадр живой и местами белый, и держит буквы только тень
+          // (решение человека 24.09, когда субтитр ушёл с панели на
+          // дубль).
           ...(look.plate
             ? {
                 background: 'transparent',
                 textShadow:
-                  '0 3px 14px rgba(0,0,0,0.9), 0 0 4px rgba(0,0,0,0.95)',
-                WebkitTextStroke: '0.09em rgba(0,0,0,0.85)',
-                paintOrder: 'stroke fill',
+                  look.shadow === 'dark'
+                    ? '0 4px 24px rgba(0,0,0,0.85), 0 1px 3px rgba(0,0,0,0.9)'
+                    : '0 0 10px rgba(242,235,218,0.85), 0 0 3px rgba(242,235,218,0.9)',
               }
             : {
                 textShadow:
                   '0 4px 24px rgba(0,0,0,0.85), 0 1px 3px rgba(0,0,0,0.9)',
-                WebkitTextStroke: '2px rgba(0,0,0,0.45)',
-                paintOrder: 'stroke fill',
               }),
         }}
       >
@@ -117,7 +148,7 @@ const CaptionPage: React.FC<{
             style={{
               display: 'inline-block',
               margin: '0 0.14em',
-              color: now >= w.start && now < w.end ? accent : '#fff',
+              color: now >= w.start && now < w.end ? accent : color,
               scale: now >= w.start && now < w.end ? 1.08 : 1,
             }}
           >
@@ -135,8 +166,10 @@ const CaptionPage: React.FC<{
 export const Captions: React.FC<{
   pages: ReelProps['pages'];
   accent: string;
+  textColor?: string;
+  lowTextColor?: string;
   look?: CaptionStyle;
-}> = ({pages, accent, look = {}}) => {
+}> = ({pages, accent, textColor = '#fff', lowTextColor, look = {}}) => {
   const {fps} = useVideoConfig();
 
   return (
@@ -161,7 +194,13 @@ export const Captions: React.FC<{
             durationInFrames={durationInFrames}
             name={`Субтитр ${i + 1}`}
           >
-            <CaptionPage page={page} accent={accent} look={look} />
+            <CaptionPage
+              page={page}
+              accent={accent}
+              textColor={textColor}
+              lowTextColor={lowTextColor}
+              look={look}
+            />
           </Sequence>
         );
       })}

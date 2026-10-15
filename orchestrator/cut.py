@@ -257,11 +257,12 @@ PANEL_SCHEMA = {
                     "full": {"type": "boolean"},
                     "url": {"type": "string"},
                     "media": {"type": "integer"},
+                    "mark": {"type": "string"},
                     "art": {"type": "string"},
                 },
                 "required": ["phrase", "kind", "kicker", "lines", "items",
                              "value", "value_phrase", "full", "url",
-                             "media", "art"],
+                             "media", "mark", "art"],
                 "additionalProperties": False,
             },
         },
@@ -313,6 +314,18 @@ class Slide:
     # превратился — картинка в `image` или запись в `video` — решает
     # монтаж по файлу, а не роль.
     media: int = 0
+    # `mark`: слово или строка, которую видно на этом материале и о
+    # которой идёт речь. Есть — монтаж снимает с записи кадр, где это
+    # слово нашлось, наезжает на него и подчёркивает (`montage._mark`).
+    # Нет — материал идёт записью, как шёл до 22.09.
+    mark: str = ""
+    # Где `mark` лежит на снятом кадре: доли кадра от левого верхнего
+    # угла. Ставит монтаж после распознавания, а не роль: на глаз этого
+    # не знает никто.
+    spot: tuple[float, float, float, float] | None = None
+    # Сам кадр, снятый с записи там, где слово видно. Лежит рядом с
+    # записью, а не вместо неё: запись идёт первой половиной блока.
+    shot: Path | None = None
     video: Path | None = None
     video_len: float = 0.0
     media_size: tuple[int, int] = (0, 0)
@@ -419,6 +432,7 @@ def _slides(raw: list[dict[str, Any]], *, materials: int = 0,
             value_phrase=str(d.get("value_phrase") or "").strip(),
             full=full, url=url,
             media=media if kind == "media" else 0,
+            mark=str(d.get("mark") or "").strip() if kind == "media" else "",
             art=brief if kind == "art" else ""))
     return good, lost
 

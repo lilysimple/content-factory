@@ -113,7 +113,12 @@ async def main() -> None:
     check("сказано, откуда пропорция",
           ("запасная" in p) if prof.backup else ("из `goals.md`" in p),
           "запасная" if prof.backup else "из goals.md")
-    check("площадка ограничена telegram", "только Telegram" in p)
+    # Не вшитое «только Telegram»: с 15.10 набор считает
+    # `strategy.auto_publish` — Instagram входит в него, как только у
+    # завода есть транспорт. Проверяется договор, а не формулировка.
+    auto = ", ".join(strategy.auto_publish())
+    check("названы площадки, которые публикуются автоматом",
+          f"Публикуется автоматом {auto}" in p, auto)
 
     # ── 4. выгрузка в папку бренда ────────────────────────────────────
     print("\n4. Выгрузка")

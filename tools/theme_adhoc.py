@@ -47,6 +47,8 @@ def main() -> int:
     ap.add_argument("--hook", default="", help="хук одной строкой")
     ap.add_argument("--why", default="", help="кому и зачем")
     ap.add_argument("--rubric", default="", help="рубрика, если известна")
+    ap.add_argument("--notes", default="",
+                    help="просьба человека своими словами, если она была")
     args = ap.parse_args()
 
     db.init(cfg.db_path)
@@ -63,7 +65,7 @@ def main() -> int:
     try:
         theme = desk.adhoc(row["chat_id"], plat=args.plat, fmt=args.fmt,
                            title=args.title, hook=args.hook, why=args.why,
-                           rubric=args.rubric)
+                           rubric=args.rubric, notes=args.notes)
     except desk.NoWork as e:
         print(str(e), file=sys.stderr)
         return 1

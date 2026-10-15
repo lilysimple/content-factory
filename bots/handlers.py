@@ -20,9 +20,9 @@ from bots import topics
 from bots.registry import registry
 from bots.router import is_footage, resolve
 from config import cfg
-from orchestrator import (album, bridge, design, desk, editor, montage,
-                          onboarding, publisher, reels, refresh, reply,
-                          research, strategy)
+from orchestrator import (album, bridge, design, desk, editor, hand,
+                          montage, onboarding, publisher, reels, refresh,
+                          reply, research, strategy)
 from orchestrator.desk import NoWork
 from storage import db
 
@@ -30,7 +30,10 @@ log = logging.getLogger("handlers")
 
 # Куда отвечать, если команду дали в General: у каждой задачи свой топик.
 TOPIC = {"plan": "review", "post": "texts", "reels": "reels",
-         "research": "research", "design": "design", "idea": "strategy"}
+         "research": "research", "design": "design", "idea": "strategy",
+         # Разбор чужих рилсов отвечает туда, где живёт цепь ролика:
+         # следующий шаг после механики это сценарий, а не сводка.
+         "trend": "reels"}
 
 # Роль, которую распознал старый маршрутизатор, → workflow моста.
 #
@@ -41,7 +44,13 @@ TOPIC = {"plan": "review", "post": "texts", "reels": "reels",
 # нет по той же причине с другой стороны: разговор о состоянии завода не
 # производственная задача.
 AS_WORKFLOW = {"strategy": "plan", "editor": "post", "reels": "reels",
-               "design": "design", "research": "research"}
+               "design": "design", "research": "research",
+               # У Trend Watcher бота нет, и ветки локальной работы ниже
+               # для него тоже нет: просьба словами уходит мостом, как
+               # команда `/trend`. Упоминанием он не поднимается — некого
+               # упоминать, — так что `reason == "mention"` здесь не
+               # случается вовсе.
+               "trend": "trend"}
 
 # Задача, которая ждёт ответа человека, прежде чем уйти в мост.
 # chat_id → (запрос, workflow, топик). Спрашивать в момент прогона нельзя:
@@ -308,6 +317,7 @@ async def clock(period: float = 60.0) -> None:
     не платит за расписание ничем, кроме одного запроса в минуту.
     """
     log.info("часы запущены, тик %.0f с", period)
+    ticks = 0
     while True:
         try:
             for row in db.q("SELECT chat_id FROM tenants WHERE auto = 1"):
@@ -315,6 +325,14 @@ async def clock(period: float = 60.0) -> None:
                 if not cfg.chat_allowed(chat_id):
                     continue
                 await publisher.autopost(registry, chat_id)
+            # Токен Instagram живёт шестьдесят дней и продлевается тем же
+            # токеном. Пропущенное продление чинится только руками, через
+            # браузер, — поэтому продлеваем раз в сутки, задолго до срока,
+            # а не в последний день. Тик дешёвый: один запрос, и то лишь
+            # когда аккаунт настроен.
+            ticks += 1
+            if ticks % max(1, int(86400 / max(period, 1))) == 0:
+                await _refresh_instagram()
         except asyncio.CancelledError:
             raise
         except Exception:                                    # noqa: BLE001
@@ -322,6 +340,22 @@ async def clock(period: float = 60.0) -> None:
             # выглядеть это будет как «завод почему-то не публикует».
             log.exception("тик часов споткнулся")
         await asyncio.sleep(period)
+
+
+async def _refresh_instagram() -> None:
+    """Продлить токен Instagram. Отказ это строка в логе, а не поломка.
+
+    Завод без Instagram работает, и падать часами из-за чужого аккаунта
+    значит остановить расписание Telegram заодно.
+    """
+    from orchestrator import instapost
+    if not instapost.ready():
+        return
+    try:
+        if await instapost.refresh():
+            log.info("токен Instagram продлён")
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("токен Instagram не продлён: %s", e)
 
 
 def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
@@ -440,6 +474,34 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             out.append("")
             out.append("Снять всё, что ещё не началось: <code>/queue clear</code>")
         await registry.say("assistant", chat_id, "\n".join(out), topic=tkey)
+
+    # ── тема рукой ────────────────────────────────────────────────────
+    # Четвёртый вход в завод, кроме команд моста, просьбы словами и
+    # присланного дубля: человеку есть что рассказать, и тему он заводит
+    # сам. Модель здесь не зовётся — разобрать «завтра» и занять слот это
+    # арифметика, а текст по теме потом пишет Редактор обычным путём.
+    @dp_assistant.message(F.text.regexp(r"^/(tema|тема)(@\S+)?(\s|$)"))
+    async def on_tema(msg: Message) -> None:
+        chat_id = msg.chat.id
+        if not cfg.chat_allowed(chat_id) or not db.topics_ready(chat_id):
+            return
+        db.ensure_tenant(chat_id, cfg.default_tz)
+        tkey = topic_key_of(chat_id, msg.message_thread_id) or "strategy"
+        raw = (msg.text or "").partition(" ")[2].strip()
+
+        if not raw:
+            await registry.say("assistant", chat_id, hand.help_text(chat_id),
+                               topic=tkey)
+            return
+        try:
+            theme = hand.add(chat_id, raw)
+        except (NoWork, strategy.NoSlots) as e:
+            await registry.say("assistant", chat_id,
+                               f"Тему не завела: {e}.\n\n"
+                               + hand.help_text(chat_id), topic=tkey)
+            return
+        await registry.say("assistant", chat_id, hand.card(chat_id, theme),
+                           topic=tkey, kb=hand.kb(theme["id"]))
 
     # ── автопубликация по времени ─────────────────────────────────────
     # Включается здесь и только здесь: автомат, включённый правкой кода
@@ -980,6 +1042,35 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
                     chat_id, "Прошлый батч не подошёл. Дай другие темы: "
                              "другие углы и другие заходы, не перестановку "
                              "тех же.", "plan", tkey)
+            return
+
+        if kind == "hand":
+            tkey = (topic_key_of(chat_id, cb.message.message_thread_id)
+                    or "strategy")
+            act, _, tid = action.partition(":")
+            theme = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
+                           tid, chat_id)
+            if theme is None:
+                await registry.say("assistant", chat_id,
+                                   "Этой темы уже нет.", topic=tkey)
+                return
+            if act == "drop":
+                if hand.drop(chat_id, tid):
+                    await registry.say(
+                        "assistant", chat_id,
+                        f"Убрала <code>{tid}</code>, день снова свободен.",
+                        topic=tkey)
+                else:
+                    await registry.say(
+                        "assistant", chat_id,
+                        f"<code>{tid}</code> так не убрать: по ней уже есть "
+                        "работа. Пропусти её с причиной — скажи "
+                        "«что к публикации» и нажми «Пропустить».",
+                        topic=tkey)
+                return
+            if act == "write":
+                await bridge_task(chat_id, hand.ask_for_text(dict(theme)),
+                                  "post", "texts")
             return
 
         if kind == "bpost":

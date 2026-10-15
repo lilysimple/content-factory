@@ -20,7 +20,7 @@ from harness import CHAT, check, report
 
 harness.setup()
 
-from config import cfg                                            # noqa: E402
+from config import ROOT, cfg                                      # noqa: E402
 from orchestrator import (agent, album, cut, desk, footage, grab,      # noqa: E402
                           montage, panelshot)
 from storage import db                                            # noqa: E402
@@ -259,6 +259,39 @@ def main() -> None:
     check("сдвиг не меняет длительность",
           abs(shifted.total - part.total) < 0.001,
           f"{shifted.total} vs {part.total}")
+
+    print("\n15а. Границы куска и запинки внутри него")
+    said = [footage.Word("Один", 4.69, 5.41), footage.Word("файл", 5.41, 5.75),
+            footage.Word("Первое", 27.49, 27.91), footage.Word("—", 27.91, 28.25),
+            footage.Word("это", 28.25, 28.29),
+            footage.Word("первое", 28.29, 30.41),
+            footage.Word("место", 30.41, 30.65),
+            footage.Word("заново", 51.16, 51.70), footage.Word("и", 51.70, 51.78),
+            footage.Word("заново.", 51.78, 52.46)]
+    start, end = footage.snap(said, 5.0, 52.0)
+    check("граница не рвёт слово пополам", start < 4.69 and end > 52.46,
+          f"{start:.2f}–{end:.2f}")
+    check("граница в паузе остаётся на месте",
+          footage.snap(said, 20.0, 27.0) == (20.0, 27.0),
+          str(footage.snap(said, 20.0, 27.0)))
+
+    quiet = [(28.38, 29.7), (52.09, 55.04)]
+    back = footage.restarts(said, quiet)
+    check("заход заново одним словом вырезается",
+          back == [(27.49, 28.29)], str(back))
+    check("повтор ради нажима остаётся в ролике",
+          all(a > 30.0 or b < 28.5 for a, b in back), str(back))
+    check("без найденной паузы запинки нет",
+          footage.restarts(said, []) == [], str(footage.restarts(said, [])))
+
+    print("\n15б. Обложка сплита входит в длину композиции")
+    root = (ROOT / "tools/remotion-montage/src/Root.tsx").read_text("utf-8")
+    motion = root[root.index('id="Motion"'):]
+    motion = motion[motion.index("calculateMetadata"):]
+    check("длина сплита считается вместе с обложкой",
+          "introSeconds" in motion[:motion.index("durationInFrames:")],
+          "в calculateMetadata композиции Motion нет introSeconds: "
+          "тело сдвинуто на обложку, и её секунды срежутся с конца")
 
     print("\n16. Время показывается человеку правильно")
     check("минуты делятся нацело, а не округляются",
@@ -520,11 +553,21 @@ def main() -> None:
     b3.path(montage.LEXICON).unlink(missing_ok=True)
     check("нет файла — нет замен", montage.lexicon(b3) == [])
     montage.remember(b3, [("клод", "Claude"), ("ээ", "")])
-    montage.remember(b3, [("Клод", "Claude Code")])   # то же слово второй раз
     got = montage.lexicon(b3)
     check("замены записаны", ("клод", "Claude") in got, str(got))
     check("пустая замена пережила запись", ("ээ", "") in got, str(got))
-    check("дубль слова не заводится дважды", len(got) == 2, str(got))
+    # То же слово с другим ответом это не повтор, а отказ от прошлого
+    # решения: человек только что смотрел ролик и сказал иначе. Пропустить
+    # такую правку значит пересобрать ролик с тем же неверным словом.
+    montage.remember(b3, [("Клод", "Claude Code")])
+    got = montage.lexicon(b3)
+    check("свежая правка перебила прошлое правило",
+          ("Клод", "Claude Code") in got, str(got))
+    check("строка переписана, а не задвоена", len(got) == 2, str(got))
+    montage.remember(b3, [("клод", "Claude Code")])   # то же слово, тот же ответ
+    check("тот же ответ второй раз не пишется",
+          len(montage.lexicon(b3)) == 2, str(montage.lexicon(b3)))
+    got = montage.lexicon(b3)
     check("шапка файла не читается как замена",
           all("Словарь" not in src for src, _ in got), str(got))
 
@@ -850,8 +893,11 @@ def main() -> None:
     # лежит в папке.
     print("\n37. Видео из папки берётся с любым именем")
     d = montage.incoming_dir(b)
+    # Только файлы: с 22.09 рядом лежит папка альбома, и `unlink` на ней
+    # падает EPERM — цикл не доходил до проверок вовсе.
     for f in d.iterdir():
-        f.unlink()
+        if f.is_file():
+            f.unlink()
     own = d / "IMG_4471.MOV"
     own.write_bytes(b"\x00" * 64)
     check("своё имя найдено", montage._footage(b) == own,
@@ -862,7 +908,8 @@ def main() -> None:
           str(montage._footage(b)))
 
     for f in d.iterdir():
-        f.unlink()
+        if f.is_file():
+            f.unlink()
     try:
         montage._footage(b)
         check("пустая папка это отказ словами", False, "смолчал")
@@ -1064,11 +1111,16 @@ def main() -> None:
     check("несказанный пункт едет с началом блока, а не пропадает",
           props["blocks"][1]["items"][1]["at"] == 3.0,
           str(props["blocks"][1]["items"]))
-    check("панель говорит цветами бренда",
-          props["panelColor"] == "#1F1F1F" and props["accentColor"] == "#C6DE48"
-          and props["textColor"] == "#F8F5F1", str(props["panelColor"]))
-    check("свечение взято прозрачностью от акцента",
-          props["glowColor"] == "rgba(198, 222, 72, 0.13)", props["glowColor"])
+    check("панель говорит своей пастелью, не цветами бренда",
+          props["panelColor"] == montage.REEL_PANEL_BG
+          and props["accentColor"] == montage.REEL_ACCENT
+          and props["textColor"] == montage.REEL_PANEL_TEXT, str(props["panelColor"]))
+    check("субтитр на видео тоже пастельный",
+          props["captionTextColor"] == montage.REEL_CAPTION_TEXT,
+          str(props.get("captionTextColor")))
+    check("свечение взято прозрачностью от пастельного акцента",
+          props["glowColor"] == montage._rgba(montage.REEL_ACCENT, montage.GLOW_ALPHA),
+          props["glowColor"])
     check("аутро есть только под CTA",
           props["outroSeconds"] == 1.8
           and montage.motion_props(
@@ -1353,7 +1405,7 @@ def panel() -> None:
           later[1].full, str(later[1]))
 
     print("\n45г. Окно головы сплита стоит по лицу")
-    # Вертикальный дубль 1080×1920 в окне 1080×1060: видна 0.552 высоты.
+    # Вертикальный дубль 1080×1920 в окне 1080×1152: видна 0.6 высоты.
     face = footage.Face(x=0.35, y=0.15, w=0.3, h=0.17, conf=0.9)
     track = montage.head_track([(2.0, face), (9.0, face)],
                                (1080, 1920), (1080, 1920))
@@ -1491,7 +1543,397 @@ def panel() -> None:
           and not montage.wants_motion("нарежь на рилсы"),
           "триггеры не пересекаются")
 
+    print("\n47. Взгляд вниз вырезается по просьбе и по своему нулю")
+    # Просьба своя: проход по кадрам стоит минуты, и без слова его никто
+    # не оплачивает.
+    check("просьба узнаётся словами человека",
+          montage.wants_eyes("убери куски со взглядом вниз")
+          and montage.wants_eyes("вырежи, где смотрю в ноутбук")
+          and not montage.wants_eyes("смонтируй сплит рилс"),
+          "триггер взгляда")
+
+    def head(pitch: float) -> footage.Face:
+        return footage.Face(0.3, 0.2, 0.3, 0.3, 0.9, pitch, None, None)
+
+    # Дубль 24.09: камера выше, весь наклон уехал в минус. В камеру
+    # человек смотрит на −0,25, вниз — на +0,05, и абсолютный порог,
+    # снятый с другой съёмки, не ловит там ничего.
+    pts = ([(i / 5, head(-0.25)) for i in range(25)]
+           + [(5 + i / 5, head(0.05)) for i in range(15)]
+           + [(8 + i / 5, head(-0.25)) for i in range(25)])
+    level = footage.gaze_level(pts)
+    check("порог считается от самой съёмки, а не назначен",
+          level is not None and abs(level - (-0.14)) < 0.01, str(level))
+    spans = footage.looking_down(pts)
+    check("опущенное окно найдено на смещённом нуле",
+          len(spans) == 1 and spans[0][0] < 5.0 and spans[0][1] > 7.9,
+          str(spans))
+    check("абсолютный порог чужой съёмки не находит ничего",
+          footage.looking_down(pts, thresh=footage.GAZE_DOWN) == [],
+          "чужой ноль")
+
+    # Моргнул — не отвёл глаза: окно короче `GAZE_LEAST` не окно.
+    blink = ([(i / 5, head(-0.25)) for i in range(25)]
+             + [(5.0, head(0.05))]
+             + [(5 + (i + 1) / 5, head(-0.25)) for i in range(25)])
+    check("короткое окно не режется", footage.looking_down(blink) == [],
+          str(footage.looking_down(blink)))
+
+    check("углов нет — и резать нечего",
+          footage.looking_down([(1.0, head(None))]) == [], "нет углов")
+
+
+def autocheck() -> None:
+    """Автопроверка расшифровки: три круга и голос двух из трёх.
+
+    Сами круги whisper сюда не входят, как и весь тяжёлый проход: здесь
+    проверяется арифметика голосования. Ошибка в ней не падает, а тихо
+    приезжает подменённым словом в караоке — то есть ровно тем, от чего
+    автопроверка и ставилась.
+    """
+    W = footage.Word
+
+    print("\n48. Два круга из трёх перебивают третий")
+    small = [W("когда", 0.0, 0.4), W("я", 0.4, 0.6),
+             W("установила", 0.6, 1.4), W("приложение", 1.4, 2.2)]
+    medium = [W("когда", 0.0, 0.4), W("я", 0.4, 0.6),
+              W("установила", 0.6, 1.4), W("приложение", 1.4, 2.2)]
+    large = [W("Когда", 0.0, 0.4), W("я", 0.4, 0.6),
+             W("остановила", 0.6, 1.4), W("приложение", 1.4, 2.2)]
+    said, voted, split = footage.vote([small, medium, large])
+    check("слово переголосовано", said[2].text == "установила",
+          said[2].text)
+    check("переголосованное посчитано", voted == 1, str(voted))
+    check("тайминги от крупного круга",
+          said[2].start == 0.6 and said[2].end == 1.4, str(said[2]))
+    check("согласные слова не тронуты",
+          [w.text for w in said[:2]] == ["Когда", "я"],
+          str([w.text for w in said[:2]]))
+
+    print("\n49. Один несогласный круг это шум, а не голос")
+    lone = [W("когда", 0.0, 0.4), W("я", 0.4, 0.6),
+            W("остановила", 0.6, 1.4), W("приложение", 1.4, 2.2)]
+    said, voted, split = footage.vote([lone, medium, large])
+    check("слово осталось от крупного круга",
+          said[2].text == "остановила", said[2].text)
+    check("ничего не переголосовано", voted == 0, str(voted))
+
+    print("\n50. Место, где разошлись все три, названо числом")
+    a = [W("весит", 0.0, 0.8)]
+    b = [W("бесит", 0.0, 0.8)]
+    c = [W("висит", 0.0, 0.8)]
+    said, voted, split = footage.vote([a, b, c])
+    check("слово не переголосовано", said[0].text == "висит", said[0].text)
+    check("разошедшееся место посчитано", split == 1, str(split))
+
+    print("\n51. Круги сводятся по общей канве, а не по номеру слова")
+    # Малый круг слышит «какие-то» двумя словами и дальше едет со
+    # сдвигом: сведение по индексу здесь разъезжается до конца записи.
+    torn = [W("какие", 2.0, 2.3), W("-то", 2.3, 2.5),
+            W("деньги", 2.5, 3.1), W("постоянно", 3.1, 3.9)]
+    same = [W("какие-то", 2.0, 2.5), W("деньги", 2.5, 3.1),
+            W("постоянно", 3.1, 3.9)]
+    base = [W("какие-то", 2.0, 2.5), W("деньги", 2.5, 3.1),
+            W("особенно", 3.1, 3.9)]
+    said, voted, split = footage.vote([torn, same, base])
+    check("последнее слово переголосовано через сдвиг",
+          said[-1].text == "постоянно", said[-1].text)
+    check("переголосовано ровно одно", voted == 1, str(voted))
+
+    print("\n51б. Лишнее слово у крупного круга не размножает соседей")
+    # Так автопроверка сломалась на первом прогоне 26.09: сведение по
+    # времени отдавало соседним словам базового один и тот же голос, и
+    # «с чего бы я начала» приезжало как «с чего бы бы начала».
+    full = [W("с", 0.0, 0.2), W("чего", 0.2, 0.5), W("бы", 0.5, 0.7),
+            W("я", 0.7, 0.8), W("начала", 0.8, 1.3)]
+    short = [W("Чего", 0.05, 0.5), W("бы", 0.5, 0.7), W("я", 0.7, 0.85),
+             W("начала", 0.85, 1.3)]
+    said, voted, split = footage.vote([short, short, full])
+    check("ни одно слово не размножилось",
+          [w.text for w in said] == [w.text for w in full],
+          " ".join(w.text for w in said))
+    check("пропуск слова голосом не считается", voted == 0, str(voted))
+
+    print("\n52. Заглавная и знак принадлежат месту, а не слову")
+    src = [W("Остановила,", 0.6, 1.4)]
+    fix = [W("установила", 0.6, 1.4)]
+    said, voted, _ = footage.vote([fix, fix, src])
+    check("запятая осталась", said[0].text.endswith(","), said[0].text)
+    check("заглавная осталась", said[0].text == "Установила,", said[0].text)
+
+    print("\n53. Двух кругов для голоса мало")
+    said, voted, split = footage.vote([small, large])
+    check("слова от крупного круга", said[2].text == "остановила",
+          said[2].text)
+    check("голосования не было", voted == 0 and split == 0,
+          f"{voted}/{split}")
+    check("пустой круг не считается голосом",
+          footage.vote([small, [], large])[1] == 0, "пусто")
+
+    print("\n54. Отказ круга это строка, а не отказ монтировать")
+    async def _rounds() -> None:
+        real = footage.captions
+        try:
+            async def flaky(video, *, model=footage.WHISPER_MODEL):
+                if model == "large-v3":
+                    raise footage.NoWhisper("модель не скачалась")
+                return small if model == "small" else medium
+
+            footage.captions = flaky
+            words, notes = await footage.recheck(harness.TMP / "no.mp4")
+            check("субтитры собраны на уцелевших кругах",
+                  [w.text for w in words] == [w.text for w in medium],
+                  str([w.text for w in words]))
+            check("упавший круг назван строкой",
+                  any("large-v3" in n for n in notes), str(notes))
+            check("отсутствие голосования названо",
+                  any("без голосования" in n for n in notes), str(notes))
+
+            async def dead(video, *, model=footage.WHISPER_MODEL):
+                raise footage.NoWhisper("нет модели")
+
+            footage.captions = dead
+            try:
+                await footage.recheck(harness.TMP / "no.mp4")
+                check("все круги упали — расшифровки нет", False, "не подняло")
+            except footage.NoWhisper:
+                check("все круги упали — расшифровки нет", True, "NoWhisper")
+
+            # Длинная запись: три круга на ней дороже всего монтажа.
+            seen: list[str] = []
+
+            async def counted(video, *, model=footage.WHISPER_MODEL):
+                seen.append(model)
+                return small
+
+            footage.captions = counted
+            _, notes = await footage.recheck(harness.TMP / "no.mp4",
+                                             seconds=1800.0)
+            check("длинный дубль слушается одним кругом", seen == ["small"],
+                  str(seen))
+            check("один круг вместо трёх назван строкой",
+                  any("одним кругом" in n for n in notes), str(notes))
+        finally:
+            footage.captions = real
+
+    asyncio.run(_rounds())
+
+
+
+def whole() -> None:
+    """Правка субтитров целиком: сличение, словарь, пересборка.
+
+    Рендер сюда не входит — проверяется то, что его окружает: какие
+    строки словаря выведены из присланного текста, какие не выведены и
+    почему, и что режим ожидания снимается. Ошибка здесь тихая: человек
+    прислал поправленный абзац, а получил справку про формат или чужое
+    правило в словаре бренда.
+    """
+    def subs(line: str) -> list[dict]:
+        out, t = [], 0.0
+        for word in line.split():
+            out.append({"text": word, "start": t, "end": t + 0.4})
+            t += 0.4
+        return out
+
+    SHOWN = ("Моя любимая рубрика, с чего бы я начала работу в Claude. "
+             "Ну, я и начала с того, что мне нужно было купить MacBook, "
+             "потому что мне не хотелось работать на планшете в телефоне, "
+             "поэтому это совет номер один, да. Вот моя любимая задача "
+             "сейчас это очищение памяти с компьютера, работа с "
+             "фотографиями, разложить их по папкам.")
+    shown = subs(SHOWN)
+
+    print("\n55. Субтитры отдаются одной строкой, как в кадре")
+    check("текст собран из слов", footage.subtitle_text(shown) == SHOWN,
+          footage.subtitle_text(shown)[:60])
+    check("пустые слова не оставляют двойных пробелов",
+          "  " not in footage.subtitle_text(
+              [{"text": "раз"}, {"text": " "}, {"text": "два"}]),
+          footage.subtitle_text([{"text": "раз"}, {"text": " "},
+                                 {"text": "два"}]))
+
+    print("\n56. Поправленное слово становится строкой словаря")
+    pairs, notes = footage.whole_pairs(
+        shown, shown, SHOWN.replace("совет номер один", "совет номер два"))
+    check("выведена одна замена", pairs == [("один", "два")], str(pairs))
+    check("лишнего не сказано", notes == [], str(notes))
+
+    print("\n57. Левая часть берётся из услышанного, а не из кадра")
+    # Словарь уже переписал «клод» в «Claude», и человек правит именно
+    # это слово: правило обязано встать на услышанное, иначе оно не
+    # сработает ни на одном следующем дубле.
+    raw = subs(SHOWN.replace("Claude", "клод"))
+    pairs, _ = footage.whole_pairs(
+        shown, raw, SHOWN.replace("в Claude", "в Claude Code"))
+    check("ключ правила — услышанное слово",
+          pairs and pairs[0][0].lower() == "клод", str(pairs))
+    check("правая часть — как написал человек",
+          pairs and pairs[0][1] == "Claude Code", str(pairs))
+
+    print("\n58. Пропущенное слово цепляется к соседнему")
+    pairs, _ = footage.whole_pairs(
+        shown, shown, SHOWN.replace("работу в Claude", "работу в Claude Code"))
+    check("вставка стала правилом со словом-якорем",
+          pairs and len(pairs[0][0].split()) >= 1
+          and "Code" in pairs[0][1], str(pairs))
+
+    print("\n59. Выброшенное слово даёт пустую правую часть")
+    pairs, _ = footage.whole_pairs(shown, shown,
+                                   SHOWN.replace("это совет", "совет"))
+    check("правая часть пустая", pairs and pairs[0][1] == "", str(pairs))
+
+    print("\n60. Разошлись только знаки — ролик не пересобирается")
+    pairs, notes = footage.whole_pairs(shown, shown,
+                                       SHOWN.replace("один, да.", "один да"))
+    check("замен нет", pairs == [], str(pairs))
+    check("сказано, что править нечего",
+          any("нечего" in n for n in notes), str(notes))
+
+    print("\n61. Другой текст вместо правки — отказ, а не двадцать правил")
+    other = ("Совсем другая речь про совсем другое дело, ничего общего с "
+             "тем, что человек говорил на камеру, ни одного слова оттуда.")
+    pairs, notes = footage.whole_pairs(shown, shown, other)
+    check("словарь не тронут", pairs == [], str(pairs))
+    check("отказ назван строкой",
+          any("другой текст" in n for n in notes), str(notes))
+    check("пустой текст тоже отказ",
+          footage.whole_pairs(shown, shown, "   ")[0] == [], "пусто")
+    check("нет субтитров — нечего сличать",
+          footage.whole_pairs([], [], SHOWN)[0] == [], "нет слов")
+
+    print("\n62. Переписанная целиком фраза в словарь не идёт")
+    long = SHOWN.replace(
+        "Вот моя любимая задача сейчас это очищение памяти с компьютера",
+        "А самое приятное дело у меня теперь совершенно другое занятие")
+    pairs, notes = footage.whole_pairs(shown, shown, long)
+    check("длинная замена пропущена",
+          all(len(s.split()) <= footage.WHOLE_RUN for s, _ in pairs),
+          str(pairs))
+    check("пропуск назван строкой",
+          pairs == [] or any("целой фразой" in n for n in notes),
+          str(notes))
+
+    # ── словарь ───────────────────────────────────────────────────────
+    print("\n63. Правило на то же слово переписывается, а не дублируется")
+    b = _brand()
+    b.artifact(montage.LEXICON,
+               montage.LEX_HEAD + "\n# правки прошлых дублей\nклод -> Claude\n")
+    added, swapped = montage.remember(b, [("весит", "бесит")])
+    check("новое правило дописано", added == [("весит", "бесит")], str(added))
+    check("ничего не переписано", swapped == [], str(swapped))
+
+    added, swapped = montage.remember(b, [("клод", "Claude Code")])
+    check("конфликт решён в пользу свежей правки",
+          swapped == [("клод", "Claude Code")], str(swapped))
+    text = b.read(montage.LEXICON)
+    check("строка одна, а не две",
+          text.count("клод ->") == 1, text)
+    check("свежая правка и применится",
+          dict((footage.norm(s), d) for s, d in montage.lexicon(b)
+               )["клод"] == "Claude Code", text)
+    check("комментарий человека на месте",
+          "# правки прошлых дублей" in text, text)
+
+    added, swapped = montage.remember(b, [("клод", "Claude Code")])
+    check("то же правило во второй раз не пишется",
+          added == [] and swapped == [], f"{added}/{swapped}")
+
+    # ── режим ожидания ────────────────────────────────────────────────
+    print("\n64. Кнопка отдаёт текст и ждёт его обратно")
+    reg = harness.FakeRegistry()
+    reel = montage.Reel(theme={"id": "t-1", "plat": "instagram",
+                               "format": "reels"},
+                        video=harness.TMP / "no.mp4")
+    reel.subs = shown
+    reel.spoken = shown
+    montage.table.hold(CHAT, reel)
+
+    async def _armed() -> None:
+        await montage.on_callback(reg, CHAT, "text:t-1", topic="reels")
+
+    asyncio.run(_armed())
+    check("текст субтитров ушёл человеку",
+          any("очищение памяти" in s.text for s in reg.sent), reg.texts()[:80])
+    check("ждём текст целиком", montage.wants_whole(CHAT), "не взведён")
+    check("стол в режиме правки", montage.wants_fix(CHAT), "не взведён")
+
+    print("\n65. Присланный текст правит словарь и пересобирает ролик")
+    calls: list[str] = []
+
+    async def _fake_refit(r, brand, *, say=None):
+        calls.append("refit")
+        return r
+
+    async def _fake_show(registry, chat_id, r, topic="reels"):
+        calls.append("show")
+
+    real_refit, real_show = montage.refit, montage.show
+    try:
+        montage.refit, montage.show = _fake_refit, _fake_show
+        reg.clear()
+        asyncio.run(montage.revise(
+            reg, CHAT, SHOWN.replace("совет номер один", "совет номер два"),
+            topic="reels"))
+        check("ролик пересобран и показан", calls == ["refit", "show"],
+              str(calls))
+        check("правка названа человеку",
+              any("словарь субтитров" in s.text for s in reg.sent),
+              reg.texts()[:120])
+        check("ожидание снято", not montage.wants_whole(CHAT), "всё ещё ждём")
+        check("правило в словаре бренда",
+              any(footage.norm(s) == "один" for s, _ in montage.lexicon(b)),
+              b.read(montage.LEXICON)[-80:])
+
+        print("\n66. Текст без правок ролик не пересобирает")
+        calls.clear()
+        montage.table.hold(CHAT, reel)
+        asyncio.run(montage.on_callback(reg, CHAT, "text:t-1", topic="reels"))
+        reg.clear()
+        asyncio.run(montage.revise(reg, CHAT, SHOWN, topic="reels"))
+        check("рендера не было", calls == [], str(calls))
+        check("сказано, почему", any("править нечего" in s.text
+                                     for s in reg.sent), reg.texts()[:120])
+        check("кнопки под карточкой живые",
+              montage.table.get(CHAT) is not None, "стол пуст")
+    finally:
+        montage.refit, montage.show = real_refit, real_show
+
+    print("\n67. Слишком длинные субтитры правятся словами")
+    montage.leave_whole(CHAT)
+    big = montage.Reel(theme={"id": "t-2"}, video=harness.TMP / "no.mp4")
+    big.subs = big.spoken = subs(("слово " * 1200).strip())
+    montage.table.hold(CHAT, big)
+    reg.clear()
+    asyncio.run(montage.say_whole(reg, CHAT, big, "reels"))
+    check("текст целиком не предлагается", not montage.wants_whole(CHAT),
+          "взведён")
+    check("предложены правки словами",
+          any("как слышно" in s.text for s in reg.sent), reg.texts()[:120])
+
+    print("\n68. Карточка после рестарта честно говорит, что слов нет")
+    montage.leave_whole(CHAT)
+    bare = montage.Reel(theme={"id": "t-3"}, video=harness.TMP / "no.mp4")
+    montage.table.hold(CHAT, bare)
+    reg.clear()
+    asyncio.run(montage.say_whole(reg, CHAT, bare, "reels"))
+    check("ожидание не взведено", not montage.wants_whole(CHAT), "взведён")
+    check("названа причина",
+          any("другом запуске" in s.text for s in reg.sent),
+          reg.texts()[:120])
+
+    print("\n69. Просьба смонтировать заново снимает ожидание")
+    montage.table.hold(CHAT, reel)
+    asyncio.run(montage.on_callback(reg, CHAT, "text:t-1", topic="reels"))
+    check("ждём текст", montage.wants_whole(CHAT), "не взведён")
+    montage.leave_fix(CHAT)
+    check("ожидание снято вместе с режимом правки",
+          not montage.wants_whole(CHAT), "всё ещё ждём")
+    montage.table.clear(CHAT)
+
 
 main()
 panel()
+autocheck()
+whole()
 raise SystemExit(report())

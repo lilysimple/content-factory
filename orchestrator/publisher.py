@@ -29,7 +29,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from config import cfg
 from orchestrator import desk
 from orchestrator.desk import ID_RX
-from orchestrator.strategy import AUTO_PUBLISH
+from orchestrator import instapost
+from orchestrator.strategy import auto_publish
 from storage import db
 
 log = logging.getLogger("publisher")
@@ -81,8 +82,13 @@ class Package:
 
     @property
     def auto(self) -> bool:
-        """Умеем ли мы вообще публиковать на эту площадку."""
-        return self.plat in AUTO_PUBLISH
+        """Умеем ли мы вообще публиковать на эту площадку.
+
+        Спрашивается у `auto_publish()`, а не у константы: Instagram
+        попадает в набор по факту настроенного аккаунта, и ответ меняется
+        в работающем процессе.
+        """
+        return self.plat in auto_publish()
 
 
 # ── сборка комплекта ──────────────────────────────────────────────────
@@ -153,22 +159,34 @@ def collect(chat_id: int, theme: dict[str, Any]) -> Package:
 
     # Макеты не обязательны: пост без обложки это нормальный пост.
     # У ролика они и не нужны — обложка вшита в первый кадр.
+    #
+    # В Telegram в канал уходит первый макет, остальные идут справочно; в
+    # Instagram карусель это все макеты подряд, и порядок здесь тот, в
+    # котором их пролистает человек. Поэтому сортировка не косметика:
+    # имена макетов нумерованы Дизайнером, и `sorted` держит его порядок.
     pkg.images = [] if pkg.video else sorted(
         b.path("posts").glob(f"{theme['id']}-*.png"))
 
-    limit = TG_CAPTION if (pkg.images or pkg.video) else TG_LIMIT
-    if len(pkg.text) > limit:
-        why = (" из-за видео" if pkg.video else
-               " из-за картинки" if pkg.images else "")
-        pkg.problems.append(
-            f"текст {len(pkg.text)} знаков, потолок {limit}{why}")
-
-    if pkg.video:
-        mb = pkg.video.stat().st_size / 1024 / 1024
-        if mb > TG_VIDEO_MB:
+    # Потолки у площадок свои, и мерить одну чужими — врать дважды.
+    # Телеграмные 1024 знака завернули бы подпись Instagram, которой там
+    # положено 2200; наоборот, пропорция кадра и JPEG Telegram не волнуют
+    # вовсе. Поэтому мерки берутся по площадке комплекта.
+    if pkg.plat == "instagram":
+        pkg.problems += instapost.findings(pkg)
+    else:
+        limit = TG_CAPTION if (pkg.images or pkg.video) else TG_LIMIT
+        if len(pkg.text) > limit:
+            why = (" из-за видео" if pkg.video else
+                   " из-за картинки" if pkg.images else "")
             pkg.problems.append(
-                f"ролик {mb:.0f} МБ, потолок Bot API {TG_VIDEO_MB} МБ — "
-                "отдам файлом, в канал не уйдёт")
+                f"текст {len(pkg.text)} знаков, потолок {limit}{why}")
+
+        if pkg.video:
+            mb = pkg.video.stat().st_size / 1024 / 1024
+            if mb > TG_VIDEO_MB:
+                pkg.problems.append(
+                    f"ролик {mb:.0f} МБ, потолок Bot API {TG_VIDEO_MB} МБ — "
+                    "отдам файлом, в канал не уйдёт")
 
     row = db.one("SELECT state, link FROM posts WHERE theme_id = ?", theme["id"])
     if row and row["state"] == "pub":
@@ -191,14 +209,22 @@ def _link(chat_id_of_channel: Any, message_id: int) -> str:
 
 
 async def send(reg, chat_id: int, pkg: Package) -> str:
-    """Отправить в канал и записать факт. Возвращает ссылку.
+    """Отправить и записать факт. Возвращает ссылку.
 
     Запись в `posts` идёт **до** отправки со статусом `sending`: если
     процесс умрёт между отправкой и записью, повторная попытка упрётся в
     строку и не создаст второй пост.
+
+    Площадок две, и разводятся они здесь, в одном месте. Бухгалтерия —
+    запись `sending`, защита от дубля, перевод темы в `pub` — общая для
+    обеих: развести её значило бы держать два журнала публикаций и чинить
+    их парой. Своё у площадок только сама отправка.
     """
-    if not cfg.publish_channel:
+    if pkg.plat == "telegram" and not cfg.publish_channel:
         raise NoChannel("канал не задан, PUBLISH_CHANNEL пуст")
+    if pkg.plat == "instagram" and not instapost.ready():
+        raise NoChannel("аккаунт Instagram не настроен: IG_USER_ID или "
+                        "IG_TOKEN пусты")
     if pkg.problems:
         raise NotReady("; ".join(pkg.problems))
 
@@ -214,6 +240,9 @@ async def send(reg, chat_id: int, pkg: Package) -> str:
                 raise NotReady(f"уже опубликовано: {row['link']}")
         c.execute("UPDATE posts SET attempts = attempts + 1 "
                   "WHERE theme_id = ?", (tid,))
+
+    if pkg.plat == "instagram":
+        return await _send_instagram(reg, chat_id, pkg)
 
     bot = reg.bot("publisher")
     try:
@@ -258,6 +287,42 @@ async def send(reg, chat_id: int, pkg: Package) -> str:
     return link
 
 
+async def _send_instagram(reg, chat_id: int, pkg: Package) -> str:
+    """Отправка в Instagram. Запись `sending` уже сделана выше.
+
+    Отличие от Telegram одно и важное: Instagram забирает медиа сам, по
+    ссылке, и между контейнером и публикацией проходят секунды или
+    минуты. Поэтому «отправка не прошла» здесь может случиться после
+    того, как файл уже уехал в чат технической загрузкой, — уборку
+    делает сам транспорт в `finally`.
+    """
+    tid = pkg.theme["id"]
+    try:
+        media_id, link = await instapost.publish(reg, chat_id, pkg)
+    except (instapost.Refused, instapost.NoAccount) as e:
+        with db.tx() as c:
+            c.execute("UPDATE posts SET state = 'failed' WHERE theme_id = ?",
+                      (tid,))
+        log.warning("публикация в Instagram не прошла: %s", e)
+        raise NotReady(f"Instagram отказал: {e}") from e
+    except Exception as e:                                   # noqa: BLE001
+        with db.tx() as c:
+            c.execute("UPDATE posts SET state = 'failed' WHERE theme_id = ?",
+                      (tid,))
+        log.exception("публикация в Instagram не прошла")
+        raise NotReady(f"публикация в Instagram не прошла: "
+                       f"{getattr(e, 'message', None) or e}") from e
+
+    with db.tx() as c:
+        c.execute("UPDATE posts SET state = 'pub', external_id = ?, link = ?, "
+                  "published_at = datetime('now') WHERE theme_id = ?",
+                  (f"ig:{media_id}", link, tid))
+        c.execute("UPDATE themes SET status = 'pub', "
+                  "updated_at = datetime('now') WHERE id = ?", (tid,))
+    log.info("опубликовано %s → %s", tid, link)
+    return link
+
+
 def skip(chat_id: int, theme_id: str, reason: str) -> None:
     """Пропуск с обязательной причиной. Задним числом не публикуем."""
     with db.tx() as c:
@@ -283,7 +348,7 @@ def skip(chat_id: int, theme_id: str, reason: str) -> None:
 
 AUTO_AT_DEFAULT = "10:00"     # время слота, если человек не назвал своё
 AUTO_GRACE_MIN = 90           # сколько ждём опоздавший завод
-AUTO_MIN_PUBS = 10            # утверждений до автомата
+AUTO_MIN_PUBS = 1            # утверждений до автомата (порог опущен 06.10 по просьбе человека)
 AUTO_MIN_DAYS = 14            # и дней с первой публикации
 
 _AT_RX = re.compile(r"^(\d{1,2})[:.](\d{2})$")
@@ -337,6 +402,9 @@ def gate(chat_id: int) -> list[str]:
     человек нажимает «включить».
     """
     blockers: list[str] = []
+    # Канал нужен Telegram. Завод без него не публикует вовсе: Instagram
+    # сам по себе автомата не кормит, порог считается по публикациям, а
+    # копить их пока умеет только Telegram.
     if not cfg.publish_channel:
         blockers.append("канал не настроен: PUBLISH_CHANNEL пуст")
     n, days = approvals(chat_id)
@@ -363,9 +431,17 @@ def arm(chat_id: int, on: bool, at: str | None = None) -> list[str]:
 
 
 def slot_moment(chat_id: int, at: str, day: str):
-    """Момент слота датой и временем в поясе тенанта."""
+    """Момент слота датой и временем в поясе тенанта.
+
+    Пояс здесь не украшение. `desk.now` отдаёт время с поясом, и наивный
+    момент слота ронял сравнение `now < slot` ошибкой `TypeError` —
+    внутри тика часов, то есть молчаливо: автомат, включённый человеком,
+    не публиковал бы ничего и писал бы в лог «тик споткнулся» раз в
+    минуту. Поймано стендом на цикле 31, до первого живого `/auto on`.
+    """
     h, m = (int(x) for x in at.split(":"))
-    return datetime.combine(date.fromisoformat(day), dtime(hour=h, minute=m))
+    return datetime.combine(date.fromisoformat(day), dtime(hour=h, minute=m),
+                            tzinfo=desk.zone(chat_id))
 
 
 def due_now(chat_id: int, moment=None) -> tuple[list[dict[str, Any]],
@@ -394,11 +470,12 @@ def due_now(chat_id: int, moment=None) -> tuple[list[dict[str, Any]],
     items = []
     for r in rows:
         t = dict(r)
-        # Площадки вне `AUTO_PUBLISH` автомата не касаются вовсе. Иначе
-        # слот Instagram каждый день попадал бы сюда и каждый день
-        # получал строку «комплект не готов» — неправду: комплект как раз
-        # готов, просто публикует его человек руками.
-        if (t.get("plat") or "telegram") not in AUTO_PUBLISH:
+        # Площадки без транспорта автомата не касаются вовсе. Иначе слот
+        # Instagram каждый день попадал бы сюда и каждый день получал
+        # строку «комплект не готов» — неправду: комплект как раз готов,
+        # просто публикует его человек руками. Набор спрашивается у
+        # `auto_publish()`: настроенный аккаунт меняет ответ.
+        if (t.get("plat") or "telegram") not in auto_publish():
             continue
         if t.get("asset") or (b is not None and reel_path(b, t["id"])):
             items.append(t)
@@ -455,6 +532,8 @@ async def autopost(reg, chat_id: int, moment=None) -> list[str]:
     links = []
     for t in ready:
         pkg = collect(chat_id, t)
+        if pkg.plat == "instagram":
+            pkg.problems += await instapost.video_findings(pkg)
         if pkg.problems:
             if _once(chat_id, t["id"], "problems:" + str(t.get("date"))):
                 await reg.say("publisher", chat_id,
@@ -510,9 +589,13 @@ def _tail(pkg: Package) -> list[str]:
     out: list[str] = []
     if pkg.problems:
         out += ["", "⚠️ " + "; ".join(pkg.problems)]
-    if not cfg.publish_channel:
+    if pkg.plat == "telegram" and not cfg.publish_channel:
         out += ["", "Канал не настроен: <code>PUBLISH_CHANNEL</code> пуст. "
                     "Опубликовать не смогу, комплект отдам файлами."]
+    if pkg.plat == "instagram" and not instapost.ready():
+        out += ["", "Аккаунт Instagram не настроен: <code>IG_USER_ID</code> "
+                    "или <code>IG_TOKEN</code> пусты. Комплект отдам "
+                    "файлами, выкладывать руками."]
     return out
 
 
@@ -594,6 +677,8 @@ async def _show(reg, chat_id: int, theme: dict[str, Any], topic: str) -> None:
     держится на датах, и досрочный пост ломает соседний слот.
     """
     pkg = collect(chat_id, theme)
+    if pkg.plat == "instagram":
+        pkg.problems += await instapost.video_findings(pkg)
     blocking = [p for p in pkg.problems if "автоматом не публикуется" not in p]
     early = (theme.get("date") or "") > desk.today(chat_id)
 
@@ -603,7 +688,8 @@ async def _show(reg, chat_id: int, theme: dict[str, Any], topic: str) -> None:
                 "показываю комплект, публиковать буду в свой день.")
     kb = _kb(theme["id"],
              ready=pkg.auto and not blocking and not early
-             and bool(cfg.publish_channel))
+             and (bool(cfg.publish_channel) if pkg.plat == "telegram"
+                  else instapost.ready()))
 
     # Пост с картинкой выходит одним сообщением: фото и подпись под ним.
     # Значит и превью такое же — то же фото, та же подпись, кнопки на нём

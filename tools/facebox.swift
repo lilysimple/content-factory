@@ -18,6 +18,12 @@ import Vision
 
 struct Box: Encodable {
     let x: Double, y: Double, w: Double, h: Double, conf: Double
+    // Наклон головы. Ревизия 3 детектора отдаёт его сама, без второго
+    // прохода по ландмаркам: `pitch` отрицательный — лицо опущено, и
+    // ровно по нему монтаж выбрасывает взгляды в экран.
+    // `nil` — ревизия старая или угол не посчитан, и это не поломка:
+    // рамка лица работает без него, как работала до сих пор.
+    let pitch: Double?, yaw: Double?, roll: Double?
 }
 
 struct Shot: Encodable {
@@ -34,6 +40,13 @@ func encode(_ shot: Shot) -> String {
 for path in CommandLine.arguments.dropFirst() {
     let url = URL(fileURLWithPath: path)
     let request = VNDetectFaceRectanglesRequest()
+    // Углы головы есть только с третьей ревизии. Выше доступной не
+    // просим: на старой системе запрос упал бы целиком, и вместе с
+    // углами пропала бы рамка, которой пользуются обложки.
+    if VNDetectFaceRectanglesRequest.supportedRevisions
+        .contains(VNDetectFaceRectanglesRequestRevision3) {
+        request.revision = VNDetectFaceRectanglesRequestRevision3
+    }
     let handler = VNImageRequestHandler(url: url, options: [:])
     do {
         try handler.perform([request])
@@ -41,7 +54,10 @@ for path in CommandLine.arguments.dropFirst() {
             let b = face.boundingBox
             return Box(x: Double(b.minX), y: Double(1 - b.maxY),
                        w: Double(b.width), h: Double(b.height),
-                       conf: Double(face.confidence))
+                       conf: Double(face.confidence),
+                       pitch: face.pitch?.doubleValue,
+                       yaw: face.yaw?.doubleValue,
+                       roll: face.roll?.doubleValue)
         }
         print(encode(Shot(path: path, faces: faces, error: nil)))
     } catch {

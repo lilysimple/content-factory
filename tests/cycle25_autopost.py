@@ -93,10 +93,19 @@ def seed_approvals(n: int, days_ago: int) -> None:
 
 
 def at_moment(at: str, shift_min: int = 0, day: str = ""):
+    """Момент в поясе тенанта, а не голый.
+
+    Пояс здесь не украшение: `publisher.slot_moment` отдаёт момент с
+    поясом, и голый момент из теста сравнить с ним нельзя — Python
+    отказывает `TypeError`, и падает весь цикл, а не одна проверка.
+    Пояс берётся у того же кода, что у завода: вторая копия разъехалась
+    бы с первой на первой же правке.
+    """
     h, m = (int(x) for x in at.split(":"))
     base = datetime.combine(date.fromisoformat(day or TODAY),
                             datetime.min.time()).replace(hour=h, minute=m)
-    return base + timedelta(minutes=shift_min)
+    return (base + timedelta(minutes=shift_min)).replace(
+        tzinfo=desk.now(CHAT).tzinfo)
 
 
 async def main() -> None:

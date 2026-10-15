@@ -97,6 +97,23 @@ def refuse_if_live() -> None:
     )
 
 
+# Что в песочницу не едет. Видео у бренда тяжёлое: снятые дубли и
+# готовые ролики это три гигабайта, и копировать их на каждый прогон
+# незачем — `posts` стенд тут же чистит сам, а дубль тесту нужен свой, в
+# несколько байт (`cycle19`, «видео из папки берётся с любым именем»).
+# Копия стоила не только минут: на полном диске `copytree` падал
+# `No space left on device`, и цикл врал про причину.
+
+_HEAVY = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi")
+
+
+def _skip_heavy(folder: str, names: list[str]) -> set[str]:
+    root = Path(folder)
+    if root.name == "posts" or "incoming" in root.parts:
+        return {n for n in names if Path(n).suffix.lower() in _HEAVY}
+    return set()
+
+
 def setup() -> None:
     """Свежая песочница на каждый прогон."""
     refuse_if_live()
@@ -106,7 +123,8 @@ def setup() -> None:
     TMP.mkdir(parents=True)
 
     shutil.copy(REPO / "factory.db", TMP / "factory.db")
-    shutil.copytree(BRANDS / "lily-space", TMP / "brands" / "lily-space")
+    shutil.copytree(BRANDS / "lily-space", TMP / "brands" / "lily-space",
+                    ignore=_skip_heavy)
 
     # Боевая база живёт своей жизнью: бот пишет туда темы, тексты и счётчик
     # вызовов. Тест, который зависит от их количества, начинает падать от

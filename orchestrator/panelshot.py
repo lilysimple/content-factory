@@ -362,9 +362,9 @@ STYLE = ("Single glossy 3D object, centered, floating, soft studio light, "
          "fades to the edges. Minimal, premium, calm. Absolutely no text, "
          "no letters, no numbers, no logos, no UI.")
 
-# Холст панели 1080 на 860 (`MOTION_SPLIT`) ближе всего к 5:4; блок на
-# весь кадр — вертикальный.
-ASPECT_HALF = "5:4"
+# Холст панели 1080 на 576 (`MOTION_SPLIT`) это 1.875:1, и из того, что
+# умеет генератор, ближе всего 16:9; блок на весь кадр — вертикальный.
+ASPECT_HALF = "16:9"
 ASPECT_FULL = "9:16"
 
 

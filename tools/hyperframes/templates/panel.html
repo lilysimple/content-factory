@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Карточка панели</title>
+    <script src="./vendor/gsap.min.js"></script>
+    <style>
+      /* Manrope — тот же шрифт, которым Remotion набирает субтитры и
+         заголовок обложки. Файл лежит рядом, а не тянется из сети:
+         рендер идёт без интернета, а правило `font_family_without_font_face`
+         именованную гарнитуру без локального файла не пропускает. Две
+         подрезки: кириллица и латиница — в карточках обе. */
+      @font-face {
+        font-family: 'Manrope';
+        font-style: normal;
+        font-weight: 400 800;
+        src: url('./fonts/manrope-cyrillic.woff2') format('woff2');
+        unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+      }
+      @font-face {
+        font-family: 'Manrope';
+        font-style: normal;
+        font-weight: 400 800;
+        src: url('./fonts/manrope-latin.woff2') format('woff2');
+      }
+      body { margin: 0; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+      .clip { position: absolute; inset: 0; }
+      .pad {
+        position: absolute; inset: 0;
+        display: flex; flex-direction: column; justify-content: center;
+        box-sizing: border-box;
+        font-family: 'Manrope', system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+        font-synthesis-weight: none;
+      }
+      .kicker {
+        font-size: 26px; font-weight: 700; letter-spacing: 0.18em;
+        text-transform: uppercase; margin: 0 0 18px;
+      }
+      .line { font-weight: 800; margin: 0 0 10px; line-height: 1.08; }
+      .line.sub { font-weight: 600; opacity: 0.74; }
+      .items { margin: 14px 0 0; padding: 0; list-style: none; }
+      .item {
+        display: flex; align-items: baseline; gap: 16px;
+        font-weight: 600; margin: 0 0 12px; line-height: 1.2;
+      }
+      .dot { display: block; width: 14px; height: 14px; border-radius: 50%; flex: none; }
+      .count { font-weight: 800; line-height: 1; margin: 0; }
+      .scale { display: flex; align-items: flex-start; gap: 0; margin: 26px 0 0; position: relative; }
+      .rail { position: absolute; left: 0; right: 0; height: 6px; border-radius: 3px; }
+      .step {
+        position: relative; flex: 1 1 0; display: flex; flex-direction: column;
+        align-items: center; gap: 14px; font-weight: 600; z-index: 2;
+      }
+      .notch { display: block; width: 18px; height: 18px; border-radius: 50%; }
+      /* Бегунок это кольцо вокруг ступени, а не кружок поверх неё: поверх
+         он закрывал подпись, и последняя ступень читалась огрызком. */
+      .knob { position: absolute; border-radius: 50%; left: 0; z-index: 1; }
+      .icon { display: flex; align-items: center; gap: 28px; }
+      .tile {
+        display: block; border-radius: 28px; overflow: hidden; flex: none;
+        display: flex; align-items: center; justify-content: center;
+      }
+      .tile img { display: block; width: 100%; height: 100%; object-fit: contain; }
+      .name { font-weight: 800; line-height: 1.1; margin: 0; }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="panel"
+      data-start="0"
+      data-width="__W__"
+      data-height="__H__"
+      data-fps="__FPS__"
+      data-duration="__DUR__"
+    >
+      <section id="card" class="clip" data-start="0" data-duration="__DUR__">
+        <div id="pad" class="pad"></div>
+      </section>
+    </div>
+    <script type="application/json" id="spec">__SPEC__</script>
+    <script>
+      // Карточка панели одной композицией: что рисовать, решил питон и
+      // положил в `#spec`. Разметку собираем здесь, чтобы четыре сорта
+      // блока не разъехались на четыре файла с одной и той же типографикой.
+      const spec = JSON.parse(document.getElementById('spec').textContent);
+      const pad = document.getElementById('pad');
+      const H = spec.height;
+      const W = spec.width;
+      // Кегль от высоты холста: панель сплита и полный кадр это один
+      // шаблон, и числом в пикселях их не свести.
+      const unit = Math.min(H / 12, W / 14);
+
+      document.body.style.background = spec.panelColor;
+      pad.style.color = spec.textColor;
+      const side = Math.round(unit * 1.1);
+      // Низ под строку субтитра: содержимое блока держится выше неё, как
+      // держит его шаблон Remotion. Иначе карточка ложится на слова.
+      pad.style.padding = Math.round(unit * 0.9) + 'px ' + side + 'px '
+        + (Math.round(unit * 0.9) + (spec.reserve || 0)) + 'px ' + side + 'px';
+
+      const made = [];                      // что анимировать и когда
+      const el = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text !== undefined) n.textContent = text;
+        return n;
+      };
+
+      if (spec.kicker) {
+        const k = el('p', 'kicker', spec.kicker);
+        k.style.color = spec.accentColor;
+        k.style.fontSize = Math.round(unit * 0.42) + 'px';
+        pad.appendChild(k);
+        made.push({node: k, at: 0});
+      }
+
+      if (spec.kind === 'counter') {
+        const c = el('p', 'count', '0');
+        c.style.color = spec.accentColor;
+        c.style.fontSize = Math.round(unit * 3.4) + 'px';
+        pad.appendChild(c);
+        const tail = spec.lines.length ? spec.lines[0] : '';
+        if (tail) {
+          const t = el('p', 'line sub', tail);
+          t.style.fontSize = Math.round(unit * 0.62) + 'px';
+          t.style.marginTop = Math.round(unit * 0.4) + 'px';
+          pad.appendChild(t);
+          made.push({node: t, at: spec.valueAt + 0.3});
+        }
+        window.__count = {node: c, value: spec.value, at: spec.valueAt};
+      } else if (spec.kind === 'scale') {
+        const row = el('div', 'scale');
+        const rail = el('span', 'rail');
+        rail.style.background = spec.cardColor;
+        rail.style.top = Math.round(unit * 0.55) + 'px';
+        row.appendChild(rail);
+        const steps = spec.items.length ? spec.items : spec.lines.map((t) => ({text: t, at: 0}));
+        steps.forEach((s, i) => {
+          const box = el('div', 'step');
+          const notch = el('span', 'notch');
+          notch.style.background = i === steps.length - 1 ? spec.accentColor : spec.cardColor;
+          const label = el('span', '', s.text);
+          label.style.fontSize = Math.round(unit * 0.4) + 'px';
+          box.appendChild(notch);
+          box.appendChild(label);
+          row.appendChild(box);
+          made.push({node: box, at: s.at});
+        });
+        const knob = el('span', 'knob');
+        knob.style.background = spec.accentColor;
+        knob.style.opacity = '0.3';
+        const ring = Math.round(unit * 0.62);
+        knob.style.width = ring + 'px';
+        knob.style.height = ring + 'px';
+        row.appendChild(knob);
+        pad.appendChild(row);
+        window.__scale = {knob: knob, row: row, steps: steps, ring: ring};
+      } else if (spec.kind === 'icon') {
+        const box = el('div', 'icon');
+        const tile = el('span', 'tile');
+        const side = Math.round(unit * 2.2);
+        tile.style.width = side + 'px';
+        tile.style.height = side + 'px';
+        tile.style.background = spec.cardColor;
+        if (spec.imageSrc) {
+          const img = document.createElement('img');
+          img.src = spec.imageSrc;
+          img.alt = '';
+          tile.appendChild(img);
+        }
+        box.appendChild(tile);
+        const name = el('p', 'name', spec.lines.length ? spec.lines[0] : '');
+        name.style.fontSize = Math.round(unit * 0.86) + 'px';
+        box.appendChild(name);
+        pad.appendChild(box);
+        made.push({node: tile, at: 0});
+        made.push({node: name, at: 0.25});
+      } else {
+        spec.lines.forEach((text, i) => {
+          const p = el('p', i === 0 ? 'line' : 'line sub', text);
+          p.style.fontSize = Math.round(unit * (i === 0 ? 0.95 : 0.62)) + 'px';
+          pad.appendChild(p);
+          made.push({node: p, at: i * 0.18});
+        });
+        if (spec.items.length) {
+          const list = el('ul', 'items');
+          spec.items.forEach((it) => {
+            const li = el('li', 'item');
+            const dot = el('span', 'dot');
+            dot.style.background = spec.accentColor;
+            dot.style.width = Math.round(unit * 0.22) + 'px';
+            dot.style.height = Math.round(unit * 0.22) + 'px';
+            const t = el('span', '', it.text);
+            t.style.fontSize = Math.round(unit * 0.58) + 'px';
+            li.appendChild(dot);
+            li.appendChild(t);
+            list.appendChild(li);
+            made.push({node: li, at: it.at});
+          });
+          pad.appendChild(list);
+        }
+      }
+
+      const tl = gsap.timeline({paused: true});
+      // Выезд снизу с подъёмом: тот же жест, которым карточку показывает
+      // Remotion, иначе два пути дадут два разных ролика.
+      made.forEach((m) => {
+        tl.fromTo(
+          m.node,
+          {y: Math.round(unit * 0.45), opacity: 0},
+          {y: 0, opacity: 1, duration: 0.42, ease: 'power3.out'},
+          Math.max(0, m.at)
+        );
+      });
+      if (window.__count) {
+        const c = window.__count;
+        const box = {n: 0};
+        tl.to(
+          box,
+          {
+            n: c.value,
+            duration: 0.9,
+            ease: 'power2.out',
+            onUpdate: () => { c.node.textContent = String(Math.round(box.n)); },
+          },
+          Math.max(0, c.at)
+        );
+        tl.fromTo(c.node, {scale: 0.86}, {scale: 1, duration: 0.5, ease: 'power3.out'},
+                  Math.max(0, c.at));
+      }
+      if (window.__scale) {
+        const s = window.__scale;
+        // Рельс и кольцо садятся на середину кружка ступени: считаем по
+        // разметке, а не по пикселям в стилях — кегль тут от высоты
+        // холста, и на полном кадре число в стиле разъехалось бы.
+        const first = s.row.querySelector('.notch');
+        const mid = first.offsetTop + first.offsetHeight / 2;
+        s.row.querySelector('.rail').style.top = Math.round(mid - 3) + 'px';
+        s.knob.style.top = Math.round(mid - s.ring / 2) + 'px';
+        const stops = s.steps.map((st, i) => (i + 0.5) / s.steps.length);
+        stops.forEach((p, i) => {
+          const x = Math.round(s.row.clientWidth * p - s.ring / 2);
+          tl.to(s.knob, {x: x, duration: 0.5, ease: 'power2.inOut'},
+                Math.max(0, s.steps[i].at));
+        });
+        tl.fromTo(s.knob, {opacity: 0}, {opacity: 0.3, duration: 0.3}, 0);
+      }
+      window.__timelines['panel'] = tl;
+    </script>
+  </body>
+</html>

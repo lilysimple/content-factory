@@ -14,9 +14,9 @@ import type {MotionProps} from './motionProps';
 // читалась стыком двух разных роликов — решение человека 16.09, после
 // живого сплита.
 //
-// Субтитр садится ровно на шов и живёт плашкой. Градиент, которым он
-// отбит в `Reel`, здесь затемнял бы низ панели — то есть портил бы
-// картинку, ради которой панель и заведена.
+// Субтитр живёт на кремовой панели, у самого шва, и идёт плашкой.
+// Градиент, которым он отбит в `Reel`, здесь затемнял бы низ панели — то
+// есть портил бы картинку, ради которой панель и заведена.
 
 const SEAM_FADE = 0.045;   // доля высоты холста
 
@@ -27,7 +27,24 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
   const panelHeight = Math.round(height * props.split);
   const videoHeight = height - panelHeight;
   const panelOnTop = props.headAnchor === 'bottom';
-  const seam = panelOnTop ? panelHeight : videoHeight;
+  const videoTop = panelOnTop ? panelHeight : 0;
+
+  // Где стоит строка караоке.
+  //
+  // На кремовой панели, у самого шва — решение человека 06.10, второе за
+  // день и обратное первому. До этого строка стояла на снятом кадре: при
+  // панели сверху посреди холста, при панели снизу внизу своей половины.
+  // Обе эти точки ложились человеку на лицо — в вертикальном кадре лицо
+  // стоит ровно там, — а это дороже, чем соседство с инфографикой,
+  // которого боялось решение 24.09.
+  //
+  // Низ панели под строку уже отведён: `Panel` держит содержимое блока
+  // выше полосы в 0.2 высоты панели. Так что места ей не занимать ни у
+  // кого — ровно туда она и возвращается.
+  //
+  // Панель сверху — строка над швом, панель снизу — под ним. В обоих
+  // случаях это кремовое поле, а не кадр.
+  const captionLine = panelOnTop ? panelHeight : videoHeight;
 
   // Куски идут встык: вырезанная пауза — это склейка, и выглядеть она
   // должна склейкой. Считаем то же, что и `Reel`, но кроп у клипа уже
@@ -40,6 +57,13 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
     return {...s, offset, frames: Math.max(1, Math.round(seconds * fps))};
   });
   const bodyFrames = pieces.reduce((n, p) => n + p.frames, 0);
+
+  // Хвост без панели: те же куски дубля, но на весь холст. Рисуются
+  // поверх сплита своей последовательностью, а не заменяют его, — так
+  // склейка проходит по границе кадра, а не по смене вёрстки.
+  const soloFrames = Math.min(
+    bodyFrames, Math.max(0, Math.round(props.soloSeconds * fps)));
+  const soloFrom = bodyFrames - soloFrames;
 
   const visual = (b: MotionProps['blocks'][number]) =>
     b.kind === 'media' || b.kind === 'art';
@@ -203,30 +227,85 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
         );
       })}
 
+      {soloFrames > 0 ? (
+        <Sequence from={soloFrom} durationInFrames={soloFrames} name="Финал">
+          <AbsoluteFill style={{backgroundColor: props.panelColor}}>
+            {pieces.map((p, i) => {
+              const from = Math.round(p.offset * fps) - soloFrom;
+              if (from + p.frames <= 0) {
+                return null;
+              }
+              return (
+                <Sequence
+                  key={`solo-${p.from}-${i}`}
+                  from={from}
+                  durationInFrames={p.frames}
+                  name={`Финал, кусок ${i + 1}`}
+                >
+                  <Clip
+                    src={staticFile(props.videoPath)}
+                    from={p.from}
+                    to={p.to}
+                    offset={p.offset}
+                    track={props.pan}
+                    videoWidth={props.videoWidth}
+                    videoHeight={props.videoHeight}
+                    boxWidth={width}
+                    boxHeight={height}
+                  />
+                </Sequence>
+              );
+            })}
+          </AbsoluteFill>
+        </Sequence>
+      ) : null}
+
       {/* ── слова ──
           Поверх всего, включая блоки на весь кадр: речь идёт непрерывно,
           и пропадающий на полном кадре субтитр читается как сбой. Шов
           держит строку и там: карточка на полном кадре стоит на своём
           месте, и под ней ровно то же пустое поле.
 
-          Строка висит **над** швом. Под ним начинается дубль, а в
-          вертикальном кадре лицо стоит ровно под швом — слова ложились
-          человеку на лицо. */}
+          Строка стоит на кремовой панели, у шва: `captionLine` — сам
+          шов, а `above` говорит, с какой его стороны кремовое поле. */}
       <Sequence from={0} durationInFrames={bodyFrames} name="Слова">
         {props.pages.length > 0 ? (
           <Captions
             pages={props.pages}
             accent={props.accentColor}
+            textColor={props.captionTextColor}
+            // Опустившись на дубль, строка меняет цвет на кремовый:
+            // тёмные буквы, собранные под панель, на живом кадре тонут.
+            lowTextColor={props.panelColor}
             look={{
-              top: seam,
-              above: true,
+              top: captionLine,
+              above: panelOnTop,
               fontSize: Math.round(height * 0.032),
               uppercase: true,
               plate: true,
-              lowered: fullBlocks
-                .filter(visual)
-                .map((b) => ({from: b.start, to: b.end})),
-              lowTop: Math.round(height * 0.9),
+              // Кремовое свечение: строка стоит на кремовой панели, и
+              // чёрная тень спорила бы с пастельной темой. На живом
+              // кадре (окна `lowered`) наоборот — там тень.
+              shadow: 'cream',
+              lowShadow: 'dark',
+              // Окна, где шва нет: блок во весь кадр и хвост без
+              // панели. Строка там висела бы посреди картинки — на
+              // полном кадре посреди карточки, в хвосте человеку на
+              // лицо, — поэтому опускается к низу холста.
+              //
+              // Пока строка стояла на снятом кадре, опускать её при
+              // панели сверху было некуда. Теперь она на панели, и в
+              // окнах без панели ей деваться некуда, кроме низа холста:
+              // окна нужны обоим раскладам.
+              lowered: [
+                ...fullBlocks
+                  .filter(visual)
+                  .map((b) => ({from: b.start, to: b.end})),
+                ...(soloFrames > 0
+                  ? [{from: soloFrom / fps, to: bodyFrames / fps}]
+                  : []),
+              ],
+              lowTop: Math.round(height * 0.94),
             }}
           />
         ) : null}

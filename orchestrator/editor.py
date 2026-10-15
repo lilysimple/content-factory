@@ -538,12 +538,24 @@ def card(draft: Draft) -> str:
 def handoff(theme: dict[str, Any]) -> str:
     """Что будет с текстом дальше. Состояние из данных, а не из фразы:
     кнопка полторы недели отвечала, что Публикатора нет, когда он был."""
+    from orchestrator import strategy
     plat = theme.get("plat")
-    if plat not in AUTO_PUBLISH:
-        return f"{plat} публикуется руками в любом случае."
-    if not cfg.publish_channel:
+    if plat not in strategy.auto_publish():
+        why = (" Транспорта к нему у завода нет: аккаунт не настроен, "
+               "<code>IG_USER_ID</code> или <code>IG_TOKEN</code> пусты."
+               if plat == "instagram" else "")
+        return f"{plat} публикуется руками в любом случае.{why}"
+    if plat == "telegram" and not cfg.publish_channel:
         return ("Публикатор возьмёт его в очередь, когда будет задан канал: "
                 "<code>PUBLISH_CHANNEL</code> пуст.")
+    # Про автомат говорим его состоянием, а не общей фразой: человек,
+    # включивший автопубликацию, ждёт поста сам по себе, а не превью, и
+    # «покажу в Очереди» прочитал бы как «кнопку всё равно жать тебе».
+    from orchestrator import publisher             # локально: цикл импорта
+    on, at = publisher.settings(int(theme.get("chat_id") or 0))
+    if on and theme.get("date"):
+        return (f"В свой день, {theme['date']}, уйдёт в канал сам — в {at}. "
+                "Передумаешь — <code>/auto off</code>.")
     return "Публикатор покажет превью в «Очередь», когда придёт дата."
 
 

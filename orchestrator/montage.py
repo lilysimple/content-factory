@@ -36,11 +36,23 @@ whisper. Здесь остаётся сборка: собрать props, поз�
 (`montage/subtitles.md`), а не второй проход модели: ошибка на каждом
 дубле одна и та же. Словарь применяется сам, пополняется правкой
 человека под карточкой и переписывает субтитры без новой расшифровки.
+
+Язык словарю не по силам, и его правит автопроверка: дубль слушается
+тремя кругами whisper, слово берётся по голосу двух из трёх
+(`footage.recheck`). «Остановила» вместо «установила» и съеденное
+окончание ловятся так — до рендера, а не на готовом ролике. Модель и
+здесь не зовётся: круги локальные, это арифметика.
+
+Что не поймали круги, человек правит **текстом, а не списком замен**:
+кнопка отдаёт субтитры одной строкой, присланное обратно сличается с
+услышанным, и разница ложится в тот же словарь (`footage.whole_pairs`,
+`take_whole`). Строки словаря при этом выводит код, а не человек.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import html as _html
 import json
 import logging
 import os
@@ -55,8 +67,8 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import ROOT, cfg
-from orchestrator import (album, cut, desk, design, footage, grab, imagegen,
-                          imagery, panelshot, publisher)
+from orchestrator import (album, cut, desk, design, footage, frames, grab,
+                          imagegen, imagery, panelshot, publisher, strategy)
 from orchestrator.desk import NoWork
 from storage import db
 
@@ -106,6 +118,23 @@ DEFAULT_TEXT = "#F8F5F1"
 TOKEN_BG = "graphite"
 TOKEN_ACCENT = "terracotta"
 TOKEN_TEXT = "milk"
+
+# Тема верхней панели сплита и субтитров — решение человека 23.09, своя,
+# не из `design/tokens.css`: тема сайта живёт неоном на графите, а этим
+# двум местам заказана светлая пастель. Меняется здесь одной строкой, а
+# не через бренд, — так решение осталось только в рилсах.
+REEL_PANEL_BG = "#F2EBDA"     # кремовый — фон панели и подложка субтитра
+REEL_PANEL_TEXT = "#2B2A26"   # тёмный графит — текст панели на кремовом
+REEL_ACCENT = "#E8897F"       # пудровый коралл — кикер и активное слово
+# Караоке в сплите живёт на кремовой панели, у шва — решение человека
+# 06.10, обратное решению 24.09. Тогда строку увели с панели на снятый
+# кадр, чтобы она не читалась частью инфографики; на вертикальном кадре
+# она при этом легла человеку на лицо, и это оказалось дороже.
+# На кремовом субтитр тёмный, тем же графитом, что и панель. В окнах, где
+# панели нет — блок во весь кадр и хвост без панели, — шаблон меняет цвет
+# на кремовый сам (`MotionTemplate`, `lowTextColor`): тёмные буквы на
+# живом кадре тонут в тенях.
+REEL_CAPTION_TEXT = REEL_PANEL_TEXT
 
 HOOK_TITLE = "Хук"
 CTA_TITLE = "CTA"
@@ -181,6 +210,14 @@ class Reel:
     # Они же во времени готового ролика. Считаются из `slides`, а не
     # хранятся вместо них: пересборка после правки режет запись заново.
     blocks: list[Block] = field(default_factory=list)
+    # Маскот за спиной: картинка бренда и секунда ролика, на которой он
+    # уходит. Нет поля — нет и маскота: он украшение, а не часть ролика,
+    # и молчаливый дефолт посадил бы знак в кадр каждого монтажа.
+    mascot: dict[str, Any] | None = None
+    # Фото альбома поверх полного кадра: путь, начало и конец в секундах
+    # тела ролика. Второй способ показать присланное — первый это панель
+    # сплита, и выбирают между ними словами просьбы (`wants_inserts`).
+    inserts: list[dict[str, Any]] = field(default_factory=list)
     out: Path | None = None
     findings: list[str] = field(default_factory=list)
 
@@ -326,18 +363,55 @@ def fixes(text: str) -> list[tuple[str, str]]:
     return out
 
 
-def remember(b, pairs: list[tuple[str, str]]) -> None:
-    """Правка это словарь бренда, а не разовая замена в одном ролике."""
+def remember(b, pairs: list[tuple[str, str]]
+             ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Правка это словарь бренда, а не разовая замена в одном ролике.
+
+    Возвращает записанное и переписанное. Второе нужно потому, что
+    правило на то же слово с **другой** правой частью — это не повтор, а
+    отказ от прошлого решения: человек только что смотрел ролик и сказал
+    иначе. Молча пропустить такую правку значит пересобрать ролик с тем
+    же неверным словом и не сказать, почему.
+    """
     if not pairs:
-        return
-    known = {footage.norm(src) for src, _ in lexicon(b)}
+        return [], []
     if not b.path(LEXICON).exists():
         b.artifact(LEXICON, LEX_HEAD)
+
+    lines = (b.read(LEXICON) or "").splitlines()
+    # Ключ строки → её номер: правило переписывается на месте, а не
+    # дописывается второй раз. Файл правят и руками, и порядок строк в
+    # нём читается человеком.
+    where: dict[str, int] = {}
+    for i, line in enumerate(lines):
+        bare = line.strip()
+        if not bare or bare.startswith("#"):
+            continue
+        m = ARROW.match(bare)
+        if m and footage.norm(m.group(1)):
+            where[footage.norm(m.group(1))] = i
+
+    added: list[tuple[str, str]] = []
+    swapped: list[tuple[str, str]] = []
     for src, dst in pairs:
-        if footage.norm(src) in known:
-            continue                    # то же слово во второй раз
-        known.add(footage.norm(src))
-        b.append(LEXICON, f"{src} -> {dst}")
+        key = footage.norm(src)
+        if not key:
+            continue
+        at = where.get(key)
+        if at is None:
+            lines.append(f"{src} -> {dst}")
+            where[key] = len(lines) - 1
+            added.append((src, dst))
+            continue
+        was = ARROW.match(lines[at].strip())
+        if was and was.group(2).strip() == dst.strip():
+            continue                    # то же слово с тем же ответом
+        lines[at] = f"{src} -> {dst}"
+        swapped.append((src, dst))
+
+    if added or swapped:
+        b.artifact(LEXICON, "\n".join(lines))
+    return added, swapped
 
 
 def _relex(reel: Reel, rules: list[tuple[str, str]]) -> None:
@@ -956,7 +1030,36 @@ def _video_name(reel: Reel) -> str:
     return f"input-{reel.theme['id']}{reel.video.suffix}"
 
 
-async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
+COVER_SPIN = 1.8            # длина первого кадра ролика, секунды
+
+
+async def _cover_clip(reel: Reel, b, size: tuple[int, int], *,
+                      fps: int, seconds: float) -> tuple[Path | None, str]:
+    """Обложка движением: медленный наезд на утверждённый кадр.
+
+    Берётся только свёрстанная Дизайнером обложка (`dressed`): слова на
+    ней уже стоят, и клип ничего не переписывает — он двигает картинку,
+    которую человек утвердил кнопкой. Обложку, которую монтаж набирает
+    сам, сюда не отдаём: заголовок там идёт шрифтом бренда, а своего
+    Manrope у HyperFrames нет, и человек получил бы два разных шрифта
+    на одном ролике.
+    """
+    if not (reel.dressed and reel.cover):
+        return None, ""
+    spec = frames.cover_spec(
+        size=size, fps=fps, seconds=seconds, lines=[], anchor=reel.anchor,
+        inset=reel.inset or round(size[1] * COVER_INSET),
+        focus=reel.crop, scrim=0.0, blur=False, back=reel.color,
+        image=reel.cover)
+    try:
+        return await frames.clip(b, spec, template="cover.html",
+                                 image=reel.cover, cap=frames.COVER_CAP), ""
+    except frames.NoClip as e:
+        return None, f"обложка без движения — {e}"
+
+
+async def render(reel: Reel, b, size: tuple[int, int], *,
+                 fps: int = 30) -> Path:
     await _ready()
 
     assert reel.probe is not None and reel.cuts is not None
@@ -969,9 +1072,41 @@ async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
         cover_name = f"cover-{reel.theme['id']}{reel.cover.suffix}"
         files[cover_name] = reel.cover
 
+    # Фото поверх кадра едут тем же способом, что дубль и обложка: через
+    # public/ и по имени файла. Имя от id темы и номера — второй монтаж
+    # той же темы кладёт файл поверх, а не плодит мусор.
+    inserts: list[dict[str, Any]] = []
+    for i, ins in enumerate(reel.inserts):
+        src = Path(ins["image"])
+        name = f"insert-{reel.theme['id']}-{i}{src.suffix.lower()}"
+        files[name] = src
+        inserts.append({"src": name, "start": ins["start"],
+                        "end": ins["end"],
+                        "width": ins.get("width", INSERT_MAX_W)})
+
+    # Маскот считается здесь, а не в сборке: маски снимаются с того файла,
+    # который едет в рендер, а после обрезки краёв это уже не исходник.
+    look = person = None
+    masks: Path | None = None
+    if reel.mascot:
+        look, person, art, masks = await _mascot(reel, size, fps=fps)
+        if art and look and look.get("src"):
+            files[look["src"]] = art
+
+    intro = COVER_SPIN if (reel.cover or reel.title or reel.hook) else 0.0
+    clip_name = None
+    if intro:
+        made, note = await _cover_clip(reel, b, size, fps=fps, seconds=intro)
+        if note:
+            reel.findings.append(note)
+        if made:
+            clip_name = f"cover-clip-{reel.theme['id']}.mp4"
+            files[clip_name] = made
+
     props = {
         "videoPath": video_name,
         "coverPath": cover_name,
+        "coverClipPath": clip_name,
         "coverBlur": _blur(reel),
         "coverFocus": {"x": reel.crop[0], "y": reel.crop[1]},
         "coverAnchor": reel.anchor,
@@ -988,7 +1123,9 @@ async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
         "scrim": 0.0 if reel.dressed else float(reel.spec.get("scrim") or 0.28),
         "cta": reel.cta or None,
         "brandColor": reel.color,
-        "accentColor": reel.accent,
+        # Караоке — пастель рилса, не акцент бренда: см. `REEL_ACCENT`.
+        "accentColor": REEL_ACCENT,
+        "captionTextColor": REEL_CAPTION_TEXT,
         "brandName": reel.theme.get("brand_name") or None,
         "width": w,
         "height": h,
@@ -999,17 +1136,270 @@ async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
                      for a, b in reel.cuts.keep],
         "pan": reel.pan,
         "pages": reel.pages,
-        "introSeconds": 1.8 if (reel.cover or reel.title or reel.hook) else 0.0,
+        "inserts": inserts,
+        "introSeconds": intro,
         "outroSeconds": 1.8 if reel.cta else 0.0,
+        "mascot": look,
+        "personMask": person,
     }
     props = {k: v for k, v in props.items() if v is not None}
-    frames = max(1, round((props["introSeconds"] + reel.cuts.total
-                           + props["outroSeconds"]) * fps))
+    # «Первые десять секунд» человек считает от начала ролика, а маскот
+    # живёт в записи: до него идёт обложка. Вычитаем её здесь, где длина
+    # первого кадра уже известна, — иначе маскот уходит позже, чем его
+    # просили, и это видно секундомером, а не на глаз.
+    if look:
+        look["until"] = max(1.0, round(look["until"] - props["introSeconds"], 2))
+    frame_count = max(1, round((props["introSeconds"] + reel.cuts.total
+                                + props["outroSeconds"]) * fps))
 
-    with _staged(files):
-        return await _render("Reel", props, key=reel.theme["id"],
-                             frames=frames)
+    try:
+        with _staged(files):
+            return await _render("Reel", props, key=reel.theme["id"],
+                                 frames=frame_count)
+    finally:
+        # Маски уходят вместе с дублём: в public/ лежит рабочий материал
+        # репозитория, и полтысячи PNG, оставшихся там от монтажа,
+        # однажды уедут в коммит.
+        if masks:
+            shutil.rmtree(masks, ignore_errors=True)
 
+
+
+# ── маскот за спиной ──────────────────────────────────────────────────
+#
+# «Поставь маскота за плечо» значит матирование: знак ложится поверх
+# кадра, а человек — поверх знака. Силуэт даёт системная Vision тем же
+# проходом, что считает лица (`footage.person_masks`), и потому чужой
+# модели на диске здесь нет.
+#
+# Место знаку выбирает **замер перекрытия**, а не вкус: на стоп-кадре
+# хорошо смотрится почти любой угол, а в движении рука в жесте закрывает
+# маскота наполовину, и в кадре остаётся оранжевая полоса без глаз.
+# Поэтому кандидаты меряются по тем же маскам заранее, до рендера.
+#
+# Из прошедших замер берётся не самый свободный угол, а самый тесный:
+# знак, отодвинутый в пустоту, читается наклейкой, а стоящий у плеча —
+# тем, ради чего его просили. Устройство целиком — `NOTES.md`, «Маскот».
+
+MASCOT_ART = "montage/mascot.png"
+MASCOT_UNTIL = 10.0         # секунда ролика, на которой маскот уходит
+MASCOT_SIZE = 0.52          # доля ширины холста: половина кадра
+# Вдвое против первой посадки. На 0,26 маскот читался наклейкой в
+# углу стола — размер выбран глазами по живому ролику 20.09, и
+# замер перекрытия считается уже с ним: знак стал больше, а место
+# ему ищется тем же способом.
+MASCOT_SPOTS = tuple((x, y)
+                     for y in (0.34, 0.40, 0.46, 0.52)
+                     for x in (0.18, 0.24, 0.30, 0.70, 0.76, 0.82))
+MASCOT_SHUT = 0.6           # столько знака под человеком — закрыт
+MASCOT_MEAN = 0.35          # среднее перекрытие, выше — не место
+MASCOT_OFTEN = 0.15         # доля времени, которую он вправе быть закрыт
+MASCOT_EVERY = 3            # каждый третий кадр: голова не дёргается
+
+MASCOT_RX = re.compile(r"маскот|mascot|талисман")
+MASCOT_SEC_RX = re.compile(r"(\d+)\s*(?:сек\w*|s\b)")
+
+
+def wants_mascot(ask: str) -> bool:
+    return bool(MASCOT_RX.search((ask or "").lower()))
+
+
+def mascot_until(ask: str) -> float:
+    """«на первые десять секунд» — сколько маскот живёт в ролике."""
+    m = MASCOT_SEC_RX.search((ask or "").lower())
+    return float(m.group(1)) if m else MASCOT_UNTIL
+
+
+def _seen(video: tuple[int, int], canvas: tuple[int, int],
+          focus: tuple[float, float]) -> tuple[float, float, float, float]:
+    """Окно исходника, попавшее в холст, в долях кадра.
+
+    Та же арифметика, что в `Clip.tsx`: коробка растягивается до «кадр
+    целиком», нужное окно наезжает на неё сдвигом. Держать её в двух
+    местах приходится потому, что кроп решает композицию, а замер
+    перекрытия считается до рендера — но обе стороны берут одну формулу,
+    и разъехаться им можно только правкой.
+    """
+    vw, vh = video
+    w, h = canvas
+    scale = max(w / vw, h / vh)
+    box_w, box_h = vw * scale, vh * scale
+    left = min(0.0, max(w - box_w, w / 2 - focus[0] * box_w))
+    top = min(0.0, max(h - box_h, h / 2 - focus[1] * box_h))
+    return left, top, box_w, box_h
+
+
+def _focus_at(pan: list[dict[str, float]], t: float) -> tuple[float, float]:
+    """Куда смотрит кадр на секунде `t` ролика. Трека нет — центр."""
+    if not pan:
+        return (0.5, 0.5)
+    if t <= pan[0]["t"]:
+        return (pan[0]["x"], pan[0]["y"])
+    for a, b in zip(pan, pan[1:]):
+        if t <= b["t"]:
+            k = 0.0 if b["t"] == a["t"] else (t - a["t"]) / (b["t"] - a["t"])
+            return (a["x"] + (b["x"] - a["x"]) * k,
+                    a["y"] + (b["y"] - a["y"]) * k)
+    return (pan[-1]["x"], pan[-1]["y"])
+
+
+def _cover_of(cell: bytes, cols: int, rows: int,
+              rect: tuple[float, float, float, float]) -> float:
+    """Доля прямоугольника под силуэтом. Прямоугольник — доли кадра."""
+    x0, y0, x1, y1 = rect
+    c0 = max(0, min(cols - 1, int(x0 * cols)))
+    c1 = max(c0 + 1, min(cols, int(x1 * cols + 0.999)))
+    r0 = max(0, min(rows - 1, int(y0 * rows)))
+    r1 = max(r0 + 1, min(rows, int(y1 * rows + 0.999)))
+    total = 0
+    for r in range(r0, r1):
+        line = cell[r * cols + c0:r * cols + c1]
+        total += sum(line)
+    return total / (255 * (c1 - c0) * (r1 - r0))
+
+
+def mascot_spot(grid: list[tuple[int, bytes]], *, cuts: footage.Timeline,
+                pan: list[dict[str, float]], video: tuple[int, int],
+                canvas: tuple[int, int], until: float,
+                fps: int = footage.MASK_FPS, size: float = MASCOT_SIZE,
+                spots: tuple[tuple[float, float], ...] = MASCOT_SPOTS,
+                cols: int = footage.MASK_COLS, rows: int = footage.MASK_ROWS,
+                ) -> tuple[tuple[float, float], dict[str, float]]:
+    """Место маскоту по замеру перекрытия. Масок нет — угол по умолчанию.
+
+    Отдаёт точку и замер: среднее перекрытие и долю времени, которую знак
+    закрыт больше чем наполовину. Оба числа человек читает строкой — они
+    объясняют, почему маскот стоит именно здесь.
+    """
+    if not grid:
+        return spots[len(spots) // 2], {"mean": 0.0, "often": 0.0, "seen": 0}
+
+    w, h = canvas
+    side = size * w
+    tally: dict[tuple[float, float], list[float]] = {s: [] for s in spots}
+    for n, cell in grid:
+        if n % MASCOT_EVERY:
+            continue
+        body = cuts.at(n / fps)
+        if body is None or body > until:
+            continue                      # вырезано или маскот уже ушёл
+        left, top, box_w, box_h = _seen(video, canvas, _focus_at(pan, body))
+        for x, y in spots:
+            px, py = x * w, y * h
+            rect = ((px - side / 2 - left) / box_w,
+                    (py - side / 2 - top) / box_h,
+                    (px + side / 2 - left) / box_w,
+                    (py + side / 2 - top) / box_h)
+            tally[(x, y)].append(_cover_of(cell, cols, rows, rect))
+
+    scored = []
+    for spot, seen in tally.items():
+        if not seen:
+            continue
+        mean = sum(seen) / len(seen)
+        often = sum(1 for v in seen if v > MASCOT_SHUT) / len(seen)
+        scored.append((spot, mean, often, len(seen)))
+    if not scored:
+        return spots[len(spots) // 2], {"mean": 0.0, "often": 0.0, "seen": 0}
+
+    free = [s for s in scored if s[1] <= MASCOT_MEAN and s[2] <= MASCOT_OFTEN]
+    # Из прошедших замер берётся самый тесный: знак у плеча, а не в углу.
+    # Не прошёл никто — самый свободный, и человек читает об этом строкой.
+    spot, mean, often, seen = (max(free, key=lambda s: s[1]) if free
+                               else min(scored, key=lambda s: s[1]))
+    return spot, {"mean": mean, "often": often, "seen": seen, "free": len(free)}
+
+
+def _fill_gaps(masks: Path) -> int:
+    """Кадры без человека — предыдущей маской. Дыра в ряду хуже маски.
+
+    Пропущенный файл CSS-маской не читается вовсе, слой человека на этом
+    кадре ложится целиком, и маскот мигает. Соседняя маска врёт меньше.
+    """
+    shots = sorted(masks.glob("mask-*.png"))
+    if not shots:
+        return 0
+    last = int(shots[-1].stem.split("-")[1])
+    have = {int(p.stem.split("-")[1]) for p in shots}
+    prev = shots[0]
+    holes = 0
+    for n in range(int(shots[0].stem.split("-")[1]), last + 1):
+        path = masks / f"mask-{n:05d}.png"
+        if n in have:
+            prev = path
+            continue
+        shutil.copy2(prev, path)
+        holes += 1
+    return holes
+
+
+async def _mascot(reel: Reel, size: tuple[int, int], *, fps: int,
+                  say=None) -> tuple[dict[str, Any] | None,
+                                     dict[str, Any] | None,
+                                     Path | None, Path | None]:
+    """Маскот, силуэт человека, картинка и папка масок в public/.
+
+    Маски не собрались — маскот остаётся, но поверх кадра: знак перед
+    человеком хуже знака за спиной, а отказ от маскота хуже обоих.
+    """
+    assert reel.mascot is not None and reel.cuts is not None
+    tid = reel.theme["id"]
+    until = min(float(reel.mascot.get("until") or MASCOT_UNTIL),
+                reel.cuts.total)
+    art = reel.mascot.get("art")
+
+    work = TOOLS / f".masks-{tid}"
+    staged: Path | None = None
+    person: dict[str, Any] | None = None
+    spot, tale = MASCOT_SPOTS[len(MASCOT_SPOTS) // 2], {}
+    try:
+        if say:
+            await say("Снимаю силуэт, чтобы маскот встал за спину, "
+                      "а не перед ней.")
+        # Маски нужны ровно до ухода маскота: дальше слой человека не
+        # рисуется вовсе, и считать его силуэт незачем.
+        masks, made, missed, grid = await footage.person_masks(
+            reel.video, work, seconds=reel.cuts.back(until) + 1 / fps)
+        holes = _fill_gaps(masks)
+        spot, tale = mascot_spot(
+            grid, cuts=reel.cuts, pan=reel.pan,
+            video=(reel.probe.width, reel.probe.height), canvas=size,
+            until=until)
+        staged = TOOLS / "public" / f"masks-{tid}"
+        shutil.rmtree(staged, ignore_errors=True)
+        shutil.move(str(masks), str(staged))
+        person = {"dir": staged.name, "fps": footage.MASK_FPS}
+        if missed or holes:
+            reel.findings.append(
+                f"человека не нашлось на {missed} кадрах из {made} — "
+                "там силуэт взят с соседнего кадра")
+        if tale.get("seen") and not tale.get("free"):
+            reel.findings.append(
+                "свободного места для маскота в кадре не нашлось: он стоит "
+                f"там, где закрыт меньше всего — в среднем на "
+                f"{tale['mean'] * 100:.0f}%")
+    except (footage.NoFfmpeg, footage.NoVision, AssertionError) as e:
+        reel.findings.append(
+            f"силуэт не снялся ({e}) — маскот стоит поверх кадра, "
+            "а не за спиной")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    look: dict[str, Any] = {"x": round(spot[0], 3), "y": round(spot[1], 3),
+                            "size": MASCOT_SIZE, "until": round(until, 2),
+                            "color": reel.accent, "opacity": 1.0,
+                            "glow": 0.0 if art else 0.22,
+                            "face": not art}
+    name = None
+    if art:
+        name = f"mascot-{tid}{art.suffix}"
+        look["src"] = name
+    reel.findings.append(
+        f"маскот в кадре первые {until:.0f} с, "
+        f"{'слева' if spot[0] < 0.5 else 'справа'} от центра"
+        + (f", перекрытие рукой в среднем {tale['mean'] * 100:.0f}%"
+           if tale.get("seen") else ""))
+    return look, person, (art if art else None), staged
 
 
 # ── сплит: инфографика и говорящая голова в одном кадре ──────────────
@@ -1027,7 +1417,23 @@ async def render(reel: Reel, size: tuple[int, int], *, fps: int = 30) -> Path:
 # ещё не решено. Придумывать формат здесь нельзя: заведённый молча, он
 # переживёт то решение, поэтому блоки приходят входом и точка.
 
-MOTION_SPLIT = 0.448        # замер с кадра примера: 860 из 1920
+# Доля высоты холста под панелью. Панель стоит сверху (`head="bottom"`
+# значит «голова снизу»), и число это решение человека, а не замер: с
+# 0.448, снятых с кадра примера, окно головы оставалось 1060 пикселей, и
+# в вертикальном дубле лицо шло крупно, а панель съедала почти половину
+# ленты. 0.40 отдавало человеку 1152; 0.30 — решение человека от 06.10:
+# панель это полоса над головой, а не вторая половина кадра, и 1344
+# пикселя оставляют в ленте человека, а не инфографику. Ниже падать
+# нельзя — кегли панели считаются от её высоты, и на 576 пикселях
+# страница в три строки уже ужимается `Fit`.
+MOTION_SPLIT = 0.30         # 576 из 1920
+
+# Последние секунды ролика панель уходит, и в кадре остаётся человек.
+# Ролик, который кончается записью экрана или швом посередине, не
+# кончается, а обрывается: зритель дослушивает вывод, глядя на чужой
+# интерфейс. Четыре секунды — это последняя фраза целиком на обычном
+# темпе речи.
+SOLO_SECONDS = 4.0
 MOTION_HEADS = ("top", "bottom")
 
 # Центр лица в окне головы — на этой доле его высоты сверху. Ниже
@@ -1069,6 +1475,37 @@ class Block:
     video: Path | None = None
     video_len: float = 0.0
     media_size: tuple[int, int] = (0, 0)
+    # `media`: где на кадре лежит слово, о котором речь. Доли кадра от
+    # левого верхнего угла. Есть — шаблон наезжает на него и подчёркивает.
+    spot: tuple[float, float, float, float] | None = None
+    # Кадр с этим словом. Идёт второй половиной блока, после записи.
+    shot: Path | None = None
+
+
+def _tail(blocks: list[Block], total: float,
+          solo: float = SOLO_SECONDS) -> tuple[list[Block], list[str]]:
+    """Освободить конец ролика под один дубль.
+
+    Панель заканчивается за `solo` секунд до конца, последний блок
+    подрезается. Блок, который целиком попал в хвост, уходит — и это
+    называется человеку: там могла лежать запись экрана, которую он
+    снимал.
+    """
+    if not blocks or total <= solo:
+        return blocks, []
+    edge = total - solo
+    out: list[Block] = []
+    lost: list[str] = []
+    for b in blocks:
+        if b.start >= edge:
+            what = b.lines[0] if b.lines else b.kicker or b.kind
+            lost.append(f"«{str(what)[:40]}»: блок попал в концовку, где "
+                        "панель уже ушла, — не показан")
+            continue
+        out.append(b)
+    if out:
+        out[-1].end = min(out[-1].end, edge)
+    return out, lost
 
 
 def speak_at(reel: Reel, phrase: str) -> float | None:
@@ -1117,6 +1554,14 @@ def lay(reel: Reel, slides: list[Any]) -> tuple[list[Block], list[str]]:
 
     for s in slides:
         at = speak_at(reel, s.phrase)
+        # Материал из альбома человек снял сам, и потерять его из-за
+        # неточной цитаты роли дороже, чем поставить на секунду раньше
+        # или позже: ищем его фразу ещё раз, прощая слово с краёв.
+        if at is None and s.kind == "media":
+            at = footage.loose_anchor(reel.spoken or reel.subs, s.phrase)
+            if at is not None:
+                lost.append(f"«{s.phrase[:40]}»: точной фразы в записи "
+                            "нет, запись экрана встала по её началу")
         if at is None:
             lost.append(f"на панель не встало: «{s.phrase[:40]}» "
                         "в записи не нашлось")
@@ -1153,7 +1598,7 @@ def lay(reel: Reel, slides: list[Any]) -> tuple[list[Block], list[str]]:
             # десяток секунд, и ролик открывался без человека.
             full=s.full and s.kind in FULL_KINDS,
             video=s.video, video_len=s.video_len, media_size=s.media_size,
-            value=s.value,
+            spot=s.spot, shot=s.shot, value=s.value,
             value_at=speak_at(reel, s.value_phrase) if s.value_phrase
             else None))
 
@@ -1195,7 +1640,23 @@ def _panel_files(tid: str, blocks: list[Block]) -> dict[int, str]:
             for i, b in enumerate(blocks) if b.video or b.image}
 
 
-def _block_props(b: Block, image: str | None) -> dict[str, Any]:
+def _mark_files(tid: str, blocks: list[Block]) -> dict[int, str]:
+    """Имена кадров с подчёркнутым словом внутри public/. Отдельно от
+    записи: у блока теперь два файла, и второй ложится поверх первого."""
+    return {i: f"mark-{tid}-{i}{b.shot.suffix.lower()}"
+            for i, b in enumerate(blocks) if b.shot and b.spot}
+
+
+def _clip_files(tid: str, clips: dict[int, Path]) -> dict[int, str]:
+    """Имена анимированных карточек внутри public/. Индекс блока в имени,
+    как у скринов: один и тот же клип на двух блоках — обычное дело
+    (кэш отдаёт файл по отпечатку, а не по месту в ролике)."""
+    return {i: f"clip-{tid}-{i}.mp4" for i in clips}
+
+
+def _block_props(b: Block, image: str | None,
+                 mark: str | None = None,
+                 clip: str | None = None) -> dict[str, Any]:
     """Блок в JSON.
 
     Списки отдаются всегда, даже пустыми: дефолты схемы Remotion
@@ -1224,6 +1685,16 @@ def _block_props(b: Block, image: str | None) -> dict[str, Any]:
         out["imagePath"] = image
     if b.media_size[0] and b.media_size[1]:
         out["mediaWidth"], out["mediaHeight"] = b.media_size
+    if b.spot and mark:
+        x, y, w, h = b.spot
+        out["spot"] = {"x": round(x, 4), "y": round(y, 4),
+                       "w": round(w, 4), "h": round(h, 4)}
+        out["markPath"] = mark
+    if clip:
+        # Готовая карточка от HyperFrames. Шаблон её только играет, и
+        # всё, что он рисовал бы сам, остаётся в props нетронутым: клипа
+        # может не оказаться на пересборке, и тогда рисуется старым путём.
+        out["clipPath"] = clip
     if b.value is not None:
         out["value"] = b.value
         # Не названа секунда — число набирается с началом блока: счётчик,
@@ -1234,7 +1705,8 @@ def _block_props(b: Block, image: str | None) -> dict[str, Any]:
 
 def motion_props(reel: Reel, blocks: list[Block], size: tuple[int, int], *,
                  fps: int = 30, head: str = "bottom",
-                 split: float = MOTION_SPLIT) -> dict[str, Any]:
+                 split: float = MOTION_SPLIT,
+                 clips: dict[int, Path] | None = None) -> dict[str, Any]:
     """JSON для композиции `Motion`.
 
     Чистая функция, и это нарочно: рендер в стенд не входит, а
@@ -1247,6 +1719,10 @@ def motion_props(reel: Reel, blocks: list[Block], size: tuple[int, int], *,
 
     w, h = size
     names = _panel_files(reel.theme["id"], blocks)
+    marks = _mark_files(reel.theme["id"], blocks)
+    # Анимированные карточки собраны до props и приходят сюда готовыми:
+    # функция остаётся чистой, и стенд проверяет форму props без рендера.
+    reels = _clip_files(reel.theme["id"], clips or {})
     props = {
         "videoPath": _video_name(reel),
         "videoWidth": reel.probe.width,
@@ -1256,18 +1732,23 @@ def motion_props(reel: Reel, blocks: list[Block], size: tuple[int, int], *,
         "pan": reel.pan,
         "headAnchor": head,
         "split": split,
-        # Панель говорит теми же цветами, что и ролик: один дом у
-        # палитры — `design/tokens.css` бренда, прочитанный `_colors`.
-        "panelColor": reel.color,
-        "glowColor": _rgba(reel.accent, GLOW_ALPHA),
-        "cardColor": _rgba(reel.text, CARD_ALPHA),
-        "accentColor": reel.accent,
-        "textColor": reel.text,
-        "blocks": [_block_props(b, names.get(i))
+        # Верх сплита (панель, обложка сплита, CTA-карточка в конце) и
+        # субтитр — своя пастельная тема (`REEL_*`), не токены бренда
+        # `design/tokens.css`: решение человека 23.09, одной строкой.
+        "panelColor": REEL_PANEL_BG,
+        "glowColor": _rgba(REEL_ACCENT, GLOW_ALPHA),
+        "cardColor": _rgba(REEL_PANEL_TEXT, CARD_ALPHA),
+        "accentColor": REEL_ACCENT,
+        "textColor": REEL_PANEL_TEXT,
+        "captionTextColor": REEL_CAPTION_TEXT,
+        "blocks": [_block_props(b, names.get(i), marks.get(i), reels.get(i))
                    for i, b in enumerate(blocks)],
         "pages": reel.pages,
         "cta": reel.cta or None,
         "brandName": reel.theme.get("brand_name") or None,
+        # Концовку дубль забирает себе целиком: панель уходит за
+        # `SOLO_SECONDS` до конца тела (`_tail` подрезал под это блоки).
+        "soloSeconds": SOLO_SECONDS if blocks else 0.0,
         "width": w,
         "height": h,
         "fps": fps,
@@ -1279,33 +1760,71 @@ def motion_props(reel: Reel, blocks: list[Block], size: tuple[int, int], *,
     return {k: v for k, v in props.items() if v is not None}
 
 
-async def render_motion(reel: Reel, blocks: list[Block],
+def panel_colors() -> dict[str, str]:
+    """Цвета панели одним местом: их читают и props, и анимированная
+    карточка. Разъехаться им значит получить ролик, где собранный клип
+    лежит на панели другого фона, и видно это уже на готовом видео."""
+    return {
+        "panelColor": REEL_PANEL_BG,
+        "accentColor": REEL_ACCENT,
+        "textColor": REEL_PANEL_TEXT,
+        "cardColor": _rgba(REEL_PANEL_TEXT, CARD_ALPHA),
+    }
+
+
+async def render_motion(reel: Reel, b, blocks: list[Block],
                         size: tuple[int, int], *, fps: int = 30,
                         head: str = "bottom",
                         split: float = MOTION_SPLIT) -> Path:
     """Сплит от props до файла. Отличается от `render` только props и
-    именем композиции — сторож рендера и уборка общие."""
+    именем композиции — сторож рендера и уборка общие.
+
+    Перед рендером собираются анимированные карточки
+    (`frames.panel_clips`): то, что нарисовано словами, набирается под
+    речь, а не выезжает целиком. Карточки нет — блок рисует шаблон, как
+    рисовал до этого, и причина уходит человеку строкой в находки.
+    """
     await _ready()
 
-    props = motion_props(reel, blocks, size, fps=fps, head=head, split=split)
+    names = _panel_files(reel.theme["id"], blocks)
+    marks = _mark_files(reel.theme["id"], blocks)
+    raw = [_block_props(bl, names.get(i), marks.get(i))
+           for i, bl in enumerate(blocks)]
+    # Скрин страницы едет в карточку картинкой, а не именем в public/:
+    # по имени файла HyperFrames его не найдёт, папка рендера своя.
+    shots = {i: bl.image for i, bl in enumerate(blocks)
+             if bl.image and not bl.video}
+    clips, notes = await frames.panel_clips(
+        b, raw, size=size, fps=fps, colors=panel_colors(), split=split,
+        images=shots)
+    reel.findings.extend(notes)
+
+    props = motion_props(reel, blocks, size, fps=fps, head=head, split=split,
+                         clips=clips)
     assert reel.cuts is not None
 
     files: dict[str, Path] = {_video_name(reel): reel.video}
+    for i, name in _clip_files(reel.theme["id"], clips).items():
+        files[name] = clips[i]
     for i, name in _panel_files(reel.theme["id"], blocks).items():
         src = blocks[i].video or blocks[i].image
         assert src is not None
         files[name] = src
+    for i, name in _mark_files(reel.theme["id"], blocks).items():
+        shot = blocks[i].shot
+        assert shot is not None
+        files[name] = shot
     if props.get("coverPath"):
         files[props["coverPath"]] = reel.split_cover["still"]
     if props.get("coverLogoPath"):
         files[props["coverLogoPath"]] = reel.split_cover["logo"]
 
-    frames = max(1, round((reel.cuts.total + props["outroSeconds"]
-                           + props["introSeconds"]) * fps))
+    frame_count = max(1, round((reel.cuts.total + props["outroSeconds"]
+                                + props["introSeconds"]) * fps))
 
     with _staged(files):
         return await _render("Motion", props, key=reel.theme["id"],
-                             frames=frames)
+                             frames=frame_count)
 
 # ── сборка ────────────────────────────────────────────────────────────
 
@@ -1316,7 +1835,75 @@ async def render_motion(reel: Reel, blocks: list[Block],
 BUDGET_SECONDS = 50
 
 
-async def analyse(reel: Reel, *, say=None,
+# Слова, которыми просят выбросить куски со взглядом вниз. Человек
+# читает свой же текст с ноутбука: он при этом говорит, значит ни тишина,
+# ни громкость такой кусок не поймают — ловит его наклон головы
+# (`footage.looking_down`).
+#
+# Просьба своя, а не всегда: проход по кадрам стоит отдельной минуты на
+# каждом монтаже, а дубль, снятый по памяти, вырезать нечем — там взгляд
+# вниз это пауза на мысль, а не чтение.
+GAZE_WORDS = ("взгляд вниз", "взгляды вниз", "взглядом вниз",
+              "глаза вниз", "смотрю вниз", "смотришь вниз", "смотрит вниз",
+              "смотрю в экран", "смотрю в ноутбук", "в суфлер", "суфлера")
+
+
+def wants_eyes(ask: str) -> bool:
+    """Просьба выбросить куски, где человек смотрит вниз."""
+    low = (ask or "").lower().replace("ё", "е")
+    return any(w in low for w in GAZE_WORDS)
+
+
+# Меньше этого от дубля не оставляем: порог наклона снят с одной съёмки
+# (`footage.GAZE_DOWN`), и на другой камере он способен признать опущенным
+# всё подряд. Ролик в три секунды человек получил бы молча — а это
+# поломка, которая выглядит готовой работой.
+GAZE_LEAVE = 8.0
+
+
+async def _gaze(reel: Reel, *, say=None) -> None:
+    """Выбросить куски, где лицо опущено в экран."""
+    assert reel.cuts is not None
+    work = TOOLS / f".gaze-{reel.theme.get('id') or 'dub'}"
+    try:
+        if say:
+            await say("Смотрю, где взгляд уходит вниз, — это отдельный "
+                      "проход по кадрам.")
+        points = await footage.head_angles(reel.video, work)
+    except (footage.NoFfmpeg, footage.NoVision) as e:
+        reel.findings.append(f"взгляд вниз не искала: {e}")
+        return
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    if not points:
+        reel.findings.append("взгляд вниз не искала: лица в кадре не нашлось")
+        return
+
+    spans = footage.looking_down(points)
+    if not spans:
+        reel.findings.append("взглядов вниз в дубле не нашлось — "
+                             "вырезать нечего")
+        return
+
+    before = reel.cuts.total
+    cut_to = footage.prune(reel.cuts, spans)
+    if cut_to.total < GAZE_LEAVE:
+        reel.findings.append(
+            f"взгляд вниз не вырезала: от дубля осталось бы "
+            f"{cut_to.total:.0f} с из {before:.0f}. Порог наклона снят с "
+            "другой съёмки — скорее он, чем запись")
+        return
+
+    reel.cuts = cut_to
+    if reel.focus:
+        reel.pan = footage.cut_track(reel.focus, reel.cuts)
+    reel.findings.append(
+        f"вырезано {before - reel.cuts.total:.0f} с взгляда вниз "
+        f"({len(spans)} кусков); осталось {reel.cuts.total:.0f} с")
+
+
+async def analyse(reel: Reel, *, say=None, ask: str = "",
                   rules: list[tuple[str, str]] | None = None) -> None:
     """Три прохода по дублю: паузы, активная зона, слова.
 
@@ -1352,21 +1939,66 @@ async def analyse(reel: Reel, *, say=None,
     except footage.NoFfmpeg as e:
         reel.findings.append(f"кадр не поедет за активной зоной: {e}")
 
+    # Взгляд вниз ищется до расшифровки и режет ту же нарезку: слова
+    # раскладываются по кускам в самом конце разбора, и вырезанное сюда
+    # уже не попадёт.
+    if wants_eyes(ask):
+        await _gaze(reel, say=say)
+
     if not reel.probe.has_audio:
         return
 
     if say:
-        await say("Слушаю дубль и расшифровываю речь — это самая долгая "
-                  "часть, дальше рендер.")
+        await say("Слушаю дубль тремя кругами и сверяю слова между ними — "
+                  "это самая долгая часть, дальше рендер.")
+    # Три круга вместо одного: слово берётся по голосу двух из трёх, и
+    # подмена вроде «остановила» вместо «установила» ловится до рендера, а
+    # не после него (`footage.recheck`). Отказ отдельного круга это строка
+    # в находках, отказ всех — прежний путь без субтитров.
     try:
-        words = await footage.captions(reel.video)
+        words, checked = await footage.recheck(reel.video,
+                                               seconds=reel.probe.duration)
     except footage.NoWhisper as e:
         reel.findings.append(f"субтитров не будет, транскрипт не собрался: {e}")
         return
+    reel.findings += checked
 
     if not words:
         reel.findings.append("в дубле не нашлось речи — субтитров не будет")
         return
+    # Кашель и повторный заход тишиной не ловятся: первый громкий, второй
+    # это нормальная речь. Оба находятся по расшифровке, и потому здесь, а
+    # не в `footage.timeline` — до слов их искать нечем (`footage.junk`).
+    # Кашель ищется по громкости, а не по списку тишины: он громкий, и
+    # `silencedetect` рвёт тишину вокруг него надвое (`footage.coughs`).
+    track = await footage.loudness_track(reel.video)
+    spans, back, noise = footage.junk(words, track, quiet=quiet)
+
+    # Кусок, названный словами в просьбе. Правило про повтор ловит заход,
+    # начатый теми же словами; оборванную мысль, продолженную другими
+    # словами, не ловит никто — но человек слышит её сразу и называет
+    # цитатой (`footage.asked_cuts`).
+    heard = [{"text": w.text, "start": w.start, "end": w.end} for w in words]
+    asked, missed = footage.asked_cuts(heard, ask)
+    reel.findings += missed[:2]
+    if asked:
+        spans = sorted(spans + asked)
+        reel.findings.append(f"вырезано по просьбе кусков: {len(asked)}")
+
+    if spans:
+        before = reel.cuts.total
+        reel.cuts = footage.prune(reel.cuts, spans)
+        if reel.focus:
+            reel.pan = footage.cut_track(reel.focus, reel.cuts)
+        what = [n for n in (f"повторных заходов {back}" if back else "",
+                            f"кашля и вздохов {noise}" if noise else "") if n]
+        if not track:
+            reel.findings.append("громкость дубля не снялась — кашель и "
+                                 "вздохи остались в ролике")
+        reel.findings.append(
+            f"вырезано из середины {before - reel.cuts.total:.0f} с — "
+            + ", ".join(what) + f"; осталось {reel.cuts.total:.0f} с")
+
     # На столе остаётся услышанное, а не исправленное: словарь может
     # пополниться правкой человека, и тогда он применяется к тому же
     # транскрипту заново, без второй расшифровки.
@@ -1571,11 +2203,14 @@ async def _panel(chat_id: int, reel: Reel, *, ask: str = "",
             s.video, s.video_len = item.path, meta["seconds"]
         else:
             s.image = item.path
-    used = {s.media for s in slides if s.kind == "media"}
-    idle = [str(i) for i in range(1, len(items) + 1) if i not in used]
-    if idle:
-        reel.findings.append(f"из альбома на панель не встали: "
-                             f"{', '.join(idle)} — речи под них не нашлось")
+    # Слово, о котором речь, ищется на записи до посадки на секунды:
+    # найденное превращает запись в скриншот с наездом (`_mark`).
+    if any(s.kind == "media" and s.mark for s in slides):
+        if say:
+            await say("Ищу на записях слова, о которых идёт речь.")
+        reel.findings += (await _mark(reel, slides))[:3]
+
+
     if not items and not art:
         reel.findings.append("записей экрана нет, картинок по теме тоже: "
                              "нет GEMINI_API_KEY — панель словами")
@@ -1598,7 +2233,24 @@ async def _panel(chat_id: int, reel: Reel, *, ask: str = "",
               if s.kind != "card" or s.lines or s.items or s.image]
 
     blocks, dropped = lay(reel, slides)
-    reel.findings += [str(n) for n in lost[:3]] + dropped[:3]
+    blocks, cut_off = _tail(blocks, reel.cuts.total if reel.cuts else 0.0)
+    reel.findings += [str(n) for n in lost[:3]] + dropped[:3] + cut_off
+
+    # Что из альбома не доехало до панели, считаем по блокам, а не по
+    # слайдам: слайд с материалом мог не встать на слова и выпасть в
+    # `lay`, и тогда человек снимал экран впустую, не узнав об этом
+    # (дубль 22.09: запись про проекты пропала молча).
+    alive = {id(b.video) for b in blocks if b.video}
+    idle = [str(s.media) for s in slides
+            if s.kind == "media" and s.video is not None
+            and id(s.video) not in alive]
+    idle += [str(s.media) for s in slides
+             if s.kind == "media" and s.video is None and s.image is None]
+    if idle:
+        reel.findings.append(
+            "из альбома на панель не встали: "
+            + ", ".join(sorted(set(idle)))
+            + " — под них не нашлось фразы в речи")
     if not blocks:
         reel.findings.append("панели не будет: ни один блок не встал на "
                              "слова — смонтирован обычным")
@@ -1608,6 +2260,149 @@ async def _panel(chat_id: int, reel: Reel, *, ask: str = "",
     reel.split_cover = dict(cover)
     if say:
         await say(f"Панель: {len(blocks)} блока по речи.")
+
+
+async def _inserts(chat_id: int, reel: Reel, size: tuple[int, int], *,
+                   ask: str = "", say=None) -> None:
+    """Фото альбома поверх полного кадра. Не вышло — говорим и монтируем без.
+
+    Фразу для каждого фото называет тот же Монтажёр, что собирает панель
+    (`cut.panel`): работа одна и та же — что показать рядом со сказанным.
+    Берём из его ответа только блоки `media`, всё остальное — карточки,
+    счётчики, нарисованные картинки — здесь не нужно: человек просил
+    показать своё, а не собрать инфографику.
+
+    Конец блока тут считается не так, как у панели. У панели блок живёт
+    до следующего, потому что делить холст на пустую половину нельзя.
+    Накладка гаснет через `INSERT_HOLD`, и в кадре остаётся человек.
+    """
+    b = desk.brand(chat_id)
+    items = album.materials(b, reel.video) if b is not None else []
+    if not items:
+        return
+    if not reel.subs:
+        reel.findings.append("фото поверх кадра не будет: речи в дубле не "
+                             "разобрано — не на что их ставить")
+        return
+    if say:
+        await say("Слушаю, на каких словах показать присланные фото.")
+
+    shown = await _describe(items)
+    try:
+        slides, lost, _cover = await cut.panel(
+            chat_id, reel.said or reel.heard, ask=ask,
+            materials=[d for d, _ in shown], art=False)
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("фразы для накладок не пришли: %s", e)
+        reel.findings.append(f"фото поверх кадра не будет: фразы не пришли "
+                             f"({desk.reason(e)})")
+        return
+
+    # Из всего ответа берём только материалы человека, и только картинки:
+    # запись экрана накладкой поверх лица не читается — её место на
+    # панели, где под неё отдана половина холста.
+    found: list[tuple[float, Path, int, float]] = []
+    idle: list[str] = []
+    for s in slides:
+        if s.kind != "media" or not (1 <= s.media <= len(items)):
+            continue
+        item = items[s.media - 1]
+        shot = shown[s.media - 1][1]["size"]
+        if item.kind != "image":
+            idle.append(f"{s.media} — это запись, а не фото: "
+                        "накладкой не ставлю")
+            continue
+        at = speak_at(reel, s.phrase)
+        if at is None:
+            idle.append(f"{s.media} — фразы «{s.phrase[:40]}» в записи "
+                        "не нашлось")
+            continue
+        found.append((at, item.path, s.media, insert_width(shot, size)))
+
+    total = reel.cuts.total if reel.cuts else 0.0
+    found.sort()
+    out: list[dict[str, Any]] = []
+    for i, (at, path, num, wide) in enumerate(found):
+        # Соседнее фото важнее полной выдержки: две накладки внахлёст
+        # читаются сбоем рендера, а не решением.
+        stop = found[i + 1][0] if i + 1 < len(found) else total
+        end = min(at + INSERT_HOLD, stop, total)
+        if end - at < 0.8:
+            idle.append(f"{num} — на него осталось меньше секунды")
+            continue
+        out.append({"image": path, "start": round(at, 3),
+                    "end": round(end, 3), "media": num, "width": wide})
+
+    reel.inserts = out
+    reel.findings += [str(n) for n in lost[:2]]
+    if idle:
+        reel.findings.append("поверх кадра не встали: " + "; ".join(idle[:3]))
+    if not out:
+        reel.findings.append("фото поверх кадра не будет: ни одно не встало "
+                             "на слова — смонтирован без них")
+        return
+    if say:
+        await say(f"Фото поверх кадра: {len(out)} на своих фразах.")
+
+
+# Кадров на пробу с одной записи. Слово из меню видно почти всё время,
+# а результат печатается к концу: шесть отсчётов ловят и то и другое, и
+# стоят одного запуска распознавателя на всю пачку.
+MARK_SHOTS = 6
+
+
+async def _mark(reel: Reel, slides: list[Any]) -> list[str]:
+    """Снять с записи кадр, где видно названное слово, и запомнить рамку.
+
+    Материал с `mark` перестаёт быть записью и становится скриншотом: по
+    записи глаз ищет, где происходит названное, и не находит за три
+    секунды блока. Кадр с подчёркнутым словом читается сразу.
+
+    Слово не нашлось — материал остаётся записью, и это строка человеку,
+    а не тихая подмена: наезд, которого он просил, не состоялся.
+    """
+    lost: list[str] = []
+    tid = str(reel.theme.get("id") or "mark")
+    for n, s in enumerate(slides):
+        if s.kind != "media" or not s.mark or s.video is None:
+            continue
+        shots: list[Path] = []
+        try:
+            length = max(0.1, float(s.video_len or 0.0))
+            for i in range(MARK_SHOTS):
+                at = length * (i + 0.5) / MARK_SHOTS
+                shots.append(await footage.still(
+                    s.video, at, TOOLS / f".mark-{tid}-{n}-{i}.png"))
+            found = await footage.words_on(shots)
+        except (footage.NoFfmpeg, footage.NoOcr) as e:
+            for shot in shots:
+                shot.unlink(missing_ok=True)
+            lost.append(f"«{s.mark[:30]}» на записи не искали: "
+                        f"{desk.reason(e)} — материал идёт записью")
+            continue
+
+        best: tuple[Path, footage.Spot] | None = None
+        for shot, spots in zip(shots, found):
+            spot = footage.find_spot(spots, s.mark)
+            if spot is not None and (best is None or spot.conf > best[1].conf):
+                best = (shot, spot)
+        if best is None:
+            for shot in shots:
+                shot.unlink(missing_ok=True)
+            lost.append(f"«{s.mark[:30]}» на записи не нашлось — "
+                        "материал идёт записью, без наезда")
+            continue
+
+        shot, spot = best
+        for other in shots:
+            if other != shot:
+                other.unlink(missing_ok=True)
+        # Запись остаётся записью: кадр ложится поверх неё второй
+        # половиной блока. Подмена выбрасывала бы то, ради чего человек
+        # снимал экран, — поймано на первом сплите 22.09.
+        s.shot = shot
+        s.spot = (spot.x, spot.y, spot.w, spot.h)
+    return lost
 
 
 async def _describe(items: list[album.Item]) -> list[tuple[str, dict[str, Any]]]:
@@ -1637,7 +2432,68 @@ async def _describe(items: list[album.Item]) -> list[tuple[str, dict[str, Any]]]
             what += ", вертикальная" if h > w else ", горизонтальная"
         if item.caption:
             what += f" — подпись: «{item.caption[:120]}»"
+        seen = await _read_screen(item)
+        if seen:
+            what += "; на экране видно — " + "; ".join(seen)
         out.append((what, meta))
+    return out
+
+
+# Строк с экрана в описание материала. Меню целиком роли не нужно — ей
+# нужно узнать, про что этот материал и какое слово на нём можно
+# подчеркнуть; десяток самых заметных строк это даёт.
+SCREEN_LINES = 8         # строк с одного кадра
+SCREEN_SHOTS = 5         # кадров с одной записи
+SCREEN_MIN = 3           # огрызки в одну-две буквы это иконки, не слова
+
+
+async def _read_screen(item: album.Item) -> list[str]:
+    """Что написано на материале. Не прочиталось — пусто, и это не поломка.
+
+    Роль пишет `mark` — слово, которое монтаж подчеркнёт на скриншоте, — и
+    писать его наугад нельзя: «Память» на английском интерфейсе не
+    найдётся никогда, а человек увидит материал без наезда и без
+    объяснения. Поэтому список слов роль получает с самого экрана.
+    """
+    try:
+        shots: list[Path] = []
+        marks: list[float] = []
+        if item.kind == "video":
+            pr = await footage.probe(item.path)
+            for i in range(SCREEN_SHOTS):
+                at = pr.duration * (i + 0.5) / SCREEN_SHOTS
+                marks.append(at)
+                shots.append(await footage.still(
+                    item.path, at, TOOLS / f".seen-{item.path.stem}-{i}.png"))
+        else:
+            shots = [item.path]
+            marks = [0.0]
+        found = await footage.words_on(shots)
+    except (footage.NoFfmpeg, footage.NoOcr, OSError) as e:
+        log.warning("текст с материала не прочитался: %s", e)
+        return []
+    finally:
+        if item.kind == "video":
+            for shot in TOOLS.glob(f".seen-{item.path.stem}-*.png"):
+                shot.unlink(missing_ok=True)
+
+    # Запись экрана листают: в начале одно окно, в середине другое. Один
+    # общий список слов смешивал их в кашу, и роль ставила запись про
+    # проекты на разговор о памяти (дубль 22.09). Поэтому каждый кадр
+    # отдаётся своей строкой, со своей секундой.
+    out: list[str] = []
+    for at, spots in zip(marks, found):
+        lines: list[str] = []
+        for s in sorted((s for s in spots if s.whole), key=lambda s: -s.h):
+            text = " ".join(s.text.split())
+            if len(text) < SCREEN_MIN or text in lines:
+                continue
+            lines.append(text)
+            if len(lines) >= SCREEN_LINES:
+                break
+        if lines:
+            out.append(f"на {int(at // 60)}:{int(at % 60):02d} — "
+                       + ", ".join(lines))
     return out
 
 
@@ -1880,7 +2736,7 @@ def _cover_props(reel: Reel) -> dict[str, Any]:
     return out
 
 
-async def _draw(reel: Reel, size: tuple[int, int]) -> Path:
+async def _draw(reel: Reel, b, size: tuple[int, int]) -> Path:
     """Рендер тем шаблоном, который этому ролику положен.
 
     Одно место, где выбирается композиция: и монтаж, и пересборка после
@@ -1888,8 +2744,8 @@ async def _draw(reel: Reel, size: tuple[int, int]) -> Path:
     вернула бы обычный ролик, и человек увидел бы это уже на видео.
     """
     if reel.blocks:
-        return await render_motion(reel, reel.blocks, size)
-    return await render(reel, size)
+        return await render_motion(reel, b, reel.blocks, size)
+    return await render(reel, b, size)
 
 
 async def build(chat_id: int, ask: str, *, say=None,
@@ -1921,11 +2777,19 @@ async def build(chat_id: int, ask: str, *, say=None,
     # Материалы в альбоме нужны только панели: прислал человек запись
     # экрана к дублю — значит, ролик сплитом, даже если слово не сказано.
     extra = album.materials(b, video)
-    if extra and not panel:
+    # Способов показать присланное два, и выбор между ними делается до
+    # разбора: сплит делит холст на весь ролик, накладка выезжает поверх
+    # полного кадра и уходит. Молчаливый выбор прежний — сплит; накладку
+    # просят словами (`wants_inserts`).
+    overlay = bool(extra) and not panel and wants_inserts(ask)
+    if extra and not panel and not overlay:
         panel = True
         if say:
             await say(f"К дублю в альбоме {len(extra)} материала — "
                       "монтирую сплитом, они пойдут на панель.")
+    elif overlay and say:
+        await say(f"К дублю в альбоме {len(extra)} фото — положу их "
+                  "накладками поверх кадра, холст делить не буду.")
 
     beats = _beats(b, theme["id"]) if theme else {}
     color, accent, text = _colors(b)
@@ -1950,7 +2814,7 @@ async def build(chat_id: int, ask: str, *, say=None,
                   f"({size[0]}×{size[1]}).\n"
                   "Рендер идёт дольше макета, до нескольких минут.")
 
-    await analyse(reel, say=say, rules=lexicon(b))
+    await analyse(reel, say=say, ask=ask, rules=lexicon(b))
 
     # Сценарий есть — хук и CTA уже написаны, границы ставил суфлёр, и
     # звать модель незачем. Сценария нет — дубль сняли из головы, и
@@ -1961,6 +2825,12 @@ async def build(chat_id: int, ask: str, *, say=None,
             reel.findings.append("сценария нет, монтирую по записи: хук и "
                                  "границы взяты из сказанного")
         frag = await bounds(chat_id, reel, ask=ask, say=say)
+        # Границу, попавшую в середину слова, отодвигаем на его край:
+        # роль ставит секунды на слух, а край слова знает расшифровка
+        # (`footage.snap`).
+        if frag and reel.heard:
+            frag.start, frag.end = footage.snap(reel.heard, frag.start,
+                                                frag.end)
 
     if frag and not reel.hook:
         reel.hook = frag.hook
@@ -1982,6 +2852,18 @@ async def build(chat_id: int, ask: str, *, say=None,
         reel.findings.append("нет ни хука, ни заголовка темы — первый кадр "
                              "останется без слов")
 
+    # Маскота просят словами, и картинку берём брендовую: спорить с
+    # маскотом бренда своим нарисованным значком значит подменять его
+    # молча. Нет картинки — рисуем знак и говорим об этом строкой.
+    if wants_mascot(ask):
+        art = b.path(MASCOT_ART)
+        reel.mascot = {"art": art if art.exists() else None,
+                       "until": mascot_until(ask)}
+        if not art.exists():
+            reel.findings.append(
+                f"картинки маскота нет (<code>{MASCOT_ART}</code> в папке "
+                "бренда) — в кадре нарисованный знак")
+
     narrows = bool(frag and reel.probe
                    and (frag.start > TRIM_MIN
                         or frag.end < reel.probe.duration - TRIM_MIN))
@@ -1993,6 +2875,8 @@ async def build(chat_id: int, ask: str, *, say=None,
         if reel.blocks:
             await _head(reel, size)
             await _split_cover(reel, b, size)
+    elif overlay:
+        await _inserts(chat_id, reel, size, ask=ask, say=say)
 
     piece = None
     try:
@@ -2008,7 +2892,7 @@ async def build(chat_id: int, ask: str, *, say=None,
             await footage.clip(video, frag.start, frag.end, piece)
             reel.video = piece
             reel.cuts = reel.cuts.shift(frag.start)
-        reel.out = await _draw(reel, size)
+        reel.out = await _draw(reel, b, size)
     except Exception as e:                                   # noqa: BLE001
         # Тему завели мы — не оставлять её в `ready` без файла: такую
         # Публикатор возьмёт в очередь как готовую к публикации.
@@ -2066,6 +2950,46 @@ MOTION_WORDS = ("сплит", "с панелью", "панелью", "инфог
 def wants_motion(ask: str) -> bool:
     low = (ask or "").lower()
     return any(w in low for w in MOTION_WORDS)
+
+
+# Слова, которыми просят показать присланное фото поверх полного кадра,
+# а не панелью сплита. Со сплитом их путать нельзя по той же причине,
+# по какой сплит нельзя путать с нарезкой: обе просьбы живут в одном
+# топике, и разойтись они должны до минут рендера, а не после.
+#
+# Молчаливый выбор остаётся прежним — сплит: так работает путь записи
+# экрана, ради которого альбом и заведён. Накладка это просьба словами.
+INSERT_WORDS = ("накладк", "фото сверху", "фотки сверху", "картинки сверху",
+                "поверх кадра", "не сплитом", "без сплита", "без панели")
+
+# Сколько фото висит в кадре. Три с половиной секунды это одна фраза:
+# меньше — человек не успевает прочитать надпись на картинке, больше —
+# она начинает спорить с лицом, ради которого дубль и снят.
+INSERT_HOLD = 3.5
+
+# Сколько холста вправе занять накладка: по ширине и по высоте. Высота
+# тут главнее, и оплачена она первым же живым роликом: вертикальный кадр
+# 9:16, вписанный по одной ширине в 0,66, занял две трети высоты и
+# закрыл лицо — то есть ровно то, ради чего дубль снят. Вписываем в
+# рамку по меньшей из двух долей, как `object-fit: contain`.
+INSERT_MAX_W = 0.66
+INSERT_MAX_H = 0.42
+
+
+def insert_width(shot: tuple[int, int], canvas: tuple[int, int]) -> float:
+    """Ширина накладки долей холста. Мерок нет — вписываем по ширине."""
+    w, h = shot
+    cw, ch = canvas
+    if w <= 0 or h <= 0:
+        return INSERT_MAX_W
+    # Доля ширины, при которой высота картинки ровно `INSERT_MAX_H`.
+    by_height = INSERT_MAX_H * ch * w / (h * cw)
+    return round(min(INSERT_MAX_W, by_height), 4)
+
+
+def wants_inserts(ask: str) -> bool:
+    low = (ask or "").lower()
+    return any(w in low for w in INSERT_WORDS)
 
 
 def wants_split(ask: str) -> bool:
@@ -2156,6 +3080,9 @@ async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]
 
     out: list[Reel] = []
     for n, frag in enumerate(frags, 1):
+        # Тот же край слова, что и у одного дубля: граница куска,
+        # названная ролью на слух, не рвёт слово пополам (`footage.snap`).
+        frag.start, frag.end = footage.snap(words, frag.start, frag.end)
         theme = _theme(chat_id, frag, plat, fmt)
         tid = theme["id"]
         cuts = footage.window(whole, frag.start, frag.end)
@@ -2204,7 +3131,7 @@ async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]
             reel.cuts = cuts.shift(frag.start)
             reel.piece = (frag.start, frag.end)
 
-            reel.out = await render(reel, size)
+            reel.out = await render(reel, b, size)
         except (NoRenderer, footage.NoFfmpeg) as e:
             log.warning("кусок %s не собрался: %s", tid, e)
             if reel.still:
@@ -2294,7 +3221,7 @@ async def refit(reel: Reel, b, *, say=None) -> Reel:
                 await say("Вырезаю кусок заново и пересобираю субтитры.")
             await footage.clip(source, reel.piece[0], reel.piece[1], clip)
             reel.video = clip
-        reel.out = await _draw(reel, size)
+        reel.out = await _draw(reel, b, size)
     finally:
         reel.video = source
         if clip:
@@ -2411,6 +3338,7 @@ def leave_fix(chat_id: int) -> None:
     вернуться к старой карточке кнопкой.
     """
     table.done_fix(chat_id)
+    leave_whole(chat_id)
 
 
 def wants_relex(chat_id: int, ask: str) -> bool:
@@ -2424,11 +3352,150 @@ def wants_relex(chat_id: int, ask: str) -> bool:
 
 
 def _kb(theme_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Ок", callback_data=f"mont:ok:{theme_id}"),
-        InlineKeyboardButton(text="✏️ Правки", callback_data=f"mont:fix:{theme_id}"),
-        InlineKeyboardButton(text="📤 В очередь", callback_data=f"mont:queue:{theme_id}"),
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Ок",
+                                 callback_data=f"mont:ok:{theme_id}"),
+            InlineKeyboardButton(text="✏️ Правки",
+                                 callback_data=f"mont:fix:{theme_id}"),
+            InlineKeyboardButton(text="📤 В очередь",
+                                 callback_data=f"mont:queue:{theme_id}"),
+        ],
+        # Второй ряд, а не четвёртая кнопка в первом: три кнопки это уже
+        # вся ширина экрана телефона, и подпись четвёртой обрезалась бы.
+        [
+            InlineKeyboardButton(text="📅 В свой день",
+                                 callback_data=f"mont:slot:{theme_id}"),
+            InlineKeyboardButton(text="📝 Текст субтитров",
+                                 callback_data=f"mont:text:{theme_id}"),
+        ],
+    ])
+
+
+
+
+def _esc(text: str) -> str:
+    """Голая скобка в тексте роняет отправку целиком — а вместе с ней и
+    удавшуюся работу. Субтитры идут через экранирование, как проза моста.
+    """
+    return _html.escape(str(text), quote=False)
+
+
+# ── правка субтитров целиком ──────────────────────────────────────────
+#
+# Замена по одному слову хороша для опечатки. Человек, посмотревший
+# готовый ролик, видит сразу всё — и правит текстом, а не списком замен.
+# Поэтому кнопка отдаёт субтитры одной строкой, а присланное обратно
+# разбирается сличением (`footage.whole_pairs`): что изменилось, то и
+# становится строками словаря.
+#
+# Режим держится своим множеством, а не полем стола: стол один на роль, а
+# ждать от человека можно двух разных вещей — список замен и целый текст.
+# Разбирать целый текст как список замен значит не найти ни одной строки
+# «как слышно -> как правильно» и ответить справкой про формат на
+# аккуратно перепечатанный абзац.
+
+_WHOLE: set[int] = set()
+
+
+def wants_whole(chat_id: int) -> bool:
+    """Ждём от человека субтитры целиком, а не список замен."""
+    return chat_id in _WHOLE
+
+
+def leave_whole(chat_id: int) -> None:
+    _WHOLE.discard(chat_id)
+
+
+def whole_text(reel: Reel) -> str:
+    """Субтитры этого ролика одной строкой — то, что человек видит в кадре."""
+    return footage.subtitle_text(reel.spoken or reel.subs)
+
+
+async def say_whole(reg, chat_id: int, reel: Reel, topic: str) -> None:
+    """Отдать субтитры на правку целиком и ждать их обратно.
+
+    Текст уходит в `<code>`: на телефоне такой блок копируется нажатием,
+    а человеку нужно именно скопировать, поправить и прислать обратно.
+    """
+    async def say(text: str) -> None:
+        await reg.say("reels", chat_id, text, topic=topic)
+
+    text = whole_text(reel)
+    if not text:
+        # Карточка, поднятая из базы после рестарта, слов не помнит:
+        # услышанное живёт в памяти процесса. Обещать правку нечем.
+        await say("Субтитров этого ролика у меня на руках нет — он собран "
+                  "в другом запуске завода. Пришлите дубль и повторите "
+                  "«смонтируй», тогда поправлю текстом.")
+        return
+    if len(text) > footage.WHOLE_MAX:
+        await say(f"Субтитры этого ролика длиной {len(text)} знаков — "
+                  "одним сообщением они не ходят, а склеивать правку из "
+                  "нескольких я не берусь: непонятно, где она кончилась.\n\n"
+                  "Поправьте словами: строка «как слышно -&gt; как "
+                  "правильно», можно несколько сразу.")
+        table.await_fix(chat_id, reel)
+        return
+
+    table.await_fix(chat_id, reel)
+    _WHOLE.add(chat_id)
+    await say("Вот субтитры ролика. Скопируйте, поправьте что не так и "
+              "пришлите обратно целиком — я сличу с услышанным, занесу "
+              "разницу в словарь и пересоберу ролик.")
+    await say(f"<code>{_esc(text)}</code>")
+
+
+async def take_whole(reg, chat_id: int, text: str, topic: str = "reels") -> None:
+    """Присланные субтитры целиком: разница → словарь → пересборка."""
+    reel = table.get(chat_id)
+
+    async def say(msg: str) -> None:
+        await reg.say("reels", chat_id, msg, topic=topic)
+
+    leave_whole(chat_id)
+    if reel is None:
+        await say("Этот монтаж уже неактуален.")
+        return
+
+    pairs, notes = footage.whole_pairs(reel.spoken or reel.subs,
+                                       reel.subs, text)
+    for n in notes:
+        await say(n)
+    if not pairs:
+        table.hold(chat_id, reel)       # кнопки под карточкой живые
+        return
+
+    table.note(chat_id, reel.theme["id"], text)
+    b = desk.brand(chat_id)
+    added, swapped = remember(b, pairs)
+    if added:
+        await say("Записала в словарь субтитров: "
+                  + ", ".join(f"<b>{_esc(s)}</b> → {_esc(d) or '—'}"
+                              for s, d in added[:8]) + ".")
+    if swapped:
+        await say("Переписала прошлые правила: "
+                  + ", ".join(f"<b>{_esc(s)}</b> → {_esc(d) or '—'}"
+                              for s, d in swapped[:8]) + ".")
+
+    try:
+        reel = await refit(reel, b, say=say)
+    except NoRedo as e:
+        table.hold(chat_id, reel)
+        await say(f"Этот ролик пересобрать нечем: {e}. Словарь я запомнила — "
+                  "в следующем ролике эти слова приедут исправленными.")
+        return
+    except (NoRenderer, NotInstalled, footage.NoFfmpeg) as e:
+        table.hold(chat_id, reel)
+        await say(f"Не пересобралось: {e}")
+        return
+    except Exception as e:                                   # noqa: BLE001
+        log.exception("субтитры не пересобрались")
+        table.hold(chat_id, reel)
+        await say(f"Не пересобралось: {desk.reason(e)}")
+        return
+
+    await show(reg, chat_id, reel, topic)
 
 
 def caption(reel: Reel) -> str:
@@ -2457,6 +3524,8 @@ async def show(reg, chat_id: int, reel: Reel, topic: str = "reels") -> None:
     path = _save(desk.brand(chat_id), reel)
     reel.out = path
     table.hold(chat_id, reel)
+    # Под новой карточкой ждать текст прошлой нельзя: субтитры уже другие.
+    leave_whole(chat_id)
     await reg.say("reels", chat_id, caption(reel), topic=topic)
     await reg.send_file("reels", chat_id, path.read_bytes(), path.name,
                         topic=topic, as_video=True)
@@ -2467,6 +3536,7 @@ async def show(reg, chat_id: int, reel: Reel, topic: str = "reels") -> None:
 async def run(reg, chat_id: int, ask: str, topic: str = "reels",
               panel: bool = False) -> None:
     table.clear(chat_id)
+    leave_whole(chat_id)
     _sweep()
 
     async def say(text: str) -> None:
@@ -2502,6 +3572,7 @@ async def run_split(reg, chat_id: int, ask: str,
                     topic: str = "reels") -> None:
     """Длинная запись → пачка роликов, каждый со своей карточкой."""
     table.clear(chat_id)
+    leave_whole(chat_id)
     _sweep()
 
     async def say(text: str) -> None:
@@ -2556,6 +3627,13 @@ async def revise(reg, chat_id: int, instruction: str,
     async def say(text: str) -> None:
         await reg.say("reels", chat_id, text, topic=topic)
 
+    # Целый текст субтитров ждём отдельно: список замен в нём не найдётся
+    # ни одной строкой, и человек получил бы справку про формат в ответ на
+    # аккуратно перепечатанный абзац.
+    if wants_whole(chat_id):
+        await take_whole(reg, chat_id, instruction, topic)
+        return
+
     if reel is None:
         await say("Этот монтаж уже неактуален.")
         return
@@ -2601,8 +3679,57 @@ async def say_unsupported(reg, chat_id: int, topic: str) -> None:
         "«как слышно -&gt; как правильно», например <code>клод -&gt; Claude</code> "
         "или «клод» на «Claude». Можно несколько строк сразу, пустая правая "
         "часть выбрасывает слово.\n\n"
+        "Правок много — нажмите «Текст субтитров»: отдам их одной строкой, "
+        "перепишете как надо и пришлёте обратно, разницу в словарь занесу "
+        "сама.\n\n"
         "Всё остальное — кадр, паузы, обложку — правкой словами не соберу: "
         "пришлите новый дубль и повторите «смонтируй».", topic=topic)
+
+
+async def _take_slot(reg, chat_id: int, theme_id: str, topic: str,
+                     say) -> None:
+    """Занять смонтированному ролику день в плане.
+
+    Без этого автомат ролик не публикует никогда, и «автопостинг
+    Instagram» остаётся кнопкой. Причина в дате: тема по факту съёмки
+    заводится пустым днём (`desk.adhoc`) — слот в плане ставит Стратег, а
+    съёмка приходит от человека с камерой, — а автомат отбирает темы по
+    `date = сегодня`. Пустой день для него просто не наступает.
+
+    Поэтому день занимается тем же швом, которым его занимает тема рукой:
+    `strategy.hand_slot` смотрит окно и занятость, и второй ролик в один
+    день на Instagram не встанет. Придумать дату своим счётом нельзя —
+    два счёта свободных дней разошлись бы молча.
+
+    Ролик при этом остаётся `ready`: работа сделана, ждёт он только часов.
+    """
+    row = db.one("SELECT * FROM themes WHERE id = ? AND chat_id = ?",
+                 theme_id, chat_id)
+    if row is None:
+        await say("Этой темы уже нет.")
+        return
+    t = dict(row)
+    if publisher.reel_path(desk.brand(chat_id), theme_id) is None:
+        await say("Ролика на диске нет: сначала монтаж, потом день.")
+        return
+
+    try:
+        day = strategy.hand_slot(chat_id, t.get("plat") or "instagram")
+    except strategy.NoSlots as e:
+        await say(f"День не занять: {e}. Опубликовать сейчас — «В очередь».")
+        return
+
+    with db.tx() as c:
+        c.execute("UPDATE themes SET date = ?, updated_at = datetime('now') "
+                  "WHERE id = ? AND chat_id = ?", (day, theme_id, chat_id))
+
+    on, at = publisher.settings(chat_id)
+    if on:
+        tail = f"Уйдёт сам {day} в {at}."
+    else:
+        tail = (f"Покажу превью {day} и буду ждать кнопку: автопубликация "
+                "выключена, включается командой <code>/auto</code>.")
+    await say(f"Ролик <code>{theme_id}</code> встал на {day}. {tail}")
 
 
 async def on_callback(reg, chat_id: int, action: str,
@@ -2618,13 +3745,27 @@ async def on_callback(reg, chat_id: int, action: str,
             await say("Этот монтаж уже неактуален.")
             return
         table.await_fix(chat_id, reel)
+        leave_whole(chat_id)
         await say_unsupported(reg, chat_id, topic)
+        return
+
+    if action == "text":
+        reel = table.get(chat_id, theme_id)
+        if reel is None:
+            await say("Этот монтаж уже неактуален.")
+            return
+        await say_whole(reg, chat_id, reel, topic)
+        return
+
+    if action == "slot":
+        await _take_slot(reg, chat_id, theme_id, topic, say)
         return
 
     if action not in {"ok", "queue"}:
         return
 
     reel = table.take(chat_id, theme_id)
+    leave_whole(chat_id)
     if reel is None:
         await say("Этот монтаж уже неактуален.")
         return

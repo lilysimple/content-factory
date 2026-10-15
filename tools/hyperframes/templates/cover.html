@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Обложка ролика</title>
+    <script src="./vendor/gsap.min.js"></script>
+    <style>
+      body { margin: 0; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+      .clip { position: absolute; inset: 0; }
+      #shot { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; }
+      #scrim { position: absolute; inset: 0; display: block; }
+      #words {
+        position: absolute; left: 0; right: 0;
+        display: flex; flex-direction: column;
+        box-sizing: border-box;
+        font-family: system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+        font-synthesis-weight: none;
+      }
+      .word { font-weight: 800; margin: 0 0 8px; line-height: 1.1; }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="cover"
+      data-start="0"
+      data-width="__W__"
+      data-height="__H__"
+      data-fps="__FPS__"
+      data-duration="__DUR__"
+    >
+      <section id="frame" class="clip" data-start="0" data-duration="__DUR__">
+        <img id="shot" alt="" />
+        <span id="scrim"></span>
+        <div id="words"></div>
+      </section>
+    </div>
+    <script type="application/json" id="spec">__SPEC__</script>
+    <script>
+      // Обложка ролика движением: кадр наезжает, строки заголовка
+      // набираются по одной. Что написать и каким кеглем, посчитал питон
+      // по ТЗ площадки — тот же расчёт, что у неподвижной обложки.
+      const spec = JSON.parse(document.getElementById('spec').textContent);
+      const shot = document.getElementById('shot');
+      const scrim = document.getElementById('scrim');
+      const box = document.getElementById('words');
+
+      document.body.style.background = spec.backColor;
+      if (spec.imageSrc) {
+        shot.src = spec.imageSrc;
+        shot.style.objectPosition =
+          Math.round(spec.focus.x * 100) + '% ' + Math.round(spec.focus.y * 100) + '%';
+        if (spec.blur) { shot.style.filter = 'blur(' + Math.round(spec.width * 0.02) + 'px)'; }
+      } else {
+        shot.style.display = 'none';
+      }
+      scrim.style.background =
+        'linear-gradient(' + (spec.anchor === 'top' ? '180deg' : '0deg') +
+        ', rgba(0,0,0,' + spec.scrim + ') 0%, rgba(0,0,0,0) 62%)';
+
+      box.style.padding = Math.round(spec.width * 0.08) + 'px';
+      if (spec.anchor === 'top') { box.style.top = Math.round(spec.inset) + 'px'; }
+      else { box.style.bottom = Math.round(spec.inset) + 'px'; }
+
+      const made = [];
+      spec.lines.forEach((line) => {
+        const p = document.createElement('p');
+        p.className = 'word';
+        p.textContent = line.text;
+        p.style.color = line.color;
+        p.style.fontSize = Math.round(line.size) + 'px';
+        box.appendChild(p);
+        made.push(p);
+      });
+
+      const tl = gsap.timeline({paused: true});
+      if (spec.imageSrc) {
+        // Наезд на весь кадр: медленный, без разворота. Обложка это
+        // титул, а не сцена, и быстрый зум читается дрожью.
+        tl.fromTo(shot, {scale: 1.0}, {scale: 1.06, duration: spec.duration, ease: 'none'}, 0);
+      }
+      made.forEach((node, i) => {
+        tl.fromTo(
+          node,
+          {y: Math.round(spec.height * 0.03), opacity: 0},
+          {y: 0, opacity: 1, duration: 0.45, ease: 'power3.out'},
+          0.12 + i * 0.16
+        );
+      });
+      window.__timelines['cover'] = tl;
+    </script>
+  </body>
+</html>

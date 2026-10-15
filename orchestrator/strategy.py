@@ -45,9 +45,10 @@ BACKUP_FUNNEL = research.BACKUP_FUNNEL
 
 WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 
-# Площадки и допустимые на них форматы. Планируются все три, публикуется
-# автоматом только Telegram: Instagram требует Business-аккаунт с ревью
-# приложения, YouTube — OAuth владельца, и то и другое это v2.
+# Площадки и допустимые на них форматы. Планируются все три, публикуются
+# автоматом те, у которых у завода есть транспорт: Telegram всегда,
+# Instagram — когда настроен аккаунт (`SETUP_INSTAGRAM.md`), YouTube пока
+# никогда, там OAuth владельца.
 #
 # Норм площадок в профиле пока нет: `platforms.md` собирается на шагах
 # онбординга O13–O15. Поэтому набор здесь технический, а раскладка по нему
@@ -57,7 +58,27 @@ PLATFORMS: dict[str, tuple[str, ...]] = {
     "instagram": ("карусель", "reels", "сторис"),
     "youtube":   ("видео", "shorts"),
 }
+# Площадки, которые завод умеет публиковать сам. Telegram всегда: бот
+# стоит в канале администратором, других условий нет.
 AUTO_PUBLISH = ("telegram",)
+
+
+def auto_publish() -> tuple[str, str] | tuple[str]:
+    """То же, но с учётом настроенного Instagram.
+
+    Функция, а не константа, и это главное здесь. Площадка попадает в
+    набор по факту настройки — `instapost.ready()` смотрит на аккаунт и
+    токен, — а не по надежде, что настройка когда-нибудь будет. Вшитая
+    константа означала бы одно из двух: либо слот Instagram каждый день
+    получает от автомата строку «комплект не готов» на готовом комплекте,
+    либо настроенный аккаунт лежит без дела, пока кто-нибудь не вспомнит
+    поправить кортеж.
+
+    Зовётся в момент решения, а не на импорте: токен появляется и
+    пропадает в работающем процессе.
+    """
+    from orchestrator import instapost
+    return AUTO_PUBLISH + ("instagram",) if instapost.ready() else AUTO_PUBLISH
 
 # Площадки, снятые с планирования. Из набора форматов площадка при этом не
 # убирается: темы на ней уже стоят, и Редактор с Дизайнером обязаны их
@@ -155,6 +176,64 @@ def free_slots(chat_id: int) -> tuple[list[date], list[Slot]]:
     window = _window(chat_id)
     _, free = _free(chat_id, window)
     return window, free
+
+
+# ── слот, поставленный рукой ──────────────────────────────────────────
+#
+# Третий вход в план, кроме Стратега и монтажа: человеку есть что
+# рассказать, и он заводит тему сам. Слот ей всё равно нужен — без даты
+# тему не возьмёт ни очередь (`publisher.due`), ни автомат
+# (`publisher.due_now`).
+#
+# Окно руки шире окна плана и начинается с сегодня: Стратег планирует с
+# завтра, потому что на сегодня текста ещё нет, а человек, которому есть
+# что сказать сейчас, имеет в виду именно сегодня.
+#
+# Правило «слот это пара дата плюс площадка» при этом то же самое и
+# считается тем же `_busy`: вторая копия занятости разъехалась бы с
+# первой на первой починке, и две темы встали бы в один день.
+HAND_DAYS = 8
+
+
+def hand_window(chat_id: int) -> list[date]:
+    """Окно руки: сегодня и семь дней вперёд."""
+    start = _today(chat_id)
+    return [start + timedelta(days=i) for i in range(HAND_DAYS)]
+
+
+def hand_free(chat_id: int, plat: str = "telegram") -> list[str]:
+    """Свободные дни площадки в окне руки, по возрастанию."""
+    window = hand_window(chat_id)
+    busy = _busy(chat_id, window)
+    return [d.isoformat() for d in window
+            if (d.isoformat(), plat) not in busy]
+
+
+def hand_slot(chat_id: int, plat: str = "telegram", day: str = "") -> str:
+    """Проверить названный день или взять ближайший свободный.
+
+    Отказ громкий: тема в занятый день это второй пост на ту же площадку
+    в тот же день — ровно то, что `_fit` не пускает у Стратега. Молча
+    сдвинуть её на соседний день тоже нельзя: человек назвал дату
+    затем, что у него на эту дату повод.
+    """
+    free = hand_free(chat_id, plat)
+    if not (day := (day or "").strip()):
+        if not free:
+            raise NoSlots(f"свободных дней {plat} в ближайшие {HAND_DAYS} "
+                          "дней нет: все заняты темами плана")
+        return free[0]
+    if day in free:
+        return day
+
+    window = hand_window(chat_id)
+    lo, hi = window[0].isoformat(), window[-1].isoformat()
+    if not lo <= day <= hi:
+        raise NoSlots(f"{day} вне окна руки ({lo} — {hi})")
+    taken = _busy(chat_id, window).get((day, plat), "тема без заголовка")
+    free_tail = (", ближайшие свободные: " + ", ".join(free[:3])
+                 if free else "")
+    raise NoSlots(f"{day} на {plat} уже занят темой «{taken}»{free_tail}")
 
 
 def _fit(themes: list[dict[str, Any]],
@@ -332,9 +411,11 @@ def _layers(chat_id: int, busy: dict[Slot, str], free: list[Slot],
         lines.append("Снято с планирования: " + ", ".join(PAUSED)
                      + ". Слотов там нет и тем туда не ставь, даже если "
                        "тема просится именно в этот формат.")
-    hands = [p for p in PLANNED if p not in AUTO_PUBLISH]
+    auto = auto_publish()
+    hands = [p for p in PLANNED if p not in auto]
     if hands:
-        lines.append("Публикуется автоматом только Telegram. Слоты "
+        lines.append("Публикуется автоматом " + ", ".join(auto)
+                     + ". Слоты "
                      + ", ".join(hands) + " человек выкладывает руками, "
                      "поэтому не ставь их больше, чем можно реально снять и "
                      "смонтировать за неделю.")
@@ -445,6 +526,7 @@ def card(brand_name: str, plan: Plan, themes: list[dict[str, Any]]) -> str:
     Темы сгруппированы по дню: в один день теперь попадает несколько
     площадок, и списком подряд неделя перестаёт читаться расписанием.
     """
+    auto = auto_publish()
     out = ["🎯 <b>План недели</b>", ""]
     out += [c for c in plan.context]
     out.append("")
@@ -462,7 +544,7 @@ def card(brand_name: str, plan: Plan, themes: list[dict[str, Any]]) -> str:
 
         for t in sorted(days[day], key=lambda x: x.get("plat", "")):
             goal = GOALS.get(t.get("goal", ""), t.get("goal", "—"))
-            hand = "" if t.get("plat") in AUTO_PUBLISH else " ✋"
+            hand = "" if t.get("plat") in auto else " ✋"
             out.append(f"<b>{t.get('plat') or '—'}</b> · "
                        f"{t.get('format') or '—'} · "
                        f"{t.get('rubric') or '—'} · {goal}{hand}")
@@ -482,11 +564,10 @@ def card(brand_name: str, plan: Plan, themes: list[dict[str, Any]]) -> str:
         out.append("Баланс: " + ", ".join(
             f"{GOALS.get(g, g)} {p}%" for g, p in bal.items()))
 
-    manual = sum(n for p, n in by_platform(themes).items()
-                 if p not in AUTO_PUBLISH)
+    manual = sum(n for p, n in by_platform(themes).items() if p not in auto)
     if manual:
-        out.append(f"✋ {manual} слотов вне Telegram — их выкладываешь руками, "
-                   "Публикатор туда не ходит.")
+        out.append(f"✋ {manual} слотов вне {', '.join(auto)} — их "
+                   "выкладываешь руками, Публикатор туда не ходит.")
     if plan.unmet:
         out.append("")
         out.append("⚠️ Не сошлось: " + "; ".join(plan.unmet))

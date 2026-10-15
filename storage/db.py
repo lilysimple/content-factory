@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS themes (
     title        TEXT,
     hook         TEXT,
     why          TEXT,
+    notes        TEXT,                      -- просьба человека по теме, заведённой рукой
     angle        TEXT,
     charge       TEXT,
     src          TEXT DEFAULT 'plan',       -- plan | adhoc
@@ -147,6 +148,32 @@ CREATE TABLE IF NOT EXISTS bridge_queue (
     error      TEXT
 );
 
+-- Распаковка клиента в личке (`bots/intake_bot.py`). Отдельная таблица, а
+-- не `onboarding`: там состояние тенанта-супергруппы, здесь — человека,
+-- который ещё не тенант и, может быть, им не станет. Ключ — id личного
+-- чата, он же id человека; смешать их в одной таблице значило бы
+-- завести строку тенанта на каждого, кто нажал /start.
+CREATE TABLE IF NOT EXISTS intake (
+    user_id      INTEGER PRIMARY KEY,
+    step         TEXT DEFAULT 'hello',   -- hello|collect|draft|quiz|done
+    brand_slug   TEXT,                   -- появляется в момент записи файлов
+    answers_json TEXT DEFAULT '{}',      -- черновик, ответы опросника, дыры
+    raw_json     TEXT DEFAULT '[]',      -- сырьё: что прислали и чем ответили
+    updated_at   TEXT DEFAULT (datetime('now'))
+);
+
+-- Долгий токен Instagram. Живёт в базе, а не только в окружении:
+-- Meta выдаёт его на шестьдесят дней и просит продлевать тем же токеном.
+-- Продлённый токен, записанный только в память процесса, переживает
+-- перезапуск ровно до первого — а дальше автопубликация встаёт молча,
+-- через два месяца после настройки, когда причину уже никто не помнит.
+-- Первый раз значение приезжает из `IG_TOKEN`, дальше дом ему здесь.
+CREATE TABLE IF NOT EXISTS ig_token (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    token        TEXT NOT NULL,
+    refreshed_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS llm_usage (
     chat_id INTEGER NOT NULL,
     day     TEXT NOT NULL,
@@ -167,6 +194,7 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 ADDED_COLUMNS = (
     ("tenants", "auto", "INTEGER DEFAULT 0"),
     ("tenants", "auto_at", "TEXT"),
+    ("themes", "notes", "TEXT"),
 )
 
 _conn: sqlite3.Connection | None = None
@@ -286,6 +314,36 @@ def onboarding_save(chat_id: int, step: str, answers: dict[str, Any],
             " raw_inputs_json = excluded.raw_inputs_json,"
             " updated_at = datetime('now')",
             (chat_id, step, json.dumps(answers, ensure_ascii=False),
+             json.dumps(raw, ensure_ascii=False)))
+
+
+# ── распаковка клиента в личке ─────────────────────────────────────────
+
+def intake_state(user_id: int) -> dict[str, Any]:
+    row = one("SELECT * FROM intake WHERE user_id = ?", user_id)
+    if row is None:
+        with tx() as c:
+            c.execute("INSERT INTO intake (user_id) VALUES (?)", (user_id,))
+        return {"step": "hello", "slug": None, "answers": {}, "raw": []}
+    return {
+        "step": row["step"],
+        "slug": row["brand_slug"],
+        "answers": json.loads(row["answers_json"]),
+        "raw": json.loads(row["raw_json"]),
+    }
+
+
+def intake_save(user_id: int, step: str, answers: dict[str, Any],
+                raw: list[Any], slug: str | None = None) -> None:
+    with tx() as c:
+        c.execute(
+            "INSERT INTO intake (user_id, step, brand_slug, answers_json,"
+            " raw_json) VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(user_id) DO UPDATE SET step = excluded.step,"
+            " brand_slug = COALESCE(excluded.brand_slug, intake.brand_slug),"
+            " answers_json = excluded.answers_json,"
+            " raw_json = excluded.raw_json, updated_at = datetime('now')",
+            (user_id, step, slug, json.dumps(answers, ensure_ascii=False),
              json.dumps(raw, ensure_ascii=False)))
 
 
