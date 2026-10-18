@@ -332,6 +332,101 @@ function cat(color, pts, speed){
           pause: 0, phase: Math.random() * 6};
 }
 
+// Ассистент разносит задачи: встаёт из-за стола, идёт к тому, кто ждёт
+// или работает, стоит у его стола и возвращается. Кресло его в это время
+// пустует — если бы он оставался сидеть, прогулка читалась бы как двойник.
+function walker(seat){
+  const g = new THREE.Group();
+  const shirt = mat(SHIRT[0], 0.9), skin = mat(SKIN[0], 0.9);
+  box(0.46, 0.62, 0.3, shirt, 0, 1.0, 0, g);                 // корпус стоя
+  const head = box(0.26, 0.29, 0.26, skin, 0, 1.45, 0, g);
+  box(0.28, 0.1, 0.28, MATS.hair, 0, 1.56, 0, g);
+  const legs = [];
+  for (const dx of [-0.11, 0.11])
+    legs.push(box(0.13, 0.7, 0.15, mat(0x343941, 0.9), dx, 0.35, 0, g));
+  const arms = [];
+  for (const dx of [-0.27, 0.27])
+    arms.push(box(0.1, 0.5, 0.1, shirt, dx, 0.98, 0, g));
+  box(0.3, 0.02, 0.22, MATS.paper, 0.3, 0.88, 0.16, g);      // папка в руке
+  g.visible = false;
+  scene.add(g);
+  return {g, head, legs, arms, seat,
+          home: new THREE.Vector3(), goal: new THREE.Vector3(),
+          path: [], leg: 0, wait: 4, state: "sit"};
+}
+
+// Маршрут: сначала в коридор между рядами, потом вдоль него, потом в
+// зазор между столами. Напрямик он шёл бы сквозь столешницы.
+function route(from, to){
+  const aisle = 0;                       // ряды стоят на z = ±DZ/2
+  return [new THREE.Vector3(from.x, 0, aisle),
+          new THREE.Vector3(to.x, 0, aisle), to.clone()];
+}
+
+function walkStep(w, desks, dt, t){
+  if (!w) return;
+  const me = seats[w.seat];
+  if (w.state === "sit"){
+    w.wait -= dt;
+    if (w.wait > 0) return;
+    // Кому нести: сначала тем, кто ждёт очереди, потом занятым.
+    const pick = desks
+      .map((d, i) => ({d, i}))
+      .filter(({d, i}) => i !== w.seat && d.state !== "idle");
+    const aim = pick.find(x => x.d.state === "queue") || pick[0]
+      || {i: Math.floor(Math.random() * seats.length)};
+    if (aim.i === w.seat) { w.wait = 6; return; }
+    const seat = seats[aim.i];
+    w.home.copy(me.g.position).setZ(me.g.position.z + 1.0);
+    // DX/2 — ровно середина зазора между соседними столами
+    w.goal.set(seat.g.position.x + DX / 2, 0, seat.g.position.z + 0.4);
+    w.path = route(w.home, w.goal);
+    w.leg = 0; w.state = "go";
+    w.g.position.copy(w.home); w.g.visible = true;
+    me.who.visible = false;                       // стул опустел
+    w.g.add(me.bob);                              // кристалл идёт с хозяином
+    me.bob.position.set(0, 2.0, 0);
+  }
+
+  if (w.state === "stand"){
+    w.wait -= dt;
+    w.g.rotation.y += Math.sin(t * 2) * 0.004;
+    for (const l of w.legs) l.rotation.x = 0;
+    if (w.wait <= 0){                             // отдал и пошёл обратно
+      w.path = route(w.goal, w.home); w.leg = 0; w.state = "back";
+    }
+    return;
+  }
+
+  const to = w.path[w.leg];
+  if (!to) return;
+  const d = to.clone().sub(w.g.position); d.y = 0;
+  const len = d.length();
+  if (len < 0.12){
+    w.leg++;
+    if (w.leg >= w.path.length){
+      if (w.state === "go"){ w.state = "stand"; w.wait = 3.2; }
+      else {                                      // сел на место
+        w.state = "sit"; w.wait = 6 + Math.random() * 8;
+        w.g.visible = false; me.who.visible = true;
+        me.g.add(me.bob);                         // вернулся — и кристалл с ним
+        me.bob.position.set(0, 1.82, 0.8);
+      }
+    }
+    return;
+  }
+  d.normalize();
+  w.g.position.addScaledVector(d, Math.min(len, 1.7 * dt));
+  w.g.rotation.y = Math.atan2(d.x, d.z);
+  const step = t * 7.5;
+  w.legs[0].rotation.x = Math.sin(step) * 0.6;
+  w.legs[1].rotation.x = Math.sin(step + Math.PI) * 0.6;
+  w.arms[0].rotation.x = Math.sin(step + Math.PI) * 0.45;
+  w.arms[1].rotation.x = Math.sin(step) * 0.45;
+  w.g.position.y = Math.abs(Math.sin(step)) * 0.02;
+  w.head.rotation.y = Math.sin(t * 0.8) * 0.15;
+}
+
 // Рабочее место: стол, монитор, кресло, человек. Человек сидит лицом к
 // монитору, поэтому вся группа крутится целиком.
 function station(seat){
@@ -400,6 +495,15 @@ function station(seat){
   who.position.set(0, 0, 0.78);
   g.add(who);
 
+  // плюмбоб: кристалл над головой, как в Симс. Цветом он повторяет круг
+  // на полу — это один сигнал, показанный дважды, а не два разных.
+  const bobMat = new THREE.MeshStandardMaterial({color: 0x4fd18b,
+    emissive: 0x2f9e6e, emissiveIntensity: 1.2, roughness: 0.15,
+    metalness: 0.1, transparent: true, opacity: 0});
+  const bob = new THREE.Mesh(new THREE.OctahedronGeometry(0.26), bobMat);
+  bob.scale.y = 1.8; bob.position.set(0, 1.82, 0.8); bob.castShadow = false;
+  g.add(bob);
+
   // круг на полу: чем занят стол, видно и без таблички
   const ring = new THREE.Mesh(new THREE.RingGeometry(0.95, 1.12, 48),
     new THREE.MeshBasicMaterial({color: 0x2f9e6e, transparent: true,
@@ -408,10 +512,11 @@ function station(seat){
   g.add(ring);
 
   return {g, screenMat, glow, chair, who, head, armL, armR, ring,
-          bulbMat, cone};
+          bulbMat, cone, bob, bobMat};
 }
 
 const seats = [];
+let runner = null;      // ассистент, разносящий задачи
 const greens = [];      // пальмы и плети: их качает один и тот же ветер
 const cats = [];
 function build(desks){
@@ -424,6 +529,8 @@ function build(desks){
     greens.push(ivy(x, 6.2, z));
   for (const [x, z] of [[-7.5, -4.4], [-0.5, -4.4], [6.5, -4.4]])
     greens.push(ivy(x, 4.6, z));
+
+  runner = walker(desks.findIndex(d => d.key === "director"));
 
   cats.push(cat(0x6b6560, [[-11, -4.6], [-3, -5.6], [5, -4.8], [11, -2],
                            [9, 6], [0, 8], [-9, 7], [-13, 1]], 0.026));
@@ -467,8 +574,10 @@ const secs = s => s == null ? "—"
 const esc = t => (t ?? "").toString()
   .replace(/[<>&]/g, c => ({"<": "&lt;", ">": "&gt;", "&": "&amp;"}[c]));
 
+let latest = null;
 function paint(d){
   if (!seats.length) build(d.desks);
+  latest = d;
 
   const p = d.plant, ok = p.state === "running";
   document.getElementById("pulse").className = "dot" + (ok ? "" : " off");
@@ -499,15 +608,16 @@ function paint(d){
     s.state = x.state;
     s.t0 = x.elapsed_s == null ? null : Date.now() - x.elapsed_s * 1000;
     s.tag.className = "tag " + x.state;
-    s.tag.innerHTML = x.state === "work"
-      ? `<div class="nm">${esc(x.emoji)} ${esc(x.name)}</div>
-         <div class="rl">${esc(x.role)}</div>
-         <div class="do">${esc(x.doing)}<span class="dots"><i></i><i></i><i></i></span></div>
-         <div class="tm" data-tm="1"></div>`
+    const card = `<div class="card"><div class="nm">${esc(x.emoji)} ${esc(x.name)}</div>
+      <div class="rl">${esc(x.role)}</div></div>`;
+    s.tag.innerHTML = card + (x.state === "stale"
+      ? `<div class="say">${esc(x.note)}<div class="tm" data-tm="1"></div></div>`
+      : x.state === "work"
+      ? `<div class="say">${esc(x.doing)}<span class="dots"><i></i><i></i><i></i></span>
+         <div class="tm" data-tm="1"></div></div>`
       : x.state === "queue"
-      ? `<div class="nm">${esc(x.emoji)} ${esc(x.name)}</div>
-         <div class="do">${esc(x.note)}</div>`
-      : `<div class="nm">${esc(x.emoji)} ${esc(x.name)}</div>`;
+      ? `<div class="say">${esc(x.note)}</div>`
+      : "");
   });
 
   document.getElementById("runs").innerHTML = d.runs.map(r =>
@@ -545,10 +655,14 @@ setInterval(poll, 2000); poll();
 // ---- кадр ----
 const v = new THREE.Vector3();
 const clock = new THREE.Clock();
+let lastT = 0;
 function frame(){
   const t = clock.getElapsedTime();
-  for (const s of seats){
+  const dt = t - lastT; lastT = t;
+  for (let i = 0; i < seats.length; i++){
+    const s = seats[i];
     const work = s.state === "work", queue = s.state === "queue";
+    const stale = s.state === "stale";
     const ph = t * (work ? 7.5 : 1.6) + s.phase;
 
     s.armL.position.y = 0.86 + (work ? Math.sin(ph) * 0.04 : 0);
@@ -560,33 +674,51 @@ function frame(){
     s.who.position.y = Math.sin(t * 1.3 + s.phase) * 0.012;   // дыхание
     s.chair.position.z += ((work ? 0.72 : 0.95) - s.chair.position.z) * 0.08;
 
-    const lit = work ? 0.9 + Math.sin(t * 9 + s.phase) * 0.12 : queue ? 0.32 : 0.05;
+    const lit = work ? 0.9 + Math.sin(t * 9 + s.phase) * 0.12
+      : stale ? 0.55 + Math.sin(t * 1.6) * 0.3 : queue ? 0.32 : 0.05;
     s.screenMat.emissiveIntensity += (lit - s.screenMat.emissiveIntensity) * 0.1;
-    s.screenMat.emissive.setHex(work ? 0x2f8f6f : queue ? 0x9e7a2f : 0x2f4f6f);
+    s.screenMat.emissive.setHex(work ? 0x2f8f6f : stale ? 0x9c352c
+      : queue ? 0x9e7a2f : 0x2f4f6f);
     s.glow.material.opacity += ((work ? 0.14 : 0) - s.glow.material.opacity) * 0.08;
 
     // лампа над столом горит, пока человек работает
-    const warm = work ? 1.9 : queue ? 0.7 : 0.12;
+    const warm = work ? 1.9 : stale ? 0.9 + Math.sin(t * 1.6) * 0.5
+      : queue ? 0.7 : 0.12;
     s.bulbMat.emissiveIntensity += (warm - s.bulbMat.emissiveIntensity) * 0.08;
     s.cone.material.opacity += ((work ? 0.22 : queue ? 0.07 : 0)
                                 - s.cone.material.opacity) * 0.08;
 
-    const op = work ? 0.68 + Math.sin(t * 2.6) * 0.16 : queue ? 0.4 : 0;
-    s.ring.material.opacity += (op - s.ring.material.opacity) * 0.1;
-    s.ring.material.color.setHex(work ? 0x2f9e6e : 0xd79b2a);
+    s.bob.rotation.y = t * 1.4 + s.phase;
+    // кристалл висит над головой, а у ходока — выше: он стоит, а не сидит
+    const bobBase = s.bob.parent === s.g ? 1.82 : 2.0;
+    s.bob.position.y = bobBase + Math.sin(t * 1.5 + s.phase) * 0.08;
+    s.bobMat.opacity += ((work ? 0.95 : stale ? 0.9 : queue ? 0.55 : 0)
+                         - s.bobMat.opacity) * 0.1;
+    s.bobMat.color.setHex(work ? 0x4fd18b : stale ? 0xe06a5c : 0xe8b44f);
+    s.bobMat.emissive.setHex(work ? 0x2f9e6e : stale ? 0x9c352c : 0xb07d19);
 
-    s.head.getWorldPosition(v); v.y += work ? 1.15 : 0.6;
+    const op = work ? 0.68 + Math.sin(t * 2.6) * 0.16
+      : stale ? 0.55 + Math.sin(t * 1.4) * 0.25 : queue ? 0.4 : 0;
+    s.ring.material.opacity += (op - s.ring.material.opacity) * 0.1;
+    s.ring.material.color.setHex(work ? 0x2f9e6e : stale ? 0xc0453a : 0xd79b2a);
+
+    const away = runner && runner.seat === i && runner.state !== "sit";
+    (away ? runner.head : s.head).getWorldPosition(v);
+    v.y += away ? 0.72 : work ? 1.72 : queue ? 1.5 : 1.08;
     const p = v.clone().project(camera);
     const vis = p.z < 1;
     s.tag.style.display = vis ? "block" : "none";
     if (vis){
       s.tag.style.left = (p.x * 0.5 + 0.5) * innerWidth + "px";
       s.tag.style.top = (-p.y * 0.5 + 0.5) * innerHeight + "px";
-      s.tag.style.zIndex = Math.round(4000 - camera.position.distanceTo(v) * 60);
+      const near = Math.round(2000 - camera.position.distanceTo(v) * 30);
+      s.tag.style.zIndex = near + (work ? 8000 : queue ? 4000 : 0);
     }
     const tm = s.tag.querySelector("[data-tm]");
     if (tm && s.t0) tm.textContent = secs(Math.floor((Date.now() - s.t0) / 1000));
   }
+  if (runner && latest) walkStep(runner, latest.desks, Math.min(0.05, dt), t);
+
   // сквозняк из окон: пальмы и плети качаются медленно и вразнобой
   for (const gr of greens){
     const a = Math.sin(t * 0.6 + gr.phase) * 0.05;

@@ -157,7 +157,14 @@ def token() -> str:
         return row["token"].strip()
     env = (cfg.ig_token or "").strip()
     if env:
-        save_token(env)
+        # Перенос из окружения в базу делается при первом чтении, и
+        # сорваться он имеет право: `ready()` спрашивают и оттуда, где
+        # база открыта только на чтение. Токен при этом известен, и
+        # отвечать «аккаунта нет» из-за неудавшейся записи нельзя.
+        try:
+            save_token(env)
+        except Exception as e:                               # noqa: BLE001
+            log.warning("токен из окружения не лёг в базу: %s", e)
     return env
 
 

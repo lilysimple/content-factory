@@ -152,16 +152,19 @@ def _desks(running: list[dict[str, Any]], taken: list[dict[str, Any]],
                             else "всё отправлено")
             desk["state"] = "queue" if due else "idle"
         elif key == "director":
-            if running:
+            if (live := [r for r in running if not r["stale"]]):
                 desk.update(state="work", doing=DOING[key],
-                            task=running[0]["task_id"],
-                            elapsed_s=running[0]["elapsed_s"])
+                            task=live[0]["task_id"],
+                            elapsed_s=live[0]["elapsed_s"])
             elif waiting or taken:
                 desk.update(state="queue",
                             note=f"{len(waiting) + len(taken)} в очереди")
         elif (r := by_run.get(key)):
-            desk.update(state="work", doing=DOING.get(key, ""),
-                        task=r["task_id"], elapsed_s=r["elapsed_s"])
+            desk.update(state="stale" if r["stale"] else "work",
+                        doing=DOING.get(key, ""), task=r["task_id"],
+                        elapsed_s=r["elapsed_s"],
+                        note="прогон висит дольше потолка — мост его спишет"
+                        if r["stale"] else "")
         elif key in grabbed:
             desk.update(state="queue", note="взято, прогон ещё не начат")
         elif (n := queued.get(key)):
@@ -175,13 +178,18 @@ def snapshot() -> dict[str, Any]:
     """Один срез состояния. Числа берутся из базы, а не из памяти панели."""
     conn = _db()
     try:
+        # Окно то же, что у моста: `bridge.running_rows` не считает живой
+        # строку старше `TIMEOUT`, и панель не имеет права считать иначе.
+        # Брошенный прогон висел бы «в работе» вечно — ровно то, ради чего
+        # панель и открывают.
         running = _rows(conn,
                         "SELECT task_id, chat_id, workflow, "
                         "datetime(started_at, 'localtime') AS started_at, "
                         "MAX(0, CAST(strftime('%s','now') "
-                        "- strftime('%s',started_at) AS INTEGER)) AS elapsed_s "
+                        "- strftime('%s',started_at) AS INTEGER)) AS elapsed_s, "
+                        "started_at <= datetime('now', ?) AS stale "
                         "FROM bridge_runs WHERE status = 'running' "
-                        "ORDER BY started_at")
+                        "ORDER BY started_at", f"-{bridge.TIMEOUT} seconds")
         taken = _rows(conn,
                       "SELECT id, workflow, ask, taken_at FROM bridge_queue "
                       "WHERE status = 'taken' ORDER BY id")
@@ -211,7 +219,8 @@ def snapshot() -> dict[str, Any]:
     finally:
         conn.close()
 
-    busy = {r["workflow"] for r in running} | {r["workflow"] for r in taken}
+    busy = ({r["workflow"] for r in running if not r["stale"]}
+            | {r["workflow"] for r in taken})
     return {
         "at": time.strftime("%H:%M:%S"),
         "plant": _plant(),

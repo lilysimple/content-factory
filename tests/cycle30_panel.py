@@ -19,6 +19,7 @@ from harness import CHAT, check, report
 harness.setup()
 
 from config import cfg                                            # noqa: E402
+from orchestrator import bridge                                   # noqa: E402
 from storage import db                                            # noqa: E402
 from tools import panel                                           # noqa: E402
 
@@ -83,6 +84,27 @@ def main() -> int:
           snap["lanes"]["total"] == 2
           and set(snap["lanes"]["busy"]) == {"plan", "design"},
           str(snap["lanes"]))
+
+    # Брошенный прогон: мост такую строку живой не считает, и панель
+    # не имеет права показывать её работой — иначе человек видит «идёт»
+    # там, где процесса давно нет.
+    wipe()                       # очередь из прошлого блока сюда не мешается
+    with db.tx() as c:
+        c.execute("INSERT INTO bridge_runs (task_id, chat_id, workflow, "
+                  "status, started_at) VALUES ('2026-01-01-plan-02', ?, "
+                  "'plan', 'running', datetime('now', ?))",
+                  (CHAT, f"-{bridge.TIMEOUT + 600} seconds"))
+    desks = panel.snapshot()["desks"]
+    stuck = by_name(desks, "Лиза")
+    check("брошенный прогон не выдаётся за работу",
+          stuck["state"] == "stale", str(stuck))
+    check("про зависший прогон сказано словами",
+          "спишет" in stuck["note"], str(stuck))
+    check("руководитель не занят чужим зависшим прогоном",
+          by_name(desks, "Марк")["state"] == "idle")
+    check("зависшая полоса не считается занятой",
+          panel.snapshot()["lanes"]["busy"] == [],
+          str(panel.snapshot()["lanes"]))
 
     conn = panel._db()
     try:
