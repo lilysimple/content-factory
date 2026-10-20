@@ -137,7 +137,12 @@ class Result:
 # ── результат для Telegram ────────────────────────────────────────────
 
 # Разрешённые Telegram теги. Всё, что не подошло под этот шаблон, — текст.
-_TAG = re.compile(r"</?(b|i|code|a)(\s+href=\"[^\"<>]*\")?>", re.I)
+# `blockquote` добавлен 20.10: цитатой идёт блок «как применить» в
+# понедельничной сводке. Без него тег уезжал к человеку видимой
+# скобкой — экранирование спасает отправку, а не читаемость.
+_TAG = re.compile(
+    r"</?(b|i|code|a|blockquote)"
+    r"(\s+href=\"[^\"<>]*\"|\s+expandable)?>", re.I)
 
 
 def for_telegram(text: str) -> str:
@@ -1435,6 +1440,41 @@ def _land_plan(res: Result, chat_id: int) -> str:
     return " ".join(note)
 
 
+def _land_trends(res: Result, chat_id: int) -> str:
+    """Посадить разбор трендов: механики в папку бренда датированным файлом.
+
+    Темы в базу разбор не заводит и слоты не занимает — это заготовки, а
+    не план. Садится он затем, что иначе не доживает до следующего раза:
+    папка задачи в `.gitignore`, и к следующему прогону от механик не
+    оставалось ничего. Адаптер роли при этом велел ей читать прошлые
+    разборы в `research/trends-*.md` — файлы, которых не писал никто.
+
+    Правило трёх и сверку ссылок с партией держит `trends.land`, а не
+    промпт: механика с двумя примерами уезжает в единичные, и человек
+    слышит об этом строкой.
+    """
+    art = res.dir / "trends.md"
+    if not art.exists():
+        return ""
+
+    data, why = _contract(art)
+    if data is None:
+        return f"Разбор собран, но {why} — в папку бренда не записан."
+
+    b = desk.brand(chat_id)
+    try:
+        rev, rel = trends.land(b, data)
+    except Exception as e:                       # noqa: BLE001
+        log.warning("%s: разбор не сел: %s", res.task_id, e)
+        return f"Разбор собран, но не сел: {e}"
+
+    note = [f"Разбор записан в {rel}: механик {len(rev.mechanics)}, "
+            f"единичных {len(rev.singles)}, отклонено {len(rev.rejected)}."]
+    if rev.findings:
+        note.append("Проверка поймала: " + "; ".join(rev.findings[:3]))
+    return " ".join(note)
+
+
 async def harvest(res: Result) -> str:
     """Посадить собранное субагентом в состояние завода.
 
@@ -1454,7 +1494,8 @@ async def harvest(res: Result) -> str:
     текст восемь минут пролежал в `tasks/`, который в `.gitignore`.
 
     Файл на диске это факт: `strategy.md` значит Стратег отработал,
-    `post*.md` — Редактор, `design.md` — Дизайнер. Разбирать надо факт.
+    `post*.md` — Редактор, `trends.md` — Trend Watcher, `design.md` —
+    Дизайнер. Разбирать надо факт.
 
     Идёт **всегда**, а не только при удаче: прогон 2026-08-31-plan-01 упёрся
     в потолок на Идеаторе, а `strategy.md` лежал готовым с 00:18. Работа,
@@ -1469,7 +1510,7 @@ async def harvest(res: Result) -> str:
     chat_id = row["chat_id"]
 
     notes = [_land_plan(res, chat_id), _land_posts(res, chat_id),
-             await _land_design(res, chat_id)]
+             _land_trends(res, chat_id), await _land_design(res, chat_id)]
 
     res.landed = " ".join(n for n in notes if n)
     return res.landed

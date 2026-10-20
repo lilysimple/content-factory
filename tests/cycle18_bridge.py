@@ -101,6 +101,15 @@ async def main() -> None:
           f('<a href="https://t.me/x">канал</a>') ==
           '<a href="https://t.me/x">канал</a>')
 
+    check("цитата живёт: ею идёт «как применить» в сводке",
+          f("<blockquote>Как применить</blockquote>") ==
+          "<blockquote>Как применить</blockquote>",
+          f("<blockquote>Как применить</blockquote>"))
+    check("раскрывающаяся цитата живёт",
+          f("<blockquote expandable>длинно</blockquote>") ==
+          "<blockquote expandable>длинно</blockquote>",
+          f("<blockquote expandable>длинно</blockquote>"))
+
     check("голая скобка экранируется", f("охват < 1000") == "охват &lt; 1000",
           f("охват < 1000"))
     check("амперсанд экранируется", f("Иванов & Ко") == "Иванов &amp; Ко",

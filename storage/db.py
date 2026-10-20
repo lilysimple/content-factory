@@ -195,6 +195,8 @@ ADDED_COLUMNS = (
     ("tenants", "auto", "INTEGER DEFAULT 0"),
     ("tenants", "auto_at", "TEXT"),
     ("themes", "notes", "TEXT"),
+    ("tenants", "digest_at", "TEXT"),
+    ("tenants", "digest_last", "TEXT"),
 )
 
 _conn: sqlite3.Connection | None = None

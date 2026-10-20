@@ -146,11 +146,36 @@ class Config:
     # тренды: HeyGen считает минуты рендера, а не вызовы, и фоновый
     # прогон сжигал бы тариф на черновиках. Пусто — инструмент говорит
     # это строкой и в сеть не идёт.
+    # ChatPlace: обложка понедельничной сводки через Virale
+    # (`orchestrator/virale.py`). REST у них нет, есть MCP — отсюда
+    # адрес сервера рядом с ключом. Ключ заводится на странице
+    # «Настройки → MCP» и показывается один раз. Пусто — дайджест
+    # уходит человеку без обложки, и завод говорит это строкой.
+    chatplace_key: str = os.getenv("CHATPLACE_KEY", "")
+    chatplace_mcp: str = os.getenv("CHATPLACE_MCP", "")
+
     heygen_key: str = os.getenv("HEYGEN_API_KEY", "")
     # Аватар и голос бренда на этом аккаунте. Держатся в окружении, а не
     # в папке бренда: id привязан к аккаунту HeyGen, а не к клиенту.
     heygen_avatar: str = os.getenv("HEYGEN_AVATAR_ID", "")
     heygen_voice: str = os.getenv("HEYGEN_VOICE_ID", "")
+
+    # Ключ Higgsfield для `tools/higgsfield_pull.py`: анимированный клип
+    # в карточку панели по тексту расшифровки. Платный и зовётся руками,
+    # как сток, тренды и HeyGen: Higgsfield считает генерации, а не
+    # минуты, и фоновый прогон сжигал бы тариф на черновиках. Пусто —
+    # инструмент говорит это строкой и в сеть не идёт.
+    #
+    # Ключ двойной: авторизация идёт парой «id и секрет» одним
+    # заголовком. `HIGGSFIELD_CREDENTIALS` — та же пара одной строкой
+    # через двоеточие, как её отдаёт консоль платформы; она сильнее.
+    higgsfield_key_id: str = os.getenv("HIGGSFIELD_KEY_ID", "")
+    higgsfield_key_secret: str = os.getenv("HIGGSFIELD_KEY_SECRET", "")
+    higgsfield_creds: str = os.getenv("HIGGSFIELD_CREDENTIALS", "")
+    # Модель по умолчанию. Текстовый путь, вертикаль, целые секунды:
+    # Kling 2.5 Turbo на Higgsfield живёт только image-to-video, и для
+    # клипа по расшифровке он не годится. Таблица — `higgsfield.MODELS`.
+    higgsfield_model: str = os.getenv("HIGGSFIELD_MODEL", "kling-3")
 
     apify_token: str = os.getenv("APIFY_TOKEN", "")
     # Акторов два, потому что цели разного рода снимаются разными.

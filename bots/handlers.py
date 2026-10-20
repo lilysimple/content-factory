@@ -22,7 +22,8 @@ from bots.router import is_footage, resolve
 from config import cfg
 from orchestrator import (album, bridge, design, desk, editor, hand,
                           montage, onboarding, publisher, reels, refresh,
-                          reply, research, strategy)
+                          reply, research, strategy,
+                          virale, weekly)
 from orchestrator.desk import NoWork
 from storage import db
 
@@ -144,7 +145,8 @@ def _tasks(n: int) -> str:
     return f"{n} {tail}"
 
 
-async def _deliver(chat_id: int, tkey: str, res) -> None:
+async def _deliver(chat_id: int, tkey: str, res, *,
+                   cover: bool = False) -> None:
     """Вернуть человеку то, что мост привёз. Общий хвост на все задачи."""
     task_id = res.task_id
 
@@ -180,6 +182,11 @@ async def _deliver(chat_id: int, tkey: str, res) -> None:
         await editor.show(registry, chat_id, res.text, role="assistant",
                           kb=kb, asked_in=tkey)
     else:
+        # Обложка идёт перед текстом, а не подписью под ним: потолок
+        # подписи 1024 знака, а сводка недели вчетверо длиннее. Подпись
+        # обрезала бы её молча, посреди фразы.
+        if cover:
+            await _cover(chat_id, tkey, res.text)
         await registry.say("assistant", chat_id, res.text, topic=tkey)
 
     # Макет уезжает человеку картинками и файлами, а не строкой в
@@ -254,7 +261,11 @@ async def _serve(row) -> None:
 
     try:
         res = await bridge.run(task_id, on_step=step)
-        await _deliver(chat_id, tkey, res)
+        # Обложку подвешиваем только понедельничной сводке. Человек,
+        # попросивший дайджест руками посреди недели, картинку не
+        # заказывал, а генерация стоит денег на чужом балансе.
+        await _deliver(chat_id, tkey, res,
+                       cover=(row["ask"] or "") == weekly.ASK)
         bridge.settle(qid, status="done" if res.ok else "failed",
                       task_id=task_id, error=res.error)
     except Exception as e:                                   # noqa: BLE001
@@ -264,6 +275,36 @@ async def _serve(row) -> None:
         bridge.settle(qid, status="failed", task_id=task_id, error=str(e))
         await registry.say("assistant", chat_id,
                            f"Задача {task_id} сорвалась: {e}", topic=tkey)
+
+
+async def _cover(chat_id: int, tkey: str, text: str) -> None:
+    """Обложка к сводке. Отказ это строка человеку, а не потерянный пост.
+
+    Генерация ходит в сеть и ждёт картинку до трёх минут, поэтому идёт
+    в отдельном потоке: внутри неё `time.sleep`, и на `await` его не
+    переделать — весь завод встал бы на эти минуты молча.
+    """
+    from orchestrator import desk, virale
+    if not virale.ready():
+        await registry.say("assistant", chat_id,
+                           "Обложку не собрала: ключа ChatPlace нет "
+                           "(CHATPLACE_KEY и CHATPLACE_MCP пусты).",
+                           topic=tkey, with_label=False)
+        return
+    try:
+        b = desk.brand(chat_id)
+        blob, notes = await asyncio.to_thread(virale.cover, b, text)
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("обложка сводки не собралась: %s", e)
+        await registry.say("assistant", chat_id,
+                           f"Обложку не собрала: {e}. Сводка это не "
+                           "отменяет.", topic=tkey, with_label=False)
+        return
+    await registry.send_file("assistant", chat_id, blob,
+                             "digest-cover.jpg", topic=tkey, as_photo=True)
+    for note in notes:
+        await registry.say("assistant", chat_id, note, topic=tkey,
+                           with_label=False)
 
 
 async def pump(period: float = 3.0) -> None:
@@ -325,6 +366,18 @@ async def clock(period: float = 60.0) -> None:
                 if not cfg.chat_allowed(chat_id):
                     continue
                 await publisher.autopost(registry, chat_id)
+            # Сводка по понедельникам тикает отдельным кругом: она не
+            # спрашивает `auto`. Автопубликация уходит в живой канал к
+            # подписчикам и потому ждёт порога, а сводка приходит
+            # человеку в чат завода — держать её за тем же выключателем
+            # значит не отдавать расписание тому, кто ещё не публикует
+            # автоматом, то есть ровно тому, кому сводка нужнее всего.
+            for row in db.q("SELECT chat_id FROM tenants "
+                            "WHERE digest_at IS NOT NULL AND digest_at != ''"):
+                chat_id = row["chat_id"]
+                if not cfg.chat_allowed(chat_id):
+                    continue
+                await weekly.tick(registry, chat_id)
             # Токен Instagram живёт шестьдесят дней и продлевается тем же
             # токеном. Пропущенное продление чинится только руками, через
             # браузер, — поэтому продлеваем раз в сутки, задолго до срока,
@@ -570,6 +623,54 @@ def register(dp_assistant: Dispatcher, dp_workers: Dispatcher) -> None:
             f"прощаю {publisher.AUTO_GRACE_MIN} минут, дальше показываю "
             "пропуск и жду руку. Выключить — <code>/auto off</code>.",
             topic=tkey)
+
+    # Расписание сводки. Отдельная команда, а не поле в `/auto`: это
+    # разные механики с разной ценой ошибки. Автомат публикует в живой
+    # канал и потому ждёт порога, сводка приходит человеку в чат и
+    # включается сразу.
+    @dp_assistant.message(F.text.regexp(r"^/digest(@\S+)?(\s|$)"))
+    async def on_digest(msg: Message) -> None:
+        chat_id = msg.chat.id
+        if not cfg.chat_allowed(chat_id) or not db.topics_ready(chat_id):
+            return
+        db.ensure_tenant(chat_id, cfg.default_tz)
+        tkey = topic_key_of(chat_id, msg.message_thread_id) or "research"
+        arg = (msg.text or "").partition(" ")[2].strip().lower()
+        at = weekly.at(chat_id)
+
+        if arg in {"off", "выкл", "стоп"}:
+            weekly.set_at(chat_id, "")
+            await registry.say("assistant", chat_id,
+                               "Сводку по понедельникам выключила. Зови "
+                               "командой <code>/research</code>.", topic=tkey)
+            return
+
+        if not arg:
+            state = (f"включена, понедельник в {at}" if at else "выключена")
+            cover = ("обложку собираю через Virale" if virale.ready()
+                     else "обложку не собираю: ключа ChatPlace нет")
+            await registry.say(
+                "assistant", chat_id,
+                f"Сводка по расписанию {state}.\n{cover.capitalize()}."
+                "\n\nВключить: <code>/digest 09:00</code>, "
+                "выключить — <code>/digest off</code>.", topic=tkey)
+            return
+
+        if (when := publisher.parse_at(arg.split()[-1])) is None:
+            await registry.say("assistant", chat_id,
+                               "Не разобрала время. <code>/digest</code> — "
+                               "как дела, <code>/digest 09:00</code> — "
+                               "включить, <code>/digest off</code> — "
+                               "выключить.", topic=tkey)
+            return
+
+        weekly.set_at(chat_id, when)
+        await registry.say(
+            "assistant", chat_id,
+            f"Сводка недели будет приходить по понедельникам в {when} "
+            "сама, в 🔍 Ресёрч. Опоздание завода прощаю "
+            f"{weekly.GRACE_MIN} минут, дальше называю пропуск и жду "
+            "команду. Выключить — <code>/digest off</code>.", topic=tkey)
 
     # ── кто-то зашёл или вышел ────────────────────────────────────────
     @dp_assistant.chat_member()
