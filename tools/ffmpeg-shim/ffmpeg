@@ -1,10 +1,46 @@
 #!/bin/sh
-# Системного ffmpeg на машине нет; берём бинарь, который привозит Remotion.
-# Без DYLD_LIBRARY_PATH он не находит свои dylib и падает на запуске.
+# Системного ffmpeg на машине может не быть вовсе, а HyperFrames и yt-dlp
+# ищут его в PATH. Шим находит бинарь сам и зовёт первый подходящий.
 #
-# Сборка Remotion идёт с --disable-filters: кодирования с альфа-каналом
-# на ней нет (MOV падает на 'No such filter: setparams', WebM молча
-# уходит в yuv420p). Нам оно и не нужно — панель остаётся непрозрачной.
-BIN="$(cd "$(dirname "$0")/../remotion-montage/node_modules/@remotion/compositor-darwin-arm64" && pwd)"
+# **Порядок не случайный: сначала полная сборка, бандловая последней.**
+# ffmpeg, который привозит Remotion, собран с `--disable-filters` — в нём
+# 50 фильтров против 492 у полной сборки. Нет `overlay`, `drawtext`,
+# `zoompan`, `fps`, `alphaextract`. Панели этого хватало, двухслойному
+# сплиту (сток в верхней трети над говорящей головой) — нет, и `fps`
+# пришлось обходить уже в `footage.py:585`. Поэтому бандловый бинарь
+# остаётся как запасной, а не как основной.
+#
+# Полную сборку брать неоткуда? Она уже лежит в `imageio_ffmpeg` — это
+# ffmpeg 7.1 с libx264, libx265, libvpx-vp9, aac, libass, freetype и
+# fontconfig. Ставится как обычный пакет, без Homebrew и без пароля:
+#     ./.venv/bin/pip install imageio-ffmpeg
+#
+# Переопределить всё разом: FFMPEG_FULL=/путь/к/ffmpeg.
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+if [ -n "$FFMPEG_FULL" ] && [ -x "$FFMPEG_FULL" ]; then
+  exec "$FFMPEG_FULL" "$@"
+fi
+
+# Системный, если он есть и это не мы сами: иначе шим позвал бы себя.
+SYS="$(command -v ffmpeg 2>/dev/null)"
+if [ -n "$SYS" ] && [ "$SYS" != "$SELF" ] && [ "$(basename "$(dirname "$SYS")")" != "ffmpeg-shim" ]; then
+  exec "$SYS" "$@"
+fi
+
+# Полная сборка из пакета imageio_ffmpeg, если Python её знает.
+for PY in "$(dirname "$0")/../../.venv/bin/python" python3; do
+  IIO="$("$PY" -c 'import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())' 2>/dev/null)"
+  if [ -n "$IIO" ] && [ -x "$IIO" ]; then exec "$IIO" "$@"; fi
+done
+
+# Запасной: бандловый. Без DYLD_LIBRARY_PATH он не находит свои dylib и
+# падает на запуске. Имя пакета зависит от платформы, поэтому ищем.
+MOD="$(cd "$(dirname "$0")/../remotion-montage/node_modules/@remotion" 2>/dev/null && pwd)"
+BIN="$(ls -d "$MOD"/compositor-* 2>/dev/null | head -1)"
+if [ -z "$BIN" ]; then
+  echo "ffmpeg-shim: ffmpeg не найден. Поставьте imageio-ffmpeg или задайте FFMPEG_FULL." >&2
+  exit 127
+fi
 DYLD_LIBRARY_PATH="$BIN${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" export DYLD_LIBRARY_PATH
 exec "$BIN/ffmpeg" "$@"

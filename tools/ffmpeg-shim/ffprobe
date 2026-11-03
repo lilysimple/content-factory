@@ -1,10 +1,28 @@
 #!/bin/sh
-# Системного ffmpeg на машине нет; берём бинарь, который привозит Remotion.
-# Без DYLD_LIBRARY_PATH он не находит свои dylib и падает на запуске.
+# ffprobe тем же порядком, что и ffmpeg рядом, с одной разницей: в
+# `imageio_ffmpeg` ffprobe не кладут вовсе, там только ffmpeg. Поэтому
+# полной сборкой здесь может быть только системная, а дальше сразу
+# бандловая от Remotion.
 #
-# Сборка Remotion идёт с --disable-filters: кодирования с альфа-каналом
-# на ней нет (MOV падает на 'No such filter: setparams', WebM молча
-# уходит в yuv420p). Нам оно и не нужно — панель остаётся непрозрачной.
-BIN="$(cd "$(dirname "$0")/../remotion-montage/node_modules/@remotion/compositor-darwin-arm64" && pwd)"
+# Урезанность бандловой сборки на probe не сказывается: фильтры тут не
+# нужны, читаются контейнер и потоки. Так что для ffprobe бандловый
+# бинарь — нормальный рабочий вариант, а не вынужденный.
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+if [ -n "$FFPROBE_FULL" ] && [ -x "$FFPROBE_FULL" ]; then
+  exec "$FFPROBE_FULL" "$@"
+fi
+
+SYS="$(command -v ffprobe 2>/dev/null)"
+if [ -n "$SYS" ] && [ "$SYS" != "$SELF" ] && [ "$(basename "$(dirname "$SYS")")" != "ffmpeg-shim" ]; then
+  exec "$SYS" "$@"
+fi
+
+MOD="$(cd "$(dirname "$0")/../remotion-montage/node_modules/@remotion" 2>/dev/null && pwd)"
+BIN="$(ls -d "$MOD"/compositor-* 2>/dev/null | head -1)"
+if [ -z "$BIN" ]; then
+  echo "ffmpeg-shim: ffprobe не найден. Задайте FFPROBE_FULL." >&2
+  exit 127
+fi
 DYLD_LIBRARY_PATH="$BIN${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" export DYLD_LIBRARY_PATH
 exec "$BIN/ffprobe" "$@"
