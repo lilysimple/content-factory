@@ -12,9 +12,12 @@
 `publisher.py`: посчитать тишину и центр движения — арифметика, а не
 рассуждение, и стоить она не должна ничего.
 
-Весь ffmpeg берётся бандловый, из `@remotion/compositor-*` внутри
-`tools/remotion-montage/node_modules`. Системного ffmpeg на машине может
-не быть вовсе, и ставить его отдельно ради монтажа не нужно.
+Весь ffmpeg идёт через шим `tools/ffmpeg-shim`. Системного ffmpeg на
+машине может не быть вовсе: шим тогда возьмёт полную сборку из
+`imageio_ffmpeg`, а если нет и её — бандловую из `@remotion/compositor-*`
+внутри `tools/remotion-montage/node_modules`. Ставить ffmpeg отдельно
+ради монтажа по-прежнему не нужно, но с полной сборкой здесь доступны
+фильтры, которых у бандловой нет вовсе.
 """
 from __future__ import annotations
 
@@ -37,7 +40,12 @@ from config import ROOT
 log = logging.getLogger("footage")
 
 TOOLS = ROOT / "tools" / "remotion-montage"
-FFMPEG = TOOLS / "node_modules" / ".bin" / "remotion"
+# Зовём ffmpeg через шим `tools/ffmpeg-shim`, а не через `remotion ffmpeg`.
+# Шим берёт полную сборку, если она на машине есть, и бандловую только
+# запасной: у бандловой 50 фильтров против 492, и чего в ней нет —
+# написано в NOTES.md. Путь вызова это не меняет, меняется только то,
+# какой бинарь окажется на том конце.
+FFMPEG = ROOT / "tools" / "ffmpeg-shim" / "ffmpeg"
 
 # Папка с бандловыми ffmpeg и ffprobe внутри пакета компоновщика. Нужна
 # тем, кто зовёт ffmpeg сам, а не через `remotion ffmpeg` — например
@@ -117,7 +125,7 @@ THRESH_RX = re.compile(r'"input_thresh"\s*:\s*"?(-?[\d.]+|-inf)"?')
 async def loudness(video: Path) -> float:
     """Порог тишины этой записи в дБ. Не измерилось — запасной."""
     code, _, err = await _run(
-        str(FFMPEG), "ffmpeg", "-hide_banner", "-nostats", "-i", str(video),
+        str(FFMPEG), "-hide_banner", "-nostats", "-i", str(video),
         "-map", "0:a", "-af", "loudnorm=print_format=json",
         "-f", "null", "-", timeout=900)
     if code != 0:
@@ -134,7 +142,7 @@ async def silences(video: Path,
     if threshold is None:
         threshold = await loudness(video)
     code, _, err = await _run(
-        str(FFMPEG), "ffmpeg", "-hide_banner", "-nostats", "-i", str(video),
+        str(FFMPEG), "-hide_banner", "-nostats", "-i", str(video),
         "-vn", "-af", f"silencedetect=noise={threshold}dB:d={SILENCE_MIN}",
         "-f", "null", "-", timeout=900)
     if code != 0:
@@ -426,7 +434,7 @@ async def loudness_track(video: Path, step: float = 0.05) -> list[float]:
     wav = TOOLS / f".audio-{video.stem}.wav"
     try:
         code, _, err = await _run(
-            str(FFMPEG), "ffmpeg", "-hide_banner", "-loglevel", "error",
+            str(FFMPEG), "-hide_banner", "-loglevel", "error",
             "-i", str(video), "-vn", "-ac", "1", "-ar", "8000", "-y",
             str(wav), timeout=900)
         if code != 0 or not wav.exists():
@@ -582,12 +590,13 @@ class Focus:
 
 
 async def _gray(video: Path) -> bytes:
-    # ffmpeg у Remotion собран урезанным: фильтра `fps` в нём нет вовсе, а
-    # мукcера `rawvideo` нет тоже — частота задаётся выходным `-r`, а кадры
-    # льются через `image2pipe`. Обычные рецепты из интернета здесь просто
-    # не запускаются, и это не наша ошибка, а чужая сборка.
+    # Частота задаётся выходным `-r`, а кадры льются через `image2pipe`,
+    # хотя обычный рецепт — фильтр `fps` и мукcер `rawvideo`. Так писалось
+    # под бандловую сборку, где нет ни того, ни другого. На полной сборке
+    # работает тоже, поэтому обход оставлен: он единственный, который
+    # запускается на обоих бинарях, а бинарь выбирает шим.
     code, out, err = await _run(
-        str(FFMPEG), "ffmpeg", "-hide_banner", "-loglevel", "error",
+        str(FFMPEG), "-hide_banner", "-loglevel", "error",
         "-i", str(video), "-an", "-r", str(SAMPLE_FPS),
         "-vf", f"scale={GRID_W}:{GRID_H},format=gray",
         "-c:v", "rawvideo", "-f", "image2pipe", "-", timeout=900)
@@ -757,7 +766,7 @@ async def clip(video: Path, start: float, end: float, out: Path) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.unlink(missing_ok=True)
     code, _, err = await _run(
-        str(FFMPEG), "ffmpeg", "-hide_banner", "-loglevel", "error",
+        str(FFMPEG), "-hide_banner", "-loglevel", "error",
         "-ss", f"{start:.3f}", "-i", str(video), "-t", f"{end - start:.3f}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-c:a", "aac", "-b:a", "160k", "-y", str(out), timeout=900)
@@ -771,7 +780,7 @@ async def still(video: Path, at: float, out: Path) -> Path:
     """Снять один кадр в PNG. Нужен и обложке, и разбору глазами."""
     out.parent.mkdir(parents=True, exist_ok=True)
     code, _, err = await _run(
-        str(FFMPEG), "ffmpeg", "-hide_banner", "-loglevel", "error",
+        str(FFMPEG), "-hide_banner", "-loglevel", "error",
         "-ss", f"{at:.3f}", "-i", str(video), "-frames:v", "1", "-y",
         str(out), timeout=300)
     if code != 0 or not out.exists():
@@ -1639,7 +1648,7 @@ async def head_angles(video: Path, work: Path, *,
     for old in work.glob("*.jpg"):
         old.unlink()
     code, _, err = await _run(
-        str(FFMPEG), "ffmpeg", "-hide_banner", "-loglevel", "error",
+        str(FFMPEG), "-hide_banner", "-loglevel", "error",
         "-i", str(video), "-an", "-r", str(fps),
         "-vf", "scale=480:-2", "-q:v", "4",
         str(work / "%04d.jpg"), timeout=900)
@@ -1739,8 +1748,9 @@ MASK_WIDTH = 540
 MASK_TIMEOUT = 1800
 # Сетка замера перекрытия. Те же числа стоят в `personmask.swift`: клетку
 # считает он, потому что силуэт уже у него в руках, а прочесть маски
-# вторым проходом нечем — бандловый ffmpeg не знает ни `alphaextract`, ни
-# мукcера `rawvideo`, и Pillow в этом проекте не живёт.
+# вторым проходом нечем: на бандловой сборке нет ни `alphaextract`, ни
+# мукcера `rawvideo`, Pillow в этом проекте не живёт, а полная сборка
+# есть не на всякой машине — шим её только предпочитает, не обещает.
 MASK_COLS = 64
 MASK_ROWS = 114
 
@@ -1774,7 +1784,7 @@ async def person_masks(video: Path, work: Path, *,
             old.unlink()
 
     code, _, err = await _run(
-        str(FFMPEG), "ffmpeg", "-hide_banner", "-loglevel", "error",
+        str(FFMPEG), "-hide_banner", "-loglevel", "error",
         "-i", str(video), "-an", "-r", str(fps),
         *(["-t", f"{seconds:.3f}"] if seconds else []),
         "-vf", f"scale={width}:-2", "-q:v", "3",

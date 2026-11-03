@@ -92,7 +92,7 @@ def _dub(b) -> Path | None:
 
     out = montage.incoming_dir(b) / "pending.mp4"
     subprocess.run([
-        str(montage.footage.FFMPEG), "ffmpeg", "-hide_banner", "-y",
+        str(montage.footage.FFMPEG), "-hide_banner", "-y",
         "-loglevel", "error",
         "-loop", "1", "-framerate", "30", "-i", str(photo),
         "-i", str(wav),
