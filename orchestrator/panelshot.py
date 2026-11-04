@@ -17,12 +17,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime as dt
 import hashlib
 import ipaddress
+import json
 import logging
 import re
+import shutil
 import socket
+import tempfile as _tmp
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -419,4 +424,216 @@ async def draw(b, slides: list[Any], *, color: str, accent: str,
     for s in todo:
         if s.image is None:
             s.kind = "card"
+    return lost
+
+
+# ── снимок страницы под слой доказательства ───────────────────────────
+#
+# Второй способ снять страницу, рядом с `_page`, и отличается он не
+# размером кадра. `_page` снимает окно под карточку панели: кадр
+# фиксированный, и всё, что не влезло, обрезано. Слою `proof` нужна
+# страница **целиком** и, сверх того, места строк на ней — по ним едет
+# маркер, и считать их на глаз нельзя никому.
+#
+# Поэтому здесь свой Chrome с отладочным портом, а не `design.capture`:
+# одним кадром такое не снять, нужен разговор со страницей. Разговор
+# один и короткий — снять кадр и спросить прямоугольники строк.
+#
+# Страница чужая и живая: строки на ней переписывают без нас. Строка,
+# которой на странице нет, поэтому не отказ, а пропуск — он называется
+# человеку, а остальные подсветки едут как ехали. Отказ тут означал бы,
+# что правка одного абзаца в чужой справке роняет монтаж целиком.
+
+PROOF_WIDTH = 1100           # ширина окна: страница верстается под десктоп
+PROOF_MAX_HEIGHT = 9000      # потолок высоты снимка, пиксели
+PROOF_SETTLE = 4.0           # пауза после навигации: шрифты и картинки
+PROOF_START = 25.0           # секунд на старт Chrome и первый кадр
+
+PROOFS = "montage/proofs"
+
+# Поиск строки на странице. Сравниваем по сжатым пробелам и без
+# регистра: в вёрстке строка разорвана переносами и тегами, а человек
+# цитирует её одной строкой.
+FIND_JS = r"""(() => {
+  const want = %s;
+  const norm = (s) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+  const doc = document.documentElement;
+  const W = doc.scrollWidth, H = doc.scrollHeight;
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  let n;
+  while ((n = walk.nextNode())) {
+    if (norm(n.nodeValue)) nodes.push(n);
+  }
+  const out = [];
+  for (const phrase of want) {
+    const need = norm(phrase);
+    let hit = null;
+    for (const node of nodes) {
+      const text = norm(node.nodeValue);
+      const at = text.indexOf(need);
+      if (at < 0) continue;
+      // Смещение в сжатом тексте не равно смещению в исходном: ищем
+      // заново по исходной строке, иначе рамка уедет на пару слов.
+      const raw = node.nodeValue.toLowerCase();
+      let from = raw.indexOf(need.split(' ')[0]);
+      if (from < 0) from = 0;
+      const r = document.createRange();
+      try {
+        r.setStart(node, from);
+        r.setEnd(node, Math.min(node.nodeValue.length,
+                                from + phrase.length));
+      } catch (e) { continue; }
+      const box = r.getBoundingClientRect();
+      if (box.width < 4 || box.height < 4) continue;
+      hit = {
+        x: (box.left + window.scrollX) / W,
+        y: (box.top + window.scrollY) / H,
+        w: box.width / W,
+        h: box.height / H,
+      };
+      break;
+    }
+    out.push(hit);
+  }
+  return JSON.stringify({width: W, height: H, spots: out});
+})()"""
+
+
+def _proof_name(url: str, marks: list[str]) -> str:
+    """Имя снимка. Строки входят в отпечаток вместе с адресом: та же
+    страница с другими подсветками это другое задание, и взять её из
+    кэша со старыми прямоугольниками значит подсветить не то."""
+    key = url + "\n" + "\n".join(marks)
+    return "proof-" + hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+async def _chrome(port: int, url: str):
+    """Свой headless Chrome с отладочным портом. Процесс — на вызвавшем."""
+    profile = Path(_tmp.mkdtemp(prefix="chrome-proof-"))
+    proc = await asyncio.create_subprocess_exec(
+        design.chrome(), "--headless=new", "--disable-gpu", "--no-sandbox",
+        "--hide-scrollbars", "--no-first-run", "--no-default-browser-check",
+        "--disable-extensions", "--disable-background-networking",
+        "--disable-sync", f"--window-size={PROOF_WIDTH},1400",
+        f"--remote-debugging-port={port}", f"--user-data-dir={profile}",
+        url,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    return proc, profile
+
+
+async def proof(b, url: str, marks: list[str]
+                ) -> tuple[Path, tuple[int, int],
+                           list[tuple[str, float, float, float, float]],
+                           list[str]]:
+    """Снимок страницы целиком и места строк на нём.
+
+    Отдаёт путь к PNG, его размер, найденные строки прямоугольниками в
+    долях снимка и строки человеку про то, что не нашлось.
+    """
+    safe = safe_url(url)
+    if safe is None:
+        raise NoShot(f"«{url[:40]}» не годится как адрес")
+    if not await asyncio.to_thread(_public, safe):
+        raise NoShot(f"{safe} не публичный адрес")
+
+    folder = b.path(PROOFS)
+    name = _proof_name(safe, marks)
+    png = folder / f"{name}.png"
+    meta = folder / f"{name}.json"
+    if png.is_file() and png.stat().st_size > 0 and meta.is_file():
+        saved = json.loads(meta.read_text("utf-8"))
+        return (png, tuple(saved["size"]),
+                [(s[0], s[1], s[2], s[3], s[4]) for s in saved["spots"]],
+                list(saved.get("lost") or []))
+
+    # Страница, которая не отвечает, снимется белым листом — и на видео
+    # этот лист не отличить от скрина. Проверяем до Chrome.
+    await asyncio.to_thread(_get, safe, HTML_MAX)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    proc, profile = await _chrome(port, safe)
+    lost: list[str] = []
+    try:
+        sock = await asyncio.to_thread(_proof_socket, port)
+        try:
+            await asyncio.sleep(PROOF_SETTLE)
+            found = await asyncio.to_thread(
+                sock.evaluate, FIND_JS % json.dumps(marks, ensure_ascii=False))
+            data = json.loads(found) if isinstance(found, str) else {}
+            w = min(int(data.get("width") or PROOF_WIDTH), PROOF_WIDTH * 2)
+            h = min(int(data.get("height") or 0), PROOF_MAX_HEIGHT)
+            if h < 200:
+                raise NoShot(f"{safe}: страница пришла пустой")
+            shot = await asyncio.to_thread(
+                sock.call, "Page.captureScreenshot",
+                {"format": "png", "captureBeyondViewport": True,
+                 "clip": {"x": 0, "y": 0, "width": w, "height": h,
+                          "scale": 1}})
+        finally:
+            await asyncio.to_thread(sock.close)
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        shutil.rmtree(profile, ignore_errors=True)
+
+    raw = base64.b64decode((shot.get("result") or {}).get("data") or "")
+    if not raw:
+        raise NoShot(f"{safe}: Chrome не отдал кадр")
+    png.write_bytes(raw)
+
+    spots: list[tuple[str, float, float, float, float]] = []
+    for phrase, hit in zip(marks, list(data.get("spots") or [])):
+        if not hit:
+            lost.append(f"на странице не нашлось: «{phrase[:40]}» — "
+                        "маркер по ней не поедет")
+            continue
+        spots.append((phrase, float(hit["x"]), float(hit["y"]),
+                      float(hit["w"]), float(hit["h"])))
+    meta.write_text(json.dumps(
+        {"size": [w, h], "spots": [list(s) for s in spots], "lost": lost},
+        ensure_ascii=False), "utf-8")
+    return png, (w, h), spots, lost
+
+
+def _proof_socket(port: int):
+    """Сокет отладки, когда Chrome успел открыть порт."""
+    from orchestrator import cdp
+    deadline = time.monotonic() + PROOF_START
+    while time.monotonic() < deadline:
+        try:
+            return cdp.Socket(cdp.page_socket(port, timeout=1.0))
+        except Exception:                            # noqa: BLE001
+            time.sleep(0.4)
+    raise NoShot("Chrome не открыл порт отладки")
+
+
+async def prove(b, overlays: list[Any]) -> list[str]:
+    """Проставить снимки слоям `proof`. Вернуть, что не вышло.
+
+    Меняет слой на месте. Снимка нет — слой выбрасывается вызывающим:
+    `proof` без страницы это пустое место в кадре, а не слой словами.
+    """
+    todo = [o for o in overlays if o.kind == "proof" and o.url]
+    if not todo:
+        return []
+    gate = asyncio.Semaphore(PARALLEL)
+    lost: list[str] = []
+
+    async def one(o: Any) -> None:
+        async with gate:
+            try:
+                png, size, spots, gaps = await proof(b, o.url, o.marks)
+            except (NoShot, OSError, ValueError) as e:
+                lost.append(f"«{o.phrase[:40]}»: {e}")
+                return
+            o.image, o.image_size, o.spots = png, size, spots
+            lost.extend(gaps)
+
+    await asyncio.gather(*(one(o) for o in todo))
     return lost

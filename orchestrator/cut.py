@@ -522,3 +522,247 @@ async def panel(chat_id: int, words: list[Any], *,
     log.info("панель: взято %s блоков, отброшено %s", len(good), len(lost))
     cover = data.get("cover") if isinstance(data.get("cover"), dict) else {}
     return good[:want], lost, cover
+
+
+# ── слои поверх дубля ─────────────────────────────────────────────────
+#
+# Третья работа той же роли и второй формат монтажа, рядом со сплитом.
+# Отдельным вызовом по той же причине, что и панель: секция промпта со
+# схемой ответа приезжала бы в контекст на каждый обычный монтаж.
+#
+# Разница со сплитом не в наборе украшений, а в том, делится ли кадр.
+# Сплит отдаёт половину панели и держит зрителя второй дорожкой; слои
+# кадра не делят — дубль идёт во весь экран, человек в кадре всё время,
+# и поверх ложатся единицы вещей. Поэтому форматы взаимно исключены:
+# заголовку во всю ширину в сплите просто некуда встать.
+#
+# Слой, как и блок панели, **стоит на слове, а не на секунде**, и
+# кончается тоже на слове. Конец здесь свой у каждого слоя, а не «до
+# следующего»: слои не сменяют друг друга, они живут поверх кадра и
+# нормально пересекаются — заголовок наверху, плашка посередине.
+
+LAYER_KINDS = ("title", "proof", "chrome")
+ARROWS = ("none", "down", "left", "right")
+
+# Слоёв на ролик единицы, а не десяток: каждый закрывает собой часть
+# кадра, и второй поверх первого — уже мусор. Шесть это потолок, а не
+# цель; на тридцатисекундном референсе их было четыре.
+LAYERS_WANT = 6
+LAYERS_TOKENS = 6000
+
+# Заголовок во всю ширину кадра. Длиннее строки не помещается даже
+# сжатым гротеском: она уедет кеглем вниз и перестанет быть плашкой.
+TITLE_LINE = 18
+TITLE_LINES = 3
+# Рукописный акцент это слово или два, а не фраза: его пишут от руки
+# поверх заголовка, и длинная строка там не читается вовсе.
+SCRIPT_MAX = 28
+# Плашка площадки: имя и подпись под ним, обе в одну строку без переноса.
+CHROME_HEAD = 48
+CHROME_NOTE = 64
+# Строк подсветки на снимок. Больше — зритель не успевает прочесть, и
+# снимок превращается в мигание маркером.
+MARKS_MAX = 4
+# Снимков страницы на ролик. Страница занимает кадр целиком, и вторая
+# подряд превращает ролик в чтение вслух.
+PROOFS_MAX = 1
+
+LAYERS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "layers": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "phrase": {"type": "string"},
+                    "until": {"type": "string"},
+                    "kind": {"type": "string", "enum": list(LAYER_KINDS)},
+                    "lines": {"type": "array", "items": {"type": "string"}},
+                    "script": {"type": "string"},
+                    "arrow": {"type": "string", "enum": list(ARROWS)},
+                    "url": {"type": "string"},
+                    "marks": {"type": "array", "items": {"type": "string"}},
+                    "open_phrase": {"type": "string"},
+                },
+                "required": ["phrase", "until", "kind", "lines", "script",
+                             "arrow", "url", "marks", "open_phrase"],
+                "additionalProperties": False,
+            },
+        },
+        "notes": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["layers", "notes"],
+    "additionalProperties": False,
+}
+
+
+@dataclass
+class Overlay:
+    """Слой до привязки ко времени.
+
+    Как и `Slide`, секунд не знает: роль говорит «с этой фразы и до
+    этой», секунды считает монтаж по нарезанной расшифровке.
+    """
+    phrase: str
+    kind: str = "title"
+    until: str = ""
+    lines: list[str] = field(default_factory=list)
+    script: str = ""
+    arrow: str = "none"
+    # `proof`: адрес страницы, которую снимаем, и строки на ней, которые
+    # подсвечиваем маркером. Строки ищутся в снятой странице, а не в
+    # расшифровке: человек говорит своими словами, страница — своими.
+    url: str = ""
+    marks: list[str] = field(default_factory=list)
+    # Фраза, на которой снимок разворачивается во весь кадр. Пусто —
+    # остаётся карточкой в углу.
+    open_phrase: str = ""
+    # Что сняли по `url`. Ставит монтаж после `panelshot.proof`: сам
+    # снимок, его размер и места найденных строк в долях снимка.
+    image: Path | None = None
+    image_size: tuple[int, int] = (0, 0)
+    spots: list[tuple[str, float, float, float, float]] = \
+        field(default_factory=list)
+
+
+def _layers(raw: list[dict[str, Any]]) -> tuple[list[Overlay], list[str]]:
+    """Оставить слои, которые можно нарисовать. Отброшенное — назвать.
+
+    Проверяется то же, что у панели: видимое без расшифровки. Фразу в
+    записи и страницу по адресу проверяет монтаж — у него есть слова и
+    есть сеть.
+    """
+    good: list[Overlay] = []
+    lost: list[str] = []
+    proofs = 0
+
+    for d in raw:
+        phrase = str(d.get("phrase") or "").strip()
+        kind = str(d.get("kind") or "title").strip().lower() or "title"
+        name = f"«{(phrase or '?')[:40]}»"
+
+        if not phrase:
+            lost.append(f"слой {kind}: без фразы, ставить не на что")
+            continue
+        if kind not in LAYER_KINDS:
+            lost.append(f"{name}: слоя «{kind}» не бывает")
+            continue
+
+        lines = [str(s).strip() for s in (d.get("lines") or [])
+                 if str(s).strip()]
+        script = str(d.get("script") or "").strip()
+        arrow = str(d.get("arrow") or "none").strip().lower()
+        if arrow not in ARROWS:
+            arrow = "none"
+
+        if kind == "title":
+            if not lines:
+                lost.append(f"{name}: заголовок без строк")
+                continue
+            if len(lines) > TITLE_LINES:
+                lost.append(f"{name}: строк в заголовке {len(lines)}, "
+                            f"больше {TITLE_LINES} не влезает — "
+                            "лишние отброшены")
+                lines = lines[:TITLE_LINES]
+            long = [s for s in lines if len(s) > TITLE_LINE]
+            if long:
+                lost.append(f"{name}: строка длиннее {TITLE_LINE} знаков — "
+                            + ", ".join(f"«{s[:24]}»" for s in long[:2]))
+                continue
+            if len(script) > SCRIPT_MAX:
+                lost.append(f"{name}: рукописный акцент длиннее "
+                            f"{SCRIPT_MAX} знаков — слой пойдёт без него")
+                script = ""
+            # Стрелка без акцента показывает в пустоту: рисуется она от
+            # рукописного слова, и без него ей неоткуда начаться.
+            if arrow != "none" and not script:
+                arrow = "none"
+                lost.append(f"{name}: стрелка без рукописного акцента — "
+                            "ей неоткуда начаться")
+
+        if kind == "chrome":
+            if not lines:
+                lost.append(f"{name}: плашка без текста")
+                continue
+            head = lines[0]
+            note = lines[1] if len(lines) > 1 else ""
+            if len(head) > CHROME_HEAD or len(note) > CHROME_NOTE:
+                lost.append(f"{name}: текст плашки не влезает в строку — "
+                            f"имя до {CHROME_HEAD} знаков, подпись до "
+                            f"{CHROME_NOTE}")
+                continue
+            lines = [head] + ([note] if note else [])
+
+        url = str(d.get("url") or "").strip()
+        marks = [str(s).strip() for s in (d.get("marks") or [])
+                 if str(s).strip()]
+        if kind == "proof":
+            if not url:
+                lost.append(f"{name}: снимок без адреса страницы")
+                continue
+            if panelshot.safe_url(url) is None:
+                lost.append(f"{name}: адрес «{url[:40]}» не годится — "
+                            "снимка не будет")
+                continue
+            # Потолок считается после адреса, а не до. Иначе негодный
+            # адрес во втором снимке назывался бы человеку потолком, и
+            # он пошёл бы убирать лишний слой вместо того, чтобы
+            # поправить ссылку.
+            if proofs >= PROOFS_MAX:
+                lost.append(f"{name}: снимок страницы в ролике уже есть — "
+                            "второй читать некогда")
+                continue
+            if not marks:
+                lost.append(f"{name}: снимок без строк для подсветки — "
+                            "страница поедет карточкой, без маркера")
+            if len(marks) > MARKS_MAX:
+                lost.append(f"{name}: строк подсветки {len(marks)}, "
+                            f"больше {MARKS_MAX} не читается — "
+                            "лишние отброшены")
+                marks = marks[:MARKS_MAX]
+            proofs += 1
+        else:
+            url, marks = "", []
+
+        good.append(Overlay(
+            phrase=phrase, kind=kind,
+            until=str(d.get("until") or "").strip(),
+            lines=lines, script=script if kind == "title" else "",
+            arrow=arrow if kind == "title" else "none",
+            url=url, marks=marks,
+            open_phrase=(str(d.get("open_phrase") or "").strip()
+                         if kind == "proof" else "")))
+    return good, lost
+
+
+async def layers(chat_id: int, words: list[Any], *,
+                 want: int = LAYERS_WANT, ask: str = ""
+                 ) -> tuple[list[Overlay], list[str]]:
+    """Слои поверх дубля по расшифровке."""
+    b = desk.brand(chat_id)
+    if b is None:
+        raise NoWork("профиль бренда ещё не собран")
+
+    prompt = (
+        "## Задача\n\n"
+        "Собери слои поверх этого дубля — правила в твоей секции "
+        f"«Третья работа: слои поверх дубля». Слоёв не больше {want}. "
+        "Кадр не делится: дубль идёт во весь экран, панели здесь нет, и "
+        "границы кусков сейчас не нужны — это отдельная работа.\n\n"
+        "Каждый слой стоит на фразе из расшифровки и на ней же "
+        "кончается: секунды считает код.\n\n"
+        "## Расшифровка\n\n" + transcript(words))
+    if (ask or "").strip():
+        prompt += f"\n\n## Что сказал человек\n\n{ask.strip()}"
+    prompt += "\n\nОтветь одним JSON-объектом в формате из твоей секции."
+
+    answer = await agent.ask("cut", chat_id, prompt, brand_name=b.name(),
+                             profile=desk.profile(b, SECTIONS),
+                             max_tokens=LAYERS_TOKENS, schema=LAYERS_SCHEMA)
+    data = agent.parse_json(answer, who="монтажёр")
+
+    good, lost = _layers(list(data.get("layers") or []))
+    lost += [str(n) for n in (data.get("notes") or []) if str(n).strip()]
+    log.info("слои: взято %s, отброшено %s", len(good), len(lost))
+    return good[:want], lost

@@ -112,7 +112,7 @@ const CaptionPage: React.FC<{
           textAlign: 'center',
           fontFamily: FONT,
           fontWeight: 800,
-          fontSize: look.fontSize ?? 68,
+          fontSize: look.fontSize ?? 84,
           lineHeight: 1.15,
           color: '#fff',
           whiteSpace: 'pre-wrap',

@@ -15,6 +15,7 @@ import {
   useVideoConfig,
 } from 'remotion';
 import type {MotionBlock, MotionProps} from './motionProps';
+import {BASE as GRADE} from './MiniReel';
 
 const FONT = 'system-ui, -apple-system, Helvetica, sans-serif';
 
@@ -655,7 +656,13 @@ const Screen: React.FC<{
                 muted
                 playbackRate={rate}
                 objectFit="cover"
-                style={{position: 'absolute', inset: 0, width: '100%', height: '100%'}}
+                style={{
+                  position: 'absolute', inset: 0, width: '100%', height: '100%',
+                  // Сгенерированный материал приходит в своём воздухе и
+                  // рядом со снятым дублем читается чужим кадром. Ретушь
+                  // та же, что у мини-роликов, и приезжает оттуда же.
+                  ...(block.graded ? {filter: GRADE} : null),
+                }}
               />
             </Freeze>
             {marked && block.markPath && block.spot ? (

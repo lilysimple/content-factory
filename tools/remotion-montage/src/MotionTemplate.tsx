@@ -2,6 +2,7 @@ import React from 'react';
 import {AbsoluteFill, Sequence, staticFile, useVideoConfig} from 'remotion';
 import {Captions} from './Captions';
 import {Clip} from './Clip';
+import {Music} from './Music';
 import {Panel} from './Panel';
 import {OutroCard} from './ReelTemplate';
 import {SplitCover} from './SplitCover';
@@ -72,6 +73,16 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
 
   return (
     <AbsoluteFill style={{backgroundColor: props.panelColor}}>
+      {/* Та же дорожка, что у обычного ролика, и теми же уровнями:
+          см. `Music.tsx`. */}
+      {props.music ? (
+        <Music
+          music={props.music}
+          introSeconds={introFrames / fps}
+          bodySeconds={bodyFrames / fps}
+          outroSeconds={props.cta ? props.outroSeconds : 0}
+        />
+      ) : null}
       {introFrames > 0 && props.coverPath ? (
         <Sequence from={0} durationInFrames={introFrames} name="Обложка">
           <SplitCover
@@ -282,7 +293,11 @@ export const MotionTemplate: React.FC<MotionProps> = (props) => {
             look={{
               top: captionLine,
               above: panelOnTop,
-              fontSize: Math.round(height * 0.032),
+              // Поднят с 0.032 вместе с `footage.PAGE_WORDS` (4 → 2):
+              // страница вдвое короче, и в ту же ширину влезает буква
+              // крупнее. Замер 04.11 по чужим роликам — слово в кадре
+              // стоит одно и крупно, и читается оно легче горсти мелких.
+              fontSize: Math.round(height * 0.040),
               uppercase: true,
               plate: true,
               // Кремовое свечение: строка стоит на кремовой панели, и

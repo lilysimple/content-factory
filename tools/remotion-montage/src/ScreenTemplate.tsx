@@ -78,7 +78,7 @@ export const ScreenTemplate: React.FC<ScreenProps> = ({
         pages={pages}
         accent={accentColor}
         textColor={captionTextColor}
-        look={{top: captionTop, fontSize: 58, plate: true, shadow: 'dark'}}
+        look={{top: captionTop, fontSize: 72, plate: true, shadow: 'dark'}}
       />
     </AbsoluteFill>
   );

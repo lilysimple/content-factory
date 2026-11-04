@@ -3,6 +3,7 @@
     ./.venv/bin/python tools/panel.py            # http://127.0.0.1:8765
     ./.venv/bin/python tools/panel.py --port 9000
     ./.venv/bin/python tools/panel.py --once     # один снимок в JSON, без сервера
+    ./.venv/bin/python tools/panel.py --demo     # завод в работе понарошку
 
 Страница сама опрашивает `/state.json` раз в две секунды и рисует цех
 в 3D: кирпич, бетон, фермы, окна, лампы на шнурах, а под ними —
@@ -289,9 +290,19 @@ def main() -> int:
                     help="по умолчанию только эта машина")
     ap.add_argument("--once", action="store_true",
                     help="напечатать снимок в JSON и выйти")
+    ap.add_argument("--demo", action="store_true",
+                    help="придуманный завод в работе, для скринкаста: "
+                         "базу не читает, помечает себя плашкой")
     args = ap.parse_args()
 
-    if not cfg.db_path.exists():
+    if args.demo:
+        # Источник снимка подменяется целиком: демо не смешивается с
+        # живыми числами ни в одном поле, иначе скринкаст покажет смесь.
+        from tools import panel_demo
+        globals()["snapshot"] = panel_demo.snapshot
+        print("режим демонстрации: числа придуманы, база не читается",
+              file=sys.stderr)
+    elif not cfg.db_path.exists():
         print(f"базы нет: {cfg.db_path}", file=sys.stderr)
         return 1
     if args.once:

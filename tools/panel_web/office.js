@@ -337,7 +337,8 @@ function cat(color, pts, speed){
 // пустует — если бы он оставался сидеть, прогулка читалась бы как двойник.
 function walker(seat){
   const g = new THREE.Group();
-  const shirt = mat(SHIRT[0], 0.9), skin = mat(SKIN[0], 0.9);
+  const shirt = mat(SHIRT[seat % SHIRT.length], 0.9);
+  const skin = mat(SKIN[seat % SKIN.length], 0.9);
   box(0.46, 0.62, 0.3, shirt, 0, 1.0, 0, g);                 // корпус стоя
   const head = box(0.26, 0.29, 0.26, skin, 0, 1.45, 0, g);
   box(0.28, 0.1, 0.28, MATS.hair, 0, 1.56, 0, g);
@@ -516,7 +517,7 @@ function station(seat){
 }
 
 const seats = [];
-let runner = null;      // ассистент, разносящий задачи
+const runners = [];     // кто ходит по цеху: руководитель и аналитик
 const greens = [];      // пальмы и плети: их качает один и тот же ветер
 const cats = [];
 function build(desks){
@@ -530,7 +531,10 @@ function build(desks){
   for (const [x, z] of [[-7.5, -4.4], [-0.5, -4.4], [6.5, -4.4]])
     greens.push(ivy(x, 4.6, z));
 
-  runner = walker(desks.findIndex(d => d.key === "director"));
+  for (const key of ["director", "research"]){
+    const seat = desks.findIndex(d => d.key === key);
+    if (seat >= 0) runners.push(walker(seat));
+  }
 
   cats.push(cat(0x6b6560, [[-11, -4.6], [-3, -5.6], [5, -4.8], [11, -2],
                            [9, 6], [0, 8], [-9, 7], [-13, 1]], 0.026));
@@ -579,10 +583,12 @@ function paint(d){
   if (!seats.length) build(d.desks);
   latest = d;
 
+  document.getElementById("demo").hidden = !d.demo;
   const p = d.plant, ok = p.state === "running";
   document.getElementById("pulse").className = "dot" + (ok ? "" : " off");
   document.getElementById("head").textContent =
-    (ok ? "смена идёт" : "завод " + p.state) + (p.pid ? `, pid ${p.pid}` : "") +
+    (ok ? "смена идёт" : "завод " + p.state) +
+    (p.pid && !d.demo ? `, pid ${p.pid}` : "") +
     (p.log_quiet_s != null ? ` · в журнале тихо ${secs(p.log_quiet_s)}` : "") +
     ` · снимок ${d.at}`;
 
@@ -591,7 +597,8 @@ function paint(d){
     ["свободных полос", Math.max(0, d.lanes.total - d.lanes.busy.length), "free"],
     ["в очереди", d.waiting.length + d.taken.length, "q"],
     ["прогонов сегодня", d.today.n, "tn"],
-    ["центов сегодня", Math.round(d.today.cost * 100), "tc"],
+    [d.today.cost >= 1 ? "долларов сегодня" : "центов сегодня",
+     Math.round(d.today.cost >= 1 ? d.today.cost : d.today.cost * 100), "tc"],
     ["тем в работе", (d.themes.idea || 0) + (d.themes.draft || 0), "th"],
     ["готово", d.themes.ready || 0, "rd"],
     ["опубликовано", d.posts.pub || 0, "pb"]];
@@ -702,8 +709,9 @@ function frame(){
     s.ring.material.opacity += (op - s.ring.material.opacity) * 0.1;
     s.ring.material.color.setHex(work ? 0x2f9e6e : stale ? 0xc0453a : 0xd79b2a);
 
-    const away = runner && runner.seat === i && runner.state !== "sit";
-    (away ? runner.head : s.head).getWorldPosition(v);
+    const out = runners.find(w => w.seat === i && w.state !== "sit");
+    const away = Boolean(out);
+    (away ? out.head : s.head).getWorldPosition(v);
     v.y += away ? 0.72 : work ? 1.72 : queue ? 1.5 : 1.08;
     const p = v.clone().project(camera);
     const vis = p.z < 1;
@@ -717,7 +725,8 @@ function frame(){
     const tm = s.tag.querySelector("[data-tm]");
     if (tm && s.t0) tm.textContent = secs(Math.floor((Date.now() - s.t0) / 1000));
   }
-  if (runner && latest) walkStep(runner, latest.desks, Math.min(0.05, dt), t);
+  if (latest)
+    for (const w of runners) walkStep(w, latest.desks, Math.min(0.05, dt), t);
 
   // сквозняк из окон: пальмы и плети качаются медленно и вразнобой
   for (const gr of greens){

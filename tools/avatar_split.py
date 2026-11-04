@@ -37,6 +37,12 @@
        "lines": ["brand-content-pipeline", "голос и план бренда"]}
     ]
 
+Поле `video` кладёт в карточку готовый клип — например
+сгенерированный: сорт становится `media`, файл уезжает в `public/`
+рядом с головой, а ретушь мини-роликов ложится на него по `graded`
+(по умолчанию она включена: сгенерированный кадр приходит в своём
+воздухе и рядом со снятым дублем читается чужим).
+
 `kind` по умолчанию `icon`: имя крупно пружиной, пояснение мельче.
 Остальные сорта — те же, что у монтажа (`montage.MOTION_KINDS`).
 """
@@ -53,6 +59,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from orchestrator import (footage, frames, montage,               # noqa: E402
                           panelshot)
+from storage import brand as brands                               # noqa: E402
+from config import cfg                                            # noqa: E402
 
 # Воздух между карточками: панель гаснет до того, как человек назвал
 # следующую. Без него карточка подменяется на полуслове, и глаз читает
@@ -143,7 +151,15 @@ def _blocks(cards: list[dict], words: list[dict],
             points.append(point)
         if points:
             block["items"] = points
-        if card.get("image") or card.get("url"):
+        if card.get("video"):
+            # Сгенерированный клип в карточке панели. Сорт `media` —
+            # тот же, которым панель показывает запись из альбома:
+            # дорожку HyperFrames он отменяет (`frames.track_spec`), и
+            # остальные карточки собираются поодиночке.
+            block["kind"] = "media"
+            block["videoPath"] = "clip.mp4"
+            block["graded"] = bool(card.get("graded", True))
+        elif card.get("image") or card.get("url"):
             # Сам файл приедет отдельно (`shots`), здесь только отметка,
             # что картинка у блока есть. Адрес (`url`) — это страница, и
             # она идёт в окно браузера; присланный файл — фотография, и
@@ -191,7 +207,7 @@ def props(video_name: str, probe: footage.Probe, blocks: list[dict],
 
 async def build(video: Path, cards: list[dict], out: Path, *,
                 words_cache: Path | None = None, fps: int = 30,
-                head: str = "bottom",
+                head: str = "bottom", slug: str = "",
                 split: float = montage.MOTION_SPLIT) -> list[str]:
     """Собрать ролик. Возвращает строки «что не сошлось», файл пишет сам."""
     notes: list[str] = []
@@ -211,6 +227,16 @@ async def build(video: Path, cards: list[dict], out: Path, *,
                 encoding="utf-8")
     if not words:
         raise NoBlocks("в записи не разобрано ни одного слова")
+
+    # Словарь субтитров бренда. Без него имена приезжают как слышно —
+    # «Клот» вместо Claude, — и правка идёт руками на каждом ролике.
+    # Монтаж этот словарь применяет (`montage._relex`), а этот вход
+    # ходил мимо него: ошибка одна и та же на каждой голове.
+    rules = montage.lexicon(_brand(slug)) if slug else []
+    if rules:
+        words, fixed = footage.relex(words, rules)
+        if fixed:
+            notes.append(f"{montage.LEX_NOTE}{fixed}")
 
     # Оборванный файл виден здесь и только здесь: ffprobe читает длину из
     # заголовка, а whisper — из данных.
@@ -269,6 +295,24 @@ async def build(video: Path, cards: list[dict], out: Path, *,
         block["imagePath"] = name
         extra[name] = shots[i]
 
+    # Клип карточки: имя в public/ и его длина. Длину меряем, а не
+    # верим карточке на слово — короче блока он встаёт последним кадром,
+    # длиннее ускоряется, и обе арифметики считает шаблон по этому числу.
+    media: dict[str, Path] = {}
+    for i, card in enumerate(cards):
+        if not card.get("video"):
+            continue
+        clip = Path(str(card["video"])).expanduser()
+        if not clip.exists():
+            raise NoBlocks(f"карточка {i + 1}: клипа {clip} нет")
+        shot = await footage.probe(clip)
+        name = f"media-{out.stem}-{i}{clip.suffix.lower()}"
+        blocks[i]["videoPath"] = name
+        blocks[i]["videoSeconds"] = round(shot.duration, 3)
+        blocks[i]["mediaWidth"], blocks[i]["mediaHeight"] = (shot.width,
+                                                             shot.height)
+        media[name] = clip
+
     name = f"avatar-{out.stem}{video.suffix}"
     payload = props(name, probe, blocks, pages, fps=fps, head=head,
                     split=split)
@@ -278,6 +322,7 @@ async def build(video: Path, cards: list[dict], out: Path, *,
     frame_count = max(1, round(probe.duration * fps))
 
     staged = {name: video}
+    staged.update(media)
     staged.update({blocks[i]["clipPath"]: clip for i, clip in clips.items()})
     staged.update(extra)
     if track is not None:
@@ -292,6 +337,12 @@ async def build(video: Path, cards: list[dict], out: Path, *,
     return notes
 
 
+def _brand(slug: str):
+    """Папка бренда по slug. Нет её — словаря нет, и это строка, не падение."""
+    store = brands.Store(cfg.brands_path)
+    return store.get(slug)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Сплит из готовой говорящей головы.")
@@ -302,6 +353,9 @@ def main() -> int:
     ap.add_argument("--words", default="",
                     help="json расшифровки: есть — берётся оттуда, "
                          "нет — снимется и ляжет туда")
+    ap.add_argument("--brand", default="",
+                    help="slug бренда: из его montage/subtitles.md берётся "
+                         "словарь замен для расшифровки")
     ap.add_argument("--head", default="bottom",
                     choices=list(montage.MOTION_HEADS),
                     help="где в кадре человек")
@@ -325,7 +379,7 @@ def main() -> int:
         notes = asyncio.run(build(
             video, cards, out,
             words_cache=Path(args.words).expanduser() if args.words else None,
-            head=args.head, split=args.split))
+            head=args.head, slug=args.brand, split=args.split))
     except (NoBlocks, footage.NoWhisper, footage.NoFfmpeg,
             montage.NoRenderer, montage.NotInstalled) as e:
         print(str(e), file=sys.stderr)

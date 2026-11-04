@@ -61,7 +61,8 @@ def answer(mechanics=None, facts=None, gaps=None, flops=None,
     return json.dumps({
         "news": news if news is not None else [
             {"what": "Вышел открытый стандарт подключения инструментов",
-             "means": "свои таблицы можно отдать модели без разработчика"},
+             "means": "свои таблицы можно отдать модели без разработчика",
+             "do": "подключи свою таблицу к Claude и спроси по ней цифру"},
         ],
         "rivals": rivals if rivals is not None else
                   ["Разборы со своим экраном собирают вдвое больше сохранений"],
@@ -166,19 +167,27 @@ async def main() -> None:
     print("\n3в. Новости недели, соседи и потолок Telegram")
     dg = research.Digest(stats=research.measure(channel([10, 20, 30])),
                          week="2026-W37")
-    dg.news = [{"what": f"Новость {i}", "means": f"следствие {i}"}
-               for i in range(1, 6)]
+    dg.news = [{"what": f"Новость {i}", "means": f"следствие {i}",
+                "do": f"сделай шаг {i}"} for i in range(1, 8)]
     dg.rivals = ["У соседа по нише зашли разборы со своим экраном"]
     text = research.card(dg)
-    check("новости в карточке", "Новости недели" in text and
-          text.count("следствие") == 5, text[:400])
+    check("главное в карточке", "<b>Главное</b>" in text and
+          text.count("следствие") == 7, text[:400])
+    check("шаг на неделю в карточке", text.count("→ сделай шаг") == 7,
+          text[:400])
+    check("главное идёт раньше своих цифр",
+          text.index("<b>Главное</b>") < text.index("<b>Свои цифры</b>"),
+          text[:600])
     check("соседи в карточке", "залетало у соседей" in text, text[:400])
-    check("новости и в файле", "## Новости недели" in research.to_markdown(dg))
+    file_text = research.to_markdown(dg)
+    check("главное и в файле", "## Главное за неделю" in file_text and
+          "Что сделать: сделай шаг 1" in file_text, file_text[:600])
 
     # Потолок: длинная сводка режется, но блок дыр переживает срез.
     big = research.Digest(stats=research.measure(channel([10, 20, 30])),
                           week="2026-W37")
-    big.news = [{"what": "Н" * 60, "means": "ю" * 400} for _ in range(5)]
+    big.news = [{"what": "Н" * 60, "means": "ю" * 400, "do": "д" * 200}
+                for _ in range(7)]
     big.facts = ["ю" * 400] * 3
     big.rivals = ["ю" * 400] * 3
     big.mechanics = [{"name": "M", "what": "ю" * 400,
@@ -189,20 +198,44 @@ async def main() -> None:
           str(len(fat)))
     check("дыры пережили срез", "Чего не хватило" in fat and
           "Скринов статистики нет." in fat, fat[-300:])
+    check("свои цифры пережили срез", "<b>Свои цифры</b>" in fat and
+          "медиана <b>20" in fat, fat[-500:])
     check("срез назван вслух", "не поместилось" in fat or
           "в файле" in fat, fat[-300:])
 
     # ── 3г. новость без следствия не выдаётся за готовую ──────────────
     print("\n3г. Новость без «что это меняет» в сводку не идёт")
     fake_fetch({"https://t.me/s/own": channel([10, 20, 30, 40, 50])})
-    install(answer(news=[{"what": "Кто-то выпустил модель", "means": ""},
-                         {"what": "И ещё одну", "means": "считать дешевле"}]))
+    install(answer(news=[
+        {"what": "Кто-то выпустил модель", "means": "", "do": "попробуй"},
+        {"what": "И ещё одну", "means": "считать дешевле", "do": ""},
+        {"what": "И третью", "means": "дешевле вдвое",
+         "do": "следить за развитием"},
+        {"what": "И четвёртую", "means": "считать дешевле",
+         "do": "пересчитай смету агента по новой цене"}]))
     reg.clear()
     await research.run(reg, CHAT, "дай сводку")
     seen = reg.texts()
-    check("новость без следствия не в новостях",
+    check("новость без следствия не в главном",
           "Кто-то выпустил модель</b>" not in seen, seen[:400])
-    check("и названа дырой", "«что это меняет»" in seen, seen[-400:])
+    check("и названа дырой", "«что это даёт в работе»" in seen, seen[-600:])
+    check("новость без шага не в главном", "И ещё одну</b>" not in seen,
+          seen[:400])
+    check("и названа дырой", "без шага «что сделать»" in seen, seen[-600:])
+    check("вялый шаг отклонён", "И третью</b>" not in seen, seen[:400])
+    check("и назван наблюдением", "это наблюдение, а не шаг" in seen,
+          seen[-600:])
+    check("полная новость прошла", "И четвёртую</b>" in seen, seen[:600])
+
+    # Потолок новостей: восьмая не берётся, и слот не раздувается.
+    install(answer(news=[{"what": f"Повод {i}", "means": f"даёт {i}",
+                          "do": f"сделай {i}"} for i in range(1, 10)]))
+    reg.clear()
+    await research.run(reg, CHAT, "дай сводку")
+    seen = reg.texts()
+    check("семь поводов взяты", seen.count("даёт ") == research.NEWS_MAX,
+          str(seen.count("даёт ")))
+    check("восьмой повод не взят", "Повод 8</b>" not in seen, seen[:400])
 
     # ── 4. цифры уехали в промпт готовыми ─────────────────────────────
     print("\n4. Модель получает цифры, а не считает их")
@@ -265,7 +298,11 @@ async def main() -> None:
     await research.run(reg, CHAT, "дай сводку")
     check("сказано, что не открылось", "не открылось" in reg.texts(),
           reg.texts()[:200])
-    check("статистики не выдумано", "медиана" not in reg.last().text.lower(),
+    # Проверяем именно свой Telegram: медиана Instagram в карточке может
+    # быть законной — её кладёт кэш профиля, а не упавшая лента канала.
+    check("статистики по каналу не выдумано",
+          "Цифр по своему каналу нет" in reg.last().text and
+          f"медиана <b>0 {research.METRICS['views']}" not in reg.last().text,
           reg.last().text[:200])
 
     # ── 9. читать нечего вовсе ────────────────────────────────────────

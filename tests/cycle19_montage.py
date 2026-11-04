@@ -84,7 +84,8 @@ def main() -> None:
     flow = [{"text": f"с{i}", "start": i * 0.4, "end": i * 0.4 + 0.35}
             for i in range(8)]
     pages = footage.pages(flow)
-    check("страницы по четыре слова", [len(p["words"]) for p in pages] == [4, 4],
+    check("страницы по два слова",
+          [len(p["words"]) for p in pages] == [footage.PAGE_WORDS] * 4,
           str([len(p["words"]) for p in pages]))
 
     torn = [{"text": "раз", "start": 0.0, "end": 0.4},
@@ -156,6 +157,37 @@ def main() -> None:
           abs(float(footage.THRESH_RX.search(js).group(1)) + 31.42) < 0.01)
     check("тишина без звука ловится как -inf",
           footage.THRESH_RX.search('{"input_thresh" : "-inf"}').group(1) == "-inf")
+
+    print("\n10a. Громкость выхода читается и правится")
+    quiet = footage.read_loud(
+        '{"input_i" : "-29.29", "input_tp" : "-11.07", "input_lra" : "6.00",'
+        ' "input_thresh" : "-39.40", "target_offset" : "-0.21"}')
+    check("замер разобран целиком",
+          quiet is not None and abs(quiet.i + 29.29) < 0.01
+          and abs(quiet.tp + 11.07) < 0.01 and abs(quiet.offset + 0.21) < 0.01,
+          str(quiet))
+    check("тихий ролик выровнять надо", not footage.levelled(quiet))
+    flt = footage.loud_filter(quiet)
+    check("во втором проходе измеренное подставлено",
+          "measured_I=-29.29" in flt and "measured_TP=-11.07" in flt
+          and f"I={footage.TARGET_LUFS}" in flt, flt)
+    check("второй проход линейный, а не динамический",
+          "linear=true" in flt, flt)
+    ok = footage.read_loud(
+        '{"input_i" : -14.2, "input_tp" : -1.4, "input_lra" : 6.0,'
+        ' "input_thresh" : -24.0, "target_offset" : 0.1}')
+    check("кавычки у чисел не обязательны", ok is not None, str(ok))
+    check("ровную громкость второй раз не жмём", footage.levelled(ok))
+    check("тишина замером не считается",
+          footage.read_loud('{"input_i" : "-inf", "input_tp" : "-inf",'
+                            ' "input_lra" : "0.00",'
+                            ' "input_thresh" : "-inf",'
+                            ' "target_offset" : "0.0"}') is None)
+    check("упавший ffmpeg замером не считается",
+          footage.read_loud("ffmpeg не отработал") is None)
+    check("цель громкости — та, к которой приводит Instagram",
+          footage.TARGET_LUFS == -14.0 and footage.TARGET_TP == -1.0,
+          str(footage.TARGET_LUFS))
 
     print("\n11. Кадр на обложку берётся самый спокойный")
     track = [footage.Focus(1.0, 0.5, 0.5, 900.0),
@@ -1314,8 +1346,8 @@ def panel() -> None:
             for i, t in enumerate(["наша", "задача", "продолжает", "заключаться"])]
     got_pages = footage.pages(long)
     check("четыре длинных слова не встают на одну страницу",
-          len(got_pages) == 2, str([[w["text"] for w in p["words"]]
-                                     for p in got_pages]))
+          len(got_pages) > 1, str([[w["text"] for w in p["words"]]
+                                   for p in got_pages]))
     check("ни одна страница не длиннее потолка знаков",
           all(len(" ".join(w["text"] for w in p["words"])) <= footage.PAGE_CHARS
               for p in got_pages), "потолок")

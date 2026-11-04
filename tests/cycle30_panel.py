@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import sqlite3
+import time
+from pathlib import Path
 
 import harness
 from harness import CHAT, check, report
@@ -105,6 +107,39 @@ def main() -> int:
     check("зависшая полоса не считается занятой",
           panel.snapshot()["lanes"]["busy"] == [],
           str(panel.snapshot()["lanes"]))
+
+    # Демонстрация для скринкаста: своя выдумка, база не читается вовсе,
+    # и снимок обязан называть себя демонстрацией — иначе запись с
+    # придуманными числами уедет в презентацию как живая.
+    from tools import panel_demo                                  # noqa: E402
+    shot = panel_demo.snapshot()
+    check("демо называет себя демонстрацией", shot.get("demo") is True)
+    check("у демо те же ключи, что у живого снимка",
+          set(panel.snapshot()) - {"demo"} <= set(shot),
+          str(set(panel.snapshot()) - set(shot)))
+    check("демо не зовёт базу",
+          # Путь от корня репозитория, а не от текущей папки: `run.py`
+          # запускает циклы из `tests/`, и относительный путь роняет
+          # весь цикл `FileNotFoundError` вместо одной проверки.
+          "sqlite3" not in (harness.REPO / "tools" / "panel_demo.py")
+          .read_text("utf-8"))
+    # Сценарий прокручивается целиком: он обязан уважать полосы моста,
+    # иначе демо показывает завод, которого не бывает.
+    seen, over = set(), []
+    base = panel_demo.START
+    for t in range(0, panel_demo.CYCLE, 2):
+        panel_demo.START = time.time() - t
+        shot_t = panel_demo.snapshot()
+        live = [x for x in shot_t["desks"] if x["state"] == "work"]
+        seen |= {x["key"] for x in live}
+        # Марк занят всегда, пока идёт любой прогон: он не полоса.
+        if len(shot_t["running"]) > 2:
+            over.append(t)
+    panel_demo.START = base
+    check("за круг демо показывает все роли моста",
+          {"research", "plan", "post", "reels", "design", "trend", "idea"}
+          <= seen, str(sorted(seen)))
+    check("демо не нарушает потолок полос моста", not over, str(over[:3]))
 
     conn = panel._db()
     try:

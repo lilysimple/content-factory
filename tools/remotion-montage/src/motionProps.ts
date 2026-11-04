@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {musicProps} from './props';
 
 // Контракт входа композиции `Motion` — сплит: инфографика и говорящая
 // голова в одном кадре. Граница та же, что у `Reel`: питон собирает
@@ -96,6 +97,10 @@ const block = z.object({
   // кадром, а не гаснет.
   videoPath: z.string().optional(),
   videoSeconds: z.number().optional(),
+  // Материал не снят, а сгенерирован: ему нужна та же ретушь, что и
+  // мини-роликам (`MiniReel.BASE`, снята с референсных кадров). Снятое
+  // этого флага не несёт — оно уже в своём свете.
+  graded: z.boolean().optional(),
   // Мерки кадра материала: вписать его, не растягивая.
   mediaWidth: z.number().optional(),
   mediaHeight: z.number().optional(),
@@ -207,6 +212,11 @@ export const motionPropsSchema = z.object({
   height: z.number().default(1920),
   fps: z.number().default(30),
   outroSeconds: z.number().default(1.8),
+
+  // Музыка под сплитом. Схема и уровни те же, что у обычного ролика
+  // (`props.ts`): в канал они идут вперемешку, и разная подложка у двух
+  // форматов слышалась бы как два разных канала.
+  music: musicProps.optional(),
 });
 
 export type MotionProps = z.infer<typeof motionPropsSchema>;

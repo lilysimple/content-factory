@@ -46,6 +46,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
+from validators import check_voice
+
 log = logging.getLogger("trends")
 
 CACHE = "research/trends"
@@ -87,7 +89,28 @@ HOT = 2.0
 
 # Доля роликов с просмотрами, при которой медиана считается по просмотрам.
 # Ниже — по лайкам, и партия об этом говорит.
+#
+# Замер 23.10 показал, что на деле эта ветка не выбирается никогда:
+# прогон по профилю отдаёт `videoPlayCount` и `videoViewCount` пустыми у
+# **всех** записей — 453 рилса из 453 по четырнадцати аккаунтам. Покрытие
+# ноль, значит медиана всегда считается по лайкам. Порог оставлен: он
+# верен, просто сборщик профилей до него не доезжает, а хэштег-скрапер
+# меряли не им.
 VIEWS_ENOUGH = 2 / 3
+
+# Отклик: лайки, делённые на показы. Нужен затем, что кратность к медиане
+# меряет раздачу, а не попадание, и для решения «копировать ли приём»
+# этого мало. Замер ниши психосоматики 23.10, 27 роликов от ста тысяч
+# показов: ролик с оптической иллюзией собрал 1 249 077 показов при
+# отклике 0,28 %, а разбор по теме у того же автора — 113 199 показов при
+# 3,54 %. По кратности первый пройдёт в выдачу первым, хотя копировать
+# надо второй, и приём там вообще не из ниши.
+#
+# Две границы, и обе называются в выдаче словами: ниже нижней — раздача
+# вхолостую, выше верхней — ролик попал в своего человека. Между ними не
+# утверждается ничего.
+LIVE_LOW = 0.01
+LIVE_HIGH = 0.04
 
 TAG = re.compile(r"^#?([0-9A-Za-z_Ѐ-ӿ]{2,60})$")
 HANDLE = re.compile(r"^@?([A-Za-z0-9._]{1,30})$")
@@ -175,6 +198,7 @@ class Reel:
     seconds: float | None = None
     followers: int | None = None
     rate: float = 0.0            # во сколько раз выше медианы источника
+    plays: int | None = None     # показы, добранные поштучно по ссылке
 
     @property
     def hook(self) -> str:
@@ -182,6 +206,32 @@ class Reel:
         for line in self.caption.splitlines():
             if line.strip():
                 return line.strip()
+        return ""
+
+    @property
+    def live(self) -> float | None:
+        """Отклик: лайки на показ. Нет показов или лайков — прочерк.
+
+        Считается от `plays`, а не от `views`, и это не придирка к имени.
+        `views` приезжает из общей партии и у профилей всегда пуст;
+        `plays` добирается поштучно и есть только у кандидатов. Путать их
+        нельзя: отклик, посчитанный от пустого поля, молча станет нулём и
+        отправит живой ролик в «раздачу вхолостую».
+        """
+        if not self.plays or self.likes is None:
+            return None
+        return self.likes / self.plays
+
+    @property
+    def live_word(self) -> str:
+        """Отклик словом. Между границами — пусто, а не «средне»."""
+        v = self.live
+        if v is None:
+            return ""
+        if v < LIVE_LOW:
+            return "вхолостую"
+        if v >= LIVE_HIGH:
+            return "попал"
         return ""
 
 
@@ -264,6 +314,15 @@ def _metric(items: list[Reel]) -> str:
 
 
 def _value(reel: Reel, metric: str) -> int | None:
+    """Число, которым меряется партия.
+
+    `plays` сюда не попадает намеренно, и это главное здесь. Добранные
+    показы есть только у кандидатов, то есть у верхушки партии. Медиана,
+    посчитанная по ним, была бы медианой выбросов: всё остальное мгновенно
+    перестало бы быть выбросом, и контур сказал бы «не залетело ничего»
+    ровно там, где залетело. Показы добираются, чтобы их прочитала роль,
+    а не чтобы ими мерить.
+    """
     return reel.views if metric == "просмотры" else reel.likes
 
 
@@ -347,6 +406,7 @@ def read(b, t: Target) -> tuple[Batch, str]:
             comments=_int(row.get("comments")),
             seconds=_float(row.get("seconds")),
             followers=_int(row.get("followers")),
+            plays=_int(row.get("plays")),
         ))
     _window(batch)
     measure(batch)
@@ -394,12 +454,18 @@ CAPTION_CUT = 400
 def _row(r: Reel, metric: str) -> str:
     val = _value(r, metric)
     num = f"{val:,}".replace(",", " ") if val is not None else "—"
+    plays = f"{r.plays:,}".replace(",", " ") if r.plays else "—"
+    live = r.live
+    resp = f"{live * 100:.2f} %" if live is not None else "—"
+    if word := r.live_word:
+        resp += f", {word}"
     secs = f"{r.seconds:.0f} с" if r.seconds else "—"
     subs = f"{r.followers:,}".replace(",", " ") if r.followers else "—"
     when = f"{r.date:%d.%m}" if r.date else "—"
     caption = " ".join(r.caption.split())[:CAPTION_CUT]
-    return (f"| {r.rate:g}× | {num} | {secs} | @{r.owner or '—'} | {subs} | "
-            f"{when} | {r.url or '—'} | {caption or '—'} |")
+    return (f"| {r.rate:g}× | {num} | {plays} | {resp} | {secs} | "
+            f"@{r.owner or '—'} | {subs} | {when} | {r.url or '—'} | "
+            f"{caption or '—'} |")
 
 
 def digest(b) -> tuple[list[str], list[str]]:
@@ -421,7 +487,18 @@ def digest(b) -> tuple[list[str], list[str]]:
             "сам их не пересчитывай и «залетевшим» ничего другого не "
             "называй.", "",
             "Метрика у каждой цели своя и подписана. Просмотры одного "
-            "источника с лайками другого не складываются."]
+            "источника с лайками другого не складываются.", "",
+            "Столбец «Показы» добран поштучно и только у кандидатов: в "
+            "медиану он не входит, сравнивать ролики по нему между собой "
+            "нельзя. Прочерк значит «не добирали», а не «ноль».", "",
+            "Столбец «Отклик» это лайки на показ, и читать его надо раньше "
+            f"кратности. Ниже {LIVE_LOW * 100:g} % помечено «вхолостую»: "
+            "ролик разошёлся, но людям не понравился, и копировать там "
+            f"нечего. От {LIVE_HIGH * 100:g} % помечено «попал». Миллион "
+            "показов при отклике в четверть процента это предупреждение, а "
+            "не образец: так выглядят заимствованные вирусные трюки, "
+            "которые по кратности проходят первыми, а к нише отношения не "
+            "имеют. Между границами ничего не утверждается."]
     for batch in batches:
         med = f"{batch.median:,.0f}".replace(",", " ")
         hot = batch.hot[:PER_TARGET]
@@ -451,9 +528,16 @@ def digest(b) -> tuple[list[str], list[str]]:
             continue
         out += ["",
                 "| Кратность | " + batch.metric.capitalize() +
-                " | Длина | Автор | Подписчиков | Когда | Ссылка | Подпись |",
-                "|---|---|---|---|---|---|---|---|"]
+                " | Показы | Отклик | Длина | Автор | Подписчиков | Когда "
+                "| Ссылка | Подпись |",
+                "|---|---|---|---|---|---|---|---|---|---|"]
         out += [_row(r, batch.metric) for r in hot]
+    past = last_review(b)
+    if past is not None:
+        out += ["", f"Прошлый разбор лежит в `research/{past.name}` — прочитай "
+                    "его и не выдавай за находку то, что в нём уже названо: "
+                    "механику, которая держится с прошлого раза, упомяни "
+                    "строкой и место отдай новой."]
     out += ["", "**В кэше только подпись и числа, самого ролика нет.** Хук "
                 "на слух, первый кадр, ритм монтажа и титры по этой таблице "
                 "не видны: разбор по ней — разбор текста и цифр. Где вывод "
@@ -498,6 +582,11 @@ def stash(b, data: dict) -> Path:
             "comments": _int(it.get("comments")),
             "seconds": _float(it.get("seconds")),
             "followers": _int(it.get("followers")),
+            # Показы, добранные поштучно. Поле проходит через белый
+            # список наравне с остальными: без строки здесь добор доезжал
+            # бы до диска и там молча терялся — форму кэша держит этот
+            # список, а не сборщик.
+            "plays": _int(it.get("plays")),
         } for it in items],
     }
     path = cache_path(b, t.name)
@@ -506,3 +595,266 @@ def stash(b, data: dict) -> Path:
                     encoding="utf-8")
     log.info("кэш ниши %s: %s роликов", t.human, len(body["items"]))
     return path
+
+
+# ── посадка разбора: механика доживает до следующего раза ─────────────
+#
+# До этого разбор с моста не возвращался в завод вовсе. Роль писала
+# `tasks/{id}/trends.md`, папка задачи лежит в `.gitignore`, и к
+# следующему прогону от разбора не оставалось ничего: ни механик, ни
+# отклонённого. Хуже того, адаптер роли велел ей читать прошлые разборы
+# в `research/trends-*.md` — файлы, которые не писал никто. Правило «не
+# повторяй прошлую находку» было неисполнимым обещанием.
+#
+# Здесь же стоят две границы, которые промпт только просил соблюдать.
+
+REVIEW = "research/trends-{day}.md"
+REVIEW_GLOB = "trends-*.md"
+
+# Правило трёх. Приём становится механикой ниши, только если встретился у
+# трёх разных авторов: три ролика одного аккаунта это его формат, он
+# держится на его лице и его базе. То же число, что у Ресёрчера
+# (`research.sift`), и второго в проекте не появляется.
+NEED = 3
+
+# Ссылка на чужой ролик. Короткий код в ней это то, чем ролик назван в
+# партии, — по нему пример и сверяется с кэшем.
+CODE = re.compile(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]{4,})")
+
+
+class LandRefused(RuntimeError):
+    """Разбор не сел: пустой контракт, класть нечего."""
+
+
+@dataclass
+class Review:
+    """Разбор после посадки: что осталось механикой, а что код подвинул."""
+    window: str = ""
+    metric: str = ""
+    mechanics: list[dict] = field(default_factory=list)
+    singles: list[dict] = field(default_factory=list)
+    rejected: list[dict] = field(default_factory=list)
+    offers: list[dict] = field(default_factory=list)
+    gaps: list[str] = field(default_factory=list)
+    # Что сделала посадка. Человек должен это видеть: механика, уехавшая
+    # в единичные, выглядит в чате как механика, если об этом не сказать.
+    findings: list[str] = field(default_factory=list)
+
+
+def _known(b) -> dict[str, str]:
+    """Код ролика → автор, по всем партиям на диске.
+
+    Нужен затем, что выдуманная ссылка ловится первым нажатием, и ловить
+    её должен код, а не человек в чате. Роль видит только выбросы, но
+    сверяем по всей партии: ролик ниже порога она процитировать не могла
+    вовсе, а лишняя строгость дала бы отказ на живом примере.
+
+    Партия берётся вся, включая непосчитанную: вопрос здесь «был ли этот
+    ролик в снимке», а не «годится ли партия для медианы». Иначе цель,
+    просевшая ниже `MIN_ITEMS` после пересъёмки, объявила бы живые
+    примеры выдуманными.
+    """
+    out: dict[str, str] = {}
+    for t in targets(b)[0]:
+        for r in read(b, t)[0].items:
+            code = r.code
+            if not code and (m := CODE.search(r.url)):
+                code = m.group(1)
+            if code:
+                out[code] = r.owner
+    return out
+
+
+def _cited(example: str, known: dict[str, str]) -> tuple[str, str, bool]:
+    """Пример механики → код ролика, автор, нашёлся ли он в партиях."""
+    m = CODE.search(example)
+    if m is None:
+        return "", "", False
+    code = m.group(1)
+    if code not in known:
+        return code, "", False
+    return code, known[code], True
+
+
+# Строки, которые бренд произносит сам. Стоп-слово здесь это отказ, а в
+# `what` и `why` — описание чужого приёма: «одиннадцатикратный выброс на
+# „секретном методе“» это наблюдение, и запрещать его нельзя.
+SPOKEN = ("cover", "save")
+
+
+def _stop(b, mech: dict) -> list[str]:
+    """Стоп-слова бренда в перенесённых строках. Четвёртое железное правило.
+
+    Приём, который держится на стоп-слове, отклоняется с причиной, а не
+    «адаптируется помягче»: кратность стоп-листа не отменяет. Проверяет
+    это код, потому что отказ должен быть детерминированным.
+    """
+    words = b.stopwords()
+    if not words:
+        return []
+    said = [str(mech.get(k) or "") for k in SPOKEN]
+    said += [str(h) for h in (mech.get("hooks") or [])]
+    out: list[str] = []
+    for line in said:
+        for f in check_voice.check(line, stopwords=words, allow_em_dash=True):
+            if f.kind == "brand":
+                out.append(f.fragment)
+    return list(dict.fromkeys(out))
+
+
+def land(b, data: dict) -> tuple[Review, str]:
+    """Посадить разбор: проверить механики кодом, записать файл в бренд.
+
+    Публичный шов, как `strategy.land` у плана и `editor.land` у текста.
+    Проверок две, и обе раньше были просьбой в промпте:
+
+    **Правило трёх проверяется, а не обещается.** `roles/trend.md` уже
+    говорит роли, что короткие списки код отправляет в единичные сам, —
+    и до этой функции не отправлял никто. Механика с двумя примерами или
+    с тремя примерами одного автора уезжает в `singles` с причиной.
+
+    **Ссылка сверяется с партией.** Пример, которого в снятом кэше нет,
+    в счёт правила трёх не идёт, и об этом говорится строкой. Партию
+    могли переснять между прогоном и посадкой — тогда живой пример
+    окажется ненайденным, поэтому это находка, а не отказ.
+
+    Возвращает разбор и путь выгрузки.
+    """
+    if b is None:
+        raise LandRefused("профиля бренда нет, класть разбор некуда")
+
+    rev = Review(
+        window=str(data.get("window") or ""),
+        metric=str(data.get("metric") or ""),
+        singles=[m for m in (data.get("singles") or []) if isinstance(m, dict)],
+        rejected=[m for m in (data.get("rejected") or []) if isinstance(m, dict)],
+        offers=[o for o in (data.get("offers") or []) if isinstance(o, dict)],
+        gaps=[str(g) for g in (data.get("gaps") or [])])
+    incoming = [m for m in (data.get("mechanics") or []) if isinstance(m, dict)]
+
+    if not (incoming or rev.singles or rev.rejected or rev.offers or rev.gaps):
+        raise LandRefused("контракт разбора пуст: класть нечего")
+
+    known = _known(b)
+    for mech in incoming:
+        name = str(mech.get("name") or "без имени")
+
+        stop = _stop(b, mech)
+        if stop:
+            rev.rejected.append(
+                {"what": name,
+                 "reason": "стоп-слово бренда в переносе: " + ", ".join(stop)})
+            rev.findings.append(
+                f"«{name}»: перенос на бренд идёт через стоп-слово "
+                f"({', '.join(stop)}) — механика уехала в отклонённое")
+            continue
+
+        owners: set[str] = set()
+        checked, ghosts, blind = 0, [], 0
+        for ex in [str(e) for e in (mech.get("examples") or [])]:
+            code, owner, found = _cited(ex, known)
+            if not code:
+                blind += 1
+                continue
+            if not found:
+                ghosts.append(code)
+                continue
+            checked += 1
+            if owner:
+                owners.add(owner)
+        if ghosts:
+            rev.findings.append(
+                f"«{name}»: в снятых партиях нет роликов {', '.join(ghosts)} — "
+                "в счёт правила трёх они не пошли")
+        if blind:
+            rev.findings.append(
+                f"«{name}»: примеров без ссылки {blind} — проверить их нечем, "
+                "в счёт правила трёх они не пошли")
+
+        if checked < NEED or len(owners) < NEED:
+            why = (f"примеров со ссылкой {checked}, разных авторов "
+                   f"{len(owners)} — правило трёх не набралось")
+            rev.singles.append({"what": name, "why_single": why,
+                                "why": str(mech.get("why") or "")})
+            rev.findings.append(f"«{name}» уехала в единичные: {why}")
+            continue
+
+        rev.mechanics.append(mech)
+
+    rel = REVIEW.format(day=date.today().isoformat())
+    b.artifact(rel, _review_md(b, rev))
+    log.info("разбор трендов сел: механик %s, единичных %s, отклонено %s",
+             len(rev.mechanics), len(rev.singles), len(rev.rejected))
+    return rev, rel
+
+
+def _review_md(b, rev: Review) -> str:
+    """Форму выгрузки держит код, как у плана.
+
+    Читателей у файла двое: человек, который вернётся к нему через
+    неделю, и следующий прогон роли, которому нельзя повторять старую
+    находку. Обе формы собираются здесь, а не в промпте: иначе через три
+    разбора файлы перестанут быть похожими друг на друга.
+    """
+    out = [f"# Чужие рилсы: разбор {date.today():%d.%m.%Y}", ""]
+    if rev.window:
+        out += [f"Партия: {rev.window}"]
+    if rev.metric:
+        out += [f"Метрика выбросов: {rev.metric}"]
+    out += [""]
+
+    out += ["## Механики", ""]
+    if not rev.mechanics:
+        out += ["Ни одной механики по правилу трёх не набралось.", ""]
+    for m in rev.mechanics:
+        out += [f"### {m.get('name') or 'без имени'}", ""]
+        for key, title in (("what", "Приём"), ("why", "Почему работает"),
+                           ("cover", "Обложка словами бренда"),
+                           ("save", "Повод сохранить"),
+                           ("skip", "Чего не берём")):
+            if m.get(key):
+                out += [f"- **{title}.** {m[key]}"]
+        hooks = [str(h) for h in (m.get("hooks") or []) if str(h).strip()]
+        if hooks:
+            out += ["- **Хуки.** " + " / ".join(hooks)]
+        ex = [str(e) for e in (m.get("examples") or []) if str(e).strip()]
+        if ex:
+            out += ["", "Примеры:"] + [f"- {e}" for e in ex]
+        out += [""]
+
+    if rev.singles:
+        out += ["## Единичные случаи", ""]
+        out += [f"- {s.get('what') or '—'} — {s.get('why_single') or '—'}"
+                for s in rev.singles] + [""]
+    if rev.rejected:
+        out += ["## Отклонено", ""]
+        out += [f"- {r.get('what') or '—'} — {r.get('reason') or '—'}"
+                for r in rev.rejected] + [""]
+    if rev.offers:
+        out += ["## Заготовки тем", ""]
+        for o in rev.offers:
+            secs = f", {o['seconds']} с" if o.get("seconds") else ""
+            out += [f"- «{o.get('title') or '—'}» — хук: "
+                    f"{o.get('hook') or '—'}; механика: "
+                    f"{o.get('mechanic') or '—'}{secs}"]
+        out += [""]
+    if rev.findings:
+        out += ["## Что сняла посадка", ""]
+        out += [f"- {f}" for f in rev.findings] + [""]
+    if rev.gaps:
+        out += ["## Чего не хватило", ""]
+        out += [f"- {g}" for g in rev.gaps] + [""]
+    return "\n".join(out)
+
+
+def last_review(b) -> Path | None:
+    """Последний разбор на диске. Нет ни одного — `None`, и это не поломка.
+
+    Имя файла несёт дату, поэтому сортировки по имени достаточно: время
+    правки файла врёт после `git checkout`, а дата сбора — нет.
+    """
+    folder = b.path("research")
+    if not folder.is_dir():
+        return None
+    found = sorted(folder.glob(REVIEW_GLOB))
+    return found[-1] if found else None

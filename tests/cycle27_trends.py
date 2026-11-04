@@ -306,6 +306,109 @@ def main() -> None:
     check("не отданных чисел сборщик не придумывает",
           bare["views"] is None and bare["likes"] is None, str(bare))
 
+    # ── посадка разбора ─────────────────────────────────────────────
+    #
+    # Разбор с моста до этого не возвращался в завод: роль писала
+    # `tasks/{id}/trends.md`, папка задачи в `.gitignore`, и к следующему
+    # прогону от механик не оставалось ничего — при том что адаптер роли
+    # велел ей читать прошлые разборы в `research/trends-*.md`.
+    #
+    # Правило трёх и сверка ссылок с партией здесь же: промпт просил их
+    # соблюдать, но не проверял никто.
+    for old in b.path("research").glob(trends.REVIEW_GLOB):
+        old.unlink()
+
+    wide = [reel(i, views=100, owner="a") for i in range(1, 10)]
+    # Код ролика длиной как у Instagram: ссылка сверяется регулярным
+    # выражением, и трёхзначная заглушка под настоящий код не похожа.
+    wide += [reel("91ab", views=1000, owner="x"),
+             reel("92ab", views=1000, owner="y"),
+             reel("93ab", views=1000, owner="z"),
+             reel("94ab", views=1000, owner="x")]
+    trends.stash(b, {"target": "#aiдляработы", "items": wide})
+
+    def mech(name, codes, **kw) -> dict:
+        got = {"name": name, "what": "число в заходе", "why": "обещание",
+               "examples": [f"https://www.instagram.com/reel/{c}/ · 10× · @{c}"
+                            for c in codes],
+               "cover": "Первый Skill за вечер", "hooks": ["раз", "два"],
+               "save": "открыть вечером", "skip": "чужой темп"}
+        got.update(kw)
+        return got
+
+    rev, rel = trends.land(b, {
+        "window": "#aiдляработы, снято сегодня",
+        "metric": "просмотры",
+        "mechanics": [
+            mech("число в заходе", ["C91ab", "C92ab", "C93ab"]),
+            mech("два примера", ["C91ab", "C92ab"]),
+            mech("один автор", ["C91ab", "C94ab", "C91ab"]),
+            mech("призрачная ссылка", ["C91ab", "C92ab", "ZZZZZ"]),
+            mech("через стоп-слово", ["C91ab", "C92ab", "C93ab"],
+                 cover="Секретный метод за вечер"),
+            mech("стоп-слово у чужого", ["C91ab", "C92ab", "C93ab"],
+                 what="держится на обещании «заработай миллион за 3 дня»"),
+        ],
+        "offers": [{"title": "Первый Skill", "hook": "раз", "seconds": 40}],
+        "gaps": ["своей медианы в задаче не было"]})
+
+    names = [m["name"] for m in rev.mechanics]
+    check("механика по правилу трёх села",
+          "число в заходе" in names, str(names))
+    check("механика с двумя примерами уехала в единичные",
+          any(s.get("what") == "два примера" for s in rev.singles),
+          str(rev.singles))
+    check("три ролика одного автора механикой не считаются",
+          "один автор" not in names, str(names))
+    check("ссылка, которой нет в партии, в счёт не идёт",
+          "призрачная ссылка" not in names
+          and any("ZZZZZ" in f for f in rev.findings), str(rev.findings))
+    check("стоп-слово в переносе это отклонение, а не оговорка",
+          "через стоп-слово" not in names
+          and any(r.get("what") == "через стоп-слово" for r in rev.rejected),
+          str(rev.rejected))
+    check("стоп-слово в описании чужого приёма механику не роняет",
+          "стоп-слово у чужого" in names, str(names))
+    check("подвинутое кодом названо человеку строкой",
+          len(rev.findings) >= 3, str(rev.findings))
+
+    path = b.path(rel)
+    text = path.read_text(encoding="utf-8")
+    check("разбор лёг датированным файлом в папку бренда",
+          path.exists() and path.match(trends.REVIEW_GLOB), rel)
+    check("в файле есть механика и её перенос",
+          "число в заходе" in text and "Первый Skill за вечер" in text)
+    check("в файле есть отклонённое с причиной",
+          "## Отклонено" in text and "стоп-слово бренда" in text, text[:300])
+    check("в файле есть дыры роли", "своей медианы" in text)
+    check("в файле есть заготовки тем", "Заготовки тем" in text)
+
+    # Второй прогон в тот же день переписывает разбор, а не плодит второй:
+    # два файла одной даты человек читает как два разных разбора.
+    rev2, rel2 = trends.land(b, {"mechanics": [], "gaps": ["второй заход"]})
+    check("второй разбор за день не плодит второй файл",
+          rel2 == rel and len(list(b.path("research").glob(trends.REVIEW_GLOB))) == 1)
+    check("пустая выдача садится дырой, а не молчанием",
+          "второй заход" in b.path(rel2).read_text(encoding="utf-8"))
+
+    try:
+        trends.land(b, {})
+        check("пустой контракт не садится", False, "сел")
+    except trends.LandRefused as e:
+        check("пустой контракт не садится", "пуст" in str(e), str(e))
+
+    check("прошлый разбор находится на диске",
+          (last := trends.last_review(b)) is not None and last.name == path.name,
+          str(trends.last_review(b)))
+    out, _ = trends.digest(b)
+    check("задача называет роли прошлый разбор",
+          any(path.name in line for line in out), "\n".join(out)[-300:])
+
+    from orchestrator import bridge
+    check("мост сажает разбор вместе с планом и текстом",
+          "_land_trends" in bridge.harvest.__doc__ or
+          hasattr(bridge, "_land_trends"))
+
     # ── промпт роли и адаптер на месте ───────────────────────────────
     role = (harness.REPO / "roles" / "trend.md").read_text(encoding="utf-8")
     agent = (harness.REPO / ".claude" / "agents" /

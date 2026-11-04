@@ -68,7 +68,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import ROOT, cfg
 from orchestrator import (album, cut, desk, design, footage, frames, grab,
-                          imagegen, imagery, panelshot, publisher, strategy)
+                          imagegen, imagery, music, panelshot, publisher,
+                          strategy)
 from orchestrator.desk import NoWork
 from storage import db
 
@@ -218,6 +219,17 @@ class Reel:
     # тела ролика. Второй способ показать присланное — первый это панель
     # сплита, и выбирают между ними словами просьбы (`wants_inserts`).
     inserts: list[dict[str, Any]] = field(default_factory=list)
+    # Слои поверх дубля до привязки ко времени (`cut.Overlay`) и они же
+    # после неё. Второй формат монтажа, рядом со сплитом: кадр не
+    # делится, дубль идёт во весь экран. С панелью взаимно исключены —
+    # заголовку во всю ширину в половине кадра встать некуда.
+    overlays: list[Any] = field(default_factory=list)
+    layers: list[dict[str, Any]] = field(default_factory=list)
+    # Трек под роликом. Живёт на ролике, а не в аргументе рендера, по той
+    # же причине, что блоки панели: правка субтитров пересобирает ролик
+    # заново, и музыка обязана приехать та же. Нет поля — ролик идёт со
+    # своим звуком.
+    music: Path | None = None
     out: Path | None = None
     findings: list[str] = field(default_factory=list)
 
@@ -986,11 +998,17 @@ def _staged(files: dict[str, Path]):
 
 
 async def _render(composition: str, props: dict[str, Any], *,
-                  key: str, frames: int) -> Path:
+                  key: str, frames: int,
+                  notes: list[str] | None = None) -> Path:
     """Позвать Remotion и отдать готовый файл.
 
     Общее у ролика и сплита: разница между ними целиком в props, а не в
     том, как рендер сторожат и что делают с оборванным файлом.
+
+    Здесь же выравнивается громкость — один шов на все композиции, и
+    именно поэтому здесь: ролик, сплит и говорящая голова выходят
+    отсюда, а в канал они идут вперемешку. Выровняй это в одном из
+    трёх путей, и разница между ними станет слышна.
     """
     props_path = TOOLS / f".props-{key}.json"
     props_path.write_text(json.dumps(props, ensure_ascii=False),
@@ -1020,6 +1038,21 @@ async def _render(composition: str, props: dict[str, Any], *,
     if code != 0 or not out_path.exists():
         out_path.unlink(missing_ok=True)
         raise NoRenderer("Remotion не отдал файл: " + err)
+
+    # Громкость правится после рендера, а не внутри него: Remotion
+    # сводит дорожки, но уровень выхода не считает, а считать его можно
+    # только по готовому файлу — музыка, дубль и озвучка складываются.
+    # Упавшее выравнивание ролик не отменяет: файл остаётся как был,
+    # и человек получает видео, а не отказ.
+    try:
+        note = await footage.normalize(out_path)
+    except footage.NoFfmpeg as e:
+        note = f"громкость ролика не выровняла: {e}"
+    if note:
+        if notes is None:
+            log.info("%s: %s", key, note)
+        else:
+            notes.append(note)
 
     return out_path
 
@@ -1096,6 +1129,19 @@ async def render(reel: Reel, b, size: tuple[int, int], *,
                         "end": ins["end"],
                         "width": ins.get("width", INSERT_MAX_W)})
 
+    # Снимки страниц для слоёв — туда же, через public/. Имя от индекса
+    # слоя, а не от файла: один и тот же снимок на двух слоях обычное
+    # дело, а перетереть чужой файл чужим именем хватит одного раза.
+    layers: list[dict[str, Any]] = []
+    for i, lay in enumerate(reel.layers):
+        lay = dict(lay)
+        src = lay.pop("image", None)
+        if src:
+            name = f"proof-{reel.theme['id']}-{i}{Path(src).suffix.lower()}"
+            files[name] = Path(src)
+            lay["src"] = name
+        layers.append(lay)
+
     # Маскот считается здесь, а не в сборке: маски снимаются с того файла,
     # который едет в рендер, а после обрезки краёв это уже не исходник.
     look = person = None
@@ -1104,6 +1150,15 @@ async def render(reel: Reel, b, size: tuple[int, int], *,
         look, person, art, masks = await _mascot(reel, size, fps=fps)
         if art and look and look.get("src"):
             files[look["src"]] = art
+
+    # Трек едет тем же способом, что дубль и обложка: через public/ и
+    # по имени файла. Расширение сохраняем — по нему браузер выбирает
+    # декодер, а переименованный в .mp3 m4a он не возьмёт.
+    music_props = None
+    if reel.music and reel.music.exists():
+        name = f"music-{reel.theme['id']}{reel.music.suffix.lower()}"
+        files[name] = reel.music
+        music_props = music.props(name)
 
     intro = COVER_SPIN if (reel.cover or reel.title or reel.hook) else 0.0
 
@@ -1140,10 +1195,12 @@ async def render(reel: Reel, b, size: tuple[int, int], *,
         "pan": reel.pan,
         "pages": reel.pages,
         "inserts": inserts,
+        "layers": layers,
         "introSeconds": intro,
         "outroSeconds": 1.8 if reel.cta else 0.0,
         "mascot": look,
         "personMask": person,
+        "music": music_props,
     }
     props = {k: v for k, v in props.items() if v is not None}
 
@@ -1170,7 +1227,8 @@ async def render(reel: Reel, b, size: tuple[int, int], *,
     try:
         with _staged(files):
             return await _render("Reel", props, key=reel.theme["id"],
-                                 frames=frame_count)
+                                 frames=frame_count,
+                                 notes=reel.findings)
     finally:
         # Маски уходят вместе с дублём: в public/ лежит рабочий материал
         # репозитория, и полтысячи PNG, оставшихся там от монтажа,
@@ -1670,6 +1728,136 @@ def lay(reel: Reel, slides: list[Any]) -> tuple[list[Block], list[str]]:
     return blocks, lost
 
 
+# Слой короче этого не успевает ни въехать, ни быть прочитанным: на
+# въезд и уход уходит по трети секунды, и на самих словах остаётся
+# меньше секунды. Порог выше, чем у блока панели, и намеренно: панель
+# меняется весь ролик, а слой появляется считаные разы, и мелькнувший
+# слой человек читает как сбой рендера.
+LAYER_MIN = 2.0
+
+# Сколько слой живёт, если роль не назвала, на чём он кончается.
+# Заголовок держится дольше плашки: его читают один раз и целиком, а
+# плашка висит фоном и глаз к ней возвращается.
+LAYER_HOLD = {"title": 5.0, "proof": 8.0, "chrome": 6.0}
+LAYER_HOLD_ANY = 5.0
+
+# Находки посадки слоёв узнаются по началу строки — как у панели, и по
+# той же причине: пересборка после правки субтитров считает слои заново,
+# и прошлые строки обязаны уйти вместе с прошлыми секундами.
+LAYER_NOTES = ("слой не встал: ",)
+LAYER_TAILS = (": слой короче ", ": конец слоя раньше его начала")
+
+
+def _is_layer_note(text: str) -> bool:
+    return (text.startswith(LAYER_NOTES)
+            or any(tail in text for tail in LAYER_TAILS))
+
+
+def lay_layers(reel: Reel, overlays: list[Any]) -> tuple[list[dict[str, Any]],
+                                                         list[str]]:
+    """Слои во времени готового ролика.
+
+    Та же граница, что у панели: роль называет фразы, код называет
+    секунды. Разница в конце. Блок панели живёт до следующего блока —
+    панель всегда чем-то занята. Слои друг друга не сменяют: они лежат
+    поверх кадра и спокойно пересекаются, поэтому конец у каждого свой.
+    Назвала роль фразу конца — берём её, не назвала — слой держится
+    столько, сколько его сорт читается, и не дольше конца ролика.
+
+    Слой, у которого конец оказался раньше начала, выбрасывается, а не
+    чинится перестановкой: роль назвала две фразы, и если они идут в
+    обратном порядке, значит она ошиблась не в порядке, а в выборе — и
+    починенный слой встанет не там, где задумано.
+    """
+    assert reel.cuts is not None
+    total = reel.cuts.total
+    out: list[dict[str, Any]] = []
+    lost: list[str] = []
+
+    for o in overlays:
+        at = speak_at(reel, o.phrase)
+        if at is None:
+            lost.append(f"слой не встал: «{o.phrase[:40]}» "
+                        "в записи не нашлось")
+            continue
+
+        end = speak_at(reel, o.until) if o.until else None
+        if o.until and end is None:
+            lost.append(f"«{o.until[:40]}»: фразы конца в записи нет — "
+                        "слой держится своим сроком")
+        if end is None:
+            end = at + LAYER_HOLD.get(o.kind, LAYER_HOLD_ANY)
+        end = min(end, total)
+
+        if end <= at:
+            lost.append(f"«{o.phrase[:40]}»: конец слоя раньше его начала")
+            continue
+        if end - at < LAYER_MIN:
+            lost.append(f"«{o.phrase[:40]}»: слой короче "
+                        f"{LAYER_MIN:.1f} с — его не успеть прочесть")
+            continue
+
+        lay: dict[str, Any] = {
+            "kind": o.kind,
+            "start": round(at, 3),
+            "end": round(end, 3),
+            "lines": list(o.lines),
+            "script": o.script,
+            "arrow": o.arrow,
+        }
+
+        if o.kind == "proof":
+            # Снимка нет — слоя нет. `proof` без страницы это пустое
+            # место в кадре: рисовать ему нечего, и словами он не идёт.
+            if not o.image:
+                lost.append(f"слой не встал: «{o.phrase[:40]}» — "
+                            "страница не снялась")
+                continue
+            marks = []
+            for phrase, x, y, w, hgt in o.spots:
+                when = speak_at(reel, phrase)
+                # Строку подсвечиваем на её слове, а слова на странице и
+                # в речи разные: человек цитирует не дословно. Не нашли
+                # фразу в записи — маркер едет по ходу слоя, поровну.
+                marks.append({"phrase": phrase, "x": round(x, 5),
+                              "y": round(y, 5), "w": round(w, 5),
+                              "h": round(hgt, 5), "at": when})
+            spread = [m for m in marks if m["at"] is None]
+            if spread:
+                step = (end - at) / (len(marks) + 1)
+                for i, m in enumerate(marks, 1):
+                    if m["at"] is None:
+                        m["at"] = round(at + step * i, 3)
+            # Подсветка за пределами слоя не покажется вовсе: шаблон
+            # отсчитывает её от начала слоя. Такая уезжает к краю, и это
+            # называется человеку.
+            for m in marks:
+                if not (at <= m["at"] < end):
+                    lost.append(f"«{m['phrase'][:40]}»: подсветка звучит "
+                                "вне своего слоя — поехала с его началом")
+                    m["at"] = at
+            marks.sort(key=lambda m: m["at"])
+            lay["marks"] = [{k: v for k, v in m.items() if k != "phrase"}
+                            for m in marks]
+            lay["imageWidth"], lay["imageHeight"] = o.image_size
+            # Путь, а не имя внутри public/: копирует файл рендер, и
+            # имя там своё — от индекса слоя (`render`).
+            lay["image"] = str(o.image)
+            # Разворот во весь кадр: на своей фразе, а если её нет — на
+            # первой подсветке. Читать текст в карточке под наклоном
+            # нельзя, и подсветка в ней пропала бы зря.
+            open_at = speak_at(reel, o.open_phrase) if o.open_phrase else None
+            if open_at is None and marks:
+                open_at = marks[0]["at"]
+            if open_at is not None and at <= open_at < end:
+                lay["openAt"] = round(open_at, 3)
+
+        out.append(lay)
+
+    out.sort(key=lambda d: d["start"])
+    return out, lost
+
+
 def _rgba(color: str, alpha: float) -> str:
     """`#RRGGBB` → `rgba(...)`. Подложки панели задаются прозрачностью от
     цвета бренда, а не вторым списком hex: второй список разъедется."""
@@ -1892,12 +2080,21 @@ async def render_motion(reel: Reel, b, blocks: list[Block],
     if props.get("coverLogoPath"):
         files[props["coverLogoPath"]] = reel.split_cover["logo"]
 
+    # Тот же трек и те же уровни, что у обычного ролика: в канал они
+    # идут вперемешку, и разная подложка у двух форматов слышалась бы
+    # как два разных канала.
+    if reel.music and reel.music.exists():
+        name = f"music-{reel.theme['id']}{reel.music.suffix.lower()}"
+        files[name] = reel.music
+        props["music"] = music.props(name)
+
     frame_count = max(1, round((reel.cuts.total + props["outroSeconds"]
                                 + props["introSeconds"]) * fps))
 
     with _staged(files):
         return await _render("Motion", props, key=reel.theme["id"],
-                             frames=frame_count)
+                             frames=frame_count,
+                             notes=reel.findings)
 
 # ── сборка ────────────────────────────────────────────────────────────
 
@@ -2333,6 +2530,62 @@ async def _panel(chat_id: int, reel: Reel, *, ask: str = "",
     reel.split_cover = dict(cover)
     if say:
         await say(f"Панель: {len(blocks)} блока по речи.")
+
+
+# Слова, которыми просят второй формат — дубль со слоями. Со сплитом
+# их путать нельзя: сплит делит кадр и живёт панелью, слои кадра не
+# делят вовсе. Обе просьбы приходят в один топик, и разойтись они должны
+# до минут рендера, а не после.
+LAYER_WORDS = ("слоями", "со слоями", "слои", "как на референсе",
+               "без деления кадра", "во весь кадр", "заголовком сверху",
+               "с подсветкой", "со скрином", "покажи страницу")
+
+
+def wants_layers(ask: str) -> bool:
+    low = (ask or "").lower()
+    return any(w in low for w in LAYER_WORDS)
+
+
+async def _layers(chat_id: int, reel: Reel, *, ask: str = "",
+                  say=None) -> None:
+    """Слои поверх дубля от Монтажёра. Не вышло — говорим и монтируем без.
+
+    Мягко по делу, ровно как `_panel`: слои это способ усилить дубль, а
+    не условие монтажа. Молча свалиться в голый ролик нельзя — человек
+    просил слои и обязан узнать, что их не будет.
+    """
+    if not reel.subs:
+        reel.findings.append("слоёв не будет: речи в дубле не разобрано")
+        return
+    if say:
+        await say("Собираю слои: заголовок, плашку и страницу-доказательство.")
+    b = desk.brand(chat_id)
+    try:
+        overlays, lost = await cut.layers(
+            chat_id, reel.said or reel.heard, ask=ask)
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("слои не пришли: %s", e)
+        reel.findings.append(f"слоёв не будет: они не пришли "
+                             f"({desk.reason(e)}) — смонтирован без них")
+        return
+
+    # Страницы снимаем до посадки на слова: слою `proof` без снимка
+    # рисовать нечего, и `lay_layers` такой выбросит.
+    if b is not None and any(o.kind == "proof" for o in overlays):
+        if say:
+            await say("Снимаю страницы, на которые ссылается дубль.")
+        reel.findings += (await panelshot.prove(b, overlays))[:3]
+
+    layers, dropped = lay_layers(reel, overlays)
+    reel.findings += [str(n) for n in lost[:3]] + dropped[:3]
+    if not layers:
+        reel.findings.append("слоёв не будет: ни один не встал на слова — "
+                             "смонтирован без них")
+        return
+    reel.overlays = overlays
+    reel.layers = layers
+    if say:
+        await say(f"Слои: {len(layers)} поверх кадра.")
 
 
 async def _inserts(chat_id: int, reel: Reel, size: tuple[int, int], *,
@@ -2855,11 +3108,24 @@ async def build(chat_id: int, ask: str, *, say=None,
     # полного кадра и уходит. Молчаливый выбор прежний — сплит; накладку
     # просят словами (`wants_inserts`).
     overlay = bool(extra) and not panel and wants_inserts(ask)
-    if extra and not panel and not overlay:
+    # Слои — второй формат, и с панелью он взаимно исключён: кадр либо
+    # делится швом, либо нет. Просят его словами, как и накладку;
+    # молчаливый выбор остаётся прежним. Альбом сюда не ведёт — записи
+    # экрана это работа панели, а слои стоят на снимке страницы.
+    layers = not panel and not overlay and wants_layers(ask)
+    if layers and say:
+        await say("Монтирую слоями: кадр делить не буду, дубль идёт "
+                  "целиком, а заголовок и страница лягут поверх.")
+    if extra and not panel and not overlay and not layers:
         panel = True
         if say:
             await say(f"К дублю в альбоме {len(extra)} материала — "
                       "монтирую сплитом, они пойдут на панель.")
+    elif extra and layers and say:
+        # Просьба словами сильнее молчаливого выбора по альбому: иначе
+        # присланная к дублю картинка молча отменяла бы названный формат.
+        await say(f"К дублю в альбоме {len(extra)} материала, но просили "
+                  "слои — на панель они не пойдут.")
     elif overlay and say:
         await say(f"К дублю в альбоме {len(extra)} фото — положу их "
                   "накладками поверх кадра, холст делить не буду.")
@@ -2937,6 +3203,13 @@ async def build(chat_id: int, ask: str, *, say=None,
                 f"картинки маскота нет (<code>{MASCOT_ART}</code> в папке "
                 "бренда) — в кадре нарисованный знак")
 
+    # Музыку просить не надо — надо наполнить банк: выключатель это сама
+    # папка `design/music/` в бренде. Словами её, наоборот, снимают.
+    track, note = music.spec(b, reel.theme["id"], ask)
+    reel.music = track
+    if note:
+        reel.findings.append(note)
+
     narrows = bool(frag and reel.probe
                    and (frag.start > TRIM_MIN
                         or frag.end < reel.probe.duration - TRIM_MIN))
@@ -2950,6 +3223,8 @@ async def build(chat_id: int, ask: str, *, say=None,
             await _split_cover(reel, b, size)
     elif overlay:
         await _inserts(chat_id, reel, size, ask=ask, say=say)
+    elif layers:
+        await _layers(chat_id, reel, ask=ask, say=say)
 
     piece = None
     try:
@@ -3167,6 +3442,12 @@ async def split(chat_id: int, ask: str, *, say=None, deliver=None) -> list[Reel]
         reel.pan = footage.cut_track(track, cuts)
         reel.subs = footage.cut_words(words, cuts)
         _relex(reel, rules)
+        # Музыка та же, что у целого дубля, но трек у каждого куска свой:
+        # выбор идёт по id темы, а темы здесь разные. Пачка мини-роликов
+        # на одном треке слушалась бы одним роликом, порезанным на части.
+        reel.music, music_note = music.spec(b, tid, ask)
+        if music_note:
+            reel.findings.append(music_note)
         reel.lines = cover_lines(frag.hook, size, spec)
         if spec_gap:
             reel.findings.append(spec_gap)

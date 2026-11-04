@@ -13,7 +13,9 @@ import {
 import {Captions} from './Captions';
 import {boxOf, Clip, focusAt} from './Clip';
 import {Cover} from './Cover';
+import {Layer} from './Layers';
 import {Mascot} from './Mascot';
+import {Music} from './Music';
 import type {ReelProps} from './props';
 
 const FONT = 'system-ui, -apple-system, Helvetica, sans-serif';
@@ -235,6 +237,18 @@ export const ReelTemplate: React.FC<ReelProps> = (props) => {
 
   return (
     <AbsoluteFill style={{backgroundColor: '#000'}}>
+      {/* Музыка идёт первой и вне последовательностей: она тянется
+          через весь ролик, а куски дубля, слои и карточка финала живут
+          каждый в своём окне. Поставь её внутрь — и она оборвётся на
+          первом же шве. */}
+      {props.music ? (
+        <Music
+          music={props.music}
+          introSeconds={introFrames / fps}
+          bodySeconds={bodyFrames / fps}
+          outroSeconds={props.cta ? outroFrames / fps : 0}
+        />
+      ) : null}
       {hasIntro ? (
         <Sequence from={0} durationInFrames={introFrames} name="Первый кадр">
           {props.coverClipPath ? (
@@ -332,6 +346,30 @@ export const ReelTemplate: React.FC<ReelProps> = (props) => {
             name={`Накладка ${i + 1}`}
           >
             <Insert src={ins.src} share={ins.width} />
+          </Sequence>
+        );
+      })}
+
+      {/* Слои идут после накладок и до маскота: заголовок и снимок
+          страницы это содержание ролика, а маскот украшение, и спорить
+          им за верх кадра не за что. Караоке остаётся выше всех. */}
+      {props.layers.map((lay, i) => {
+        const from = introFrames + Math.round(lay.start * fps);
+        const frames = Math.max(1, Math.round((lay.end - lay.start) * fps));
+        return (
+          <Sequence
+            key={`${lay.kind}-${lay.start}-${i}`}
+            from={from}
+            durationInFrames={frames}
+            name={`Слой ${i + 1}: ${lay.kind}`}
+          >
+            <Layer
+              layer={lay}
+              color={props.captionTextColor}
+              accent={props.accentColor}
+              font={props.layerFont}
+              scriptFont={props.scriptFont}
+            />
           </Sequence>
         );
       })}

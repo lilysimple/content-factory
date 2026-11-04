@@ -26,9 +26,15 @@ Apify, по ключу и за деньги.
 `api/v2/acts/.../builds/default`: оттуда взяты и имена полей входа, и
 имена полей датасета — `videoPlayCount`, `videoViewCount`, `likesCount`,
 `commentsCount`, `ownerUsername`, `videoDuration`, `productType`,
-`shortCode`, `timestamp`, `type`, `followersCount`. **Живым прогоном
-выдача ещё не проверялась**: ключа у завода нет, а схема обещает поле, а
-не то, что оно приедет заполненным у каждой записи.
+`shortCode`, `timestamp`, `type`, `followersCount`.
+
+**Живым прогоном выдача проверена 23.10**, и опасение подтвердилось:
+схема обещает поле, но не то, что оно приедет заполненным. По сетке
+профиля `videoPlayCount`, `videoViewCount` и `videoDuration` приезжают
+пустыми у **всех** записей — 453 рилса из 453 по четырнадцати аккаунтам.
+Тот же актор по прямому адресу ролика отдаёт их заполненными: проверено
+на 27 ссылках, приехали все 27. Отсюда вторая ступень (`deepen`), она же
+единственный способ получить показы и длину.
 
 Поэтому `convert` берёт число из первого поля, которое отдали, и ничего
 не додумывает. Последние ключи в каждой цепочке (`playCount`,
@@ -71,6 +77,27 @@ LIMIT = 50            # роликов на цель: хватает на мед
 DAYS = 90
 POLL = 5.0            # пауза между опросами статуса прогона
 WAIT = 600            # потолок ожидания одной цели, секунды
+
+# Скольких кандидатов добирать вторым запросом, поштучно по ссылке.
+#
+# Зачем второй запрос вообще. Замер 23.10: прогон по профилю отдаёт
+# `videoPlayCount` и `videoViewCount` **пустыми у всех записей** — 453
+# рилса из 453 по четырнадцати аккаунтам, ни одно поле цепочки не
+# приехало заполненным. Значит показов у партии нет вовсе, медиана всегда
+# считается по лайкам, а длительность (`videoDuration`) приезжает пустой
+# тем же порядком.
+#
+# Тот же актор по **прямому адресу ролика** отдаёт и показы, и
+# длительность: проверено на 27 ссылках, приехали все 27, показы сошлись
+# с числами на сетке до округления (5 731 626 против «5,7 млн»). Отсюда
+# две ступени: первая берёт сетку и шорткоды, вторая добирает кандидатов.
+#
+# Двенадцать, а не вся партия: второй запрос платный и считается по
+# записям, а показы нужны не для медианы (в неё они не идут, см.
+# `trends._value`), а чтобы роль прочитала отклик у тех роликов, которые
+# она и так разбирает. Выбросов в выдачу уходит меньше десятка, так что
+# двенадцать закрывают верхушку с запасом.
+DEEP = 12
 
 # Прогон кончился, но не удачей. `ABORTED` сюда входит намеренно: его
 # ставит человек из кабинета Apify, и для сборщика это такой же конец.
@@ -170,15 +197,18 @@ def actor_input(t: trends.Target, limit: int, days: int = DAYS) -> dict:
             "directUrls": [f"https://www.instagram.com/{t.value}/"]}
 
 
-def run_actor(t: trends.Target, limit: int, days: int = DAYS) -> list[dict]:
+def _run(actor: str, payload: dict, hint: str) -> list[dict]:
     """Запустить прогон, дождаться, забрать записи.
 
     Асинхронно, с опросом статуса, а не ручкой `run-sync-get-dataset-items`:
     у синхронной свой потолок в пять минут, и партия по хэштегу в него
     упирается — ответ приходит пустой, а деньги за прогон уже списаны.
+
+    `hint` дописывается к сообщению о таймауте: у сетки и у поштучного
+    добора разные способы ужаться, и общий совет «снизь --limit» для
+    второго неверен.
     """
-    actor = actor_of(t)
-    run = _call("POST", f"acts/{actor}/runs", actor_input(t, limit, days))
+    run = _call("POST", f"acts/{actor}/runs", payload)
     data = (run or {}).get("data") or {}
     run_id, dataset = data.get("id"), data.get("defaultDatasetId")
     if not run_id or not dataset:
@@ -195,12 +225,38 @@ def run_actor(t: trends.Target, limit: int, days: int = DAYS) -> list[dict]:
         if waited >= WAIT:
             raise NoTrends(
                 f"прогон {run_id} не уложился в {WAIT} секунд (статус "
-                f"{status}) — снизь --limit или забери позже из кабинета")
+                f"{status}) — {hint}")
         time.sleep(POLL)
         waited += POLL
 
     items = _call("GET", f"datasets/{dataset}/items?clean=true&format=json")
     return [x for x in (items or []) if isinstance(x, dict)]
+
+
+def run_actor(t: trends.Target, limit: int, days: int = DAYS) -> list[dict]:
+    """Первая ступень: сетка профиля или выдача по тегу."""
+    return _run(actor_of(t), actor_input(t, limit, days),
+                "снизь --limit или забери позже из кабинета")
+
+
+def run_direct(codes: list[str]) -> list[dict]:
+    """Вторая ступень: те же ролики, но поштучно по прямому адресу.
+
+    Актор тот же (`instagram-scraper`), отличается только вход: вместо
+    адреса сетки идут адреса роликов. По ним он отдаёт `videoPlayCount` и
+    `videoDuration` заполненными, чего прогон по сетке не делает вовсе.
+
+    `resultsLimit: 1` — на один адрес приходится одна запись, и больше
+    просить не за что.
+    """
+    if not codes:
+        return []
+    return _run(cfg.apify_actor, {
+        "directUrls": [f"https://www.instagram.com/reel/{c}/" for c in codes],
+        "resultsType": "posts",
+        "resultsLimit": 1,
+        "addParentData": False,
+    }, f"снизь --deep (сейчас {len(codes)}) или забери позже из кабинета")
 
 
 def _first(row: dict, *keys):
@@ -232,12 +288,76 @@ def convert(row: dict) -> dict:
         "comments": _first(row, "commentsCount", "comments"),
         "seconds": _first(row, "videoDuration", "duration"),
         "followers": _first(row, "ownerFollowersCount", "followersCount"),
+        # Заполняется не здесь, а вторым запросом (`deepen`). Ключ стоит
+        # в форме всегда, чтобы кэш не менял схему от прогона к прогону:
+        # читателю прочерк и отсутствие ключа одинаковы, а человеку,
+        # который откроет файл, — нет.
+        "plays": None,
     }
 
 
-def pull(b: Brand, t: trends.Target, limit: int, days: int = DAYS) -> int:
+def deepen(reels: list[dict], count: int = DEEP) -> int:
+    """Добрать показы и длительность у верхушки партии, поштучно.
+
+    Кандидаты берутся по лайкам, потому что показов на этой ступени ещё
+    нет ни у кого (см. `DEEP`), а чем-то отбирать надо. Это не отбор
+    выбросов: выбросы считает читатель и по своей медиане. Здесь задача
+    проще — накрыть ту верхушку, которую читатель потом и разберёт.
+
+    Пишет только в `plays` и `seconds`, и только там, где актор что-то
+    отдал. В `views` не пишет ничего: добранные показы есть лишь у части
+    партии, и попади они в поле, по которому считается медиана, медианой
+    стала бы медиана верхушки. Эту границу держит `trends._value`, но
+    нарушить её легче всего именно отсюда.
+
+    Возвращает, скольким роликам что-то дописали.
+    """
+    if count <= 0 or not reels:
+        return 0
+    ranked = sorted(reels, key=lambda r: r.get("likes") or 0, reverse=True)
+    pick = [r for r in ranked[:count] if r.get("code")]
+    if not pick:
+        return 0
+
+    by_code = {r["code"]: r for r in pick}
+    rows = run_direct(list(by_code))
+    touched = 0
+    for row in rows:
+        code = str(_first(row, "shortCode", "shortcode", "code") or "")
+        target = by_code.get(code)
+        if target is None:
+            continue
+        plays = _first(row, "videoPlayCount", "videoViewCount", "playCount")
+        secs = _first(row, "videoDuration", "duration")
+        if plays is not None:
+            target["plays"] = plays
+        if secs is not None and target.get("seconds") is None:
+            target["seconds"] = secs
+        if plays is not None or secs is not None:
+            touched += 1
+    return touched
+
+
+def pull(b: Brand, t: trends.Target, limit: int, days: int = DAYS,
+         deep: int = DEEP) -> int:
     rows = run_actor(t, limit, days)
     reels = [convert(r) for r in rows if is_reel(r)]
+
+    # Вторая ступень. Идёт до записи в кэш, чтобы на диск лёг один
+    # законченный файл: партия, дописанная вторым прогоном после того,
+    # как читатель уже прочёл первую, разошлась бы с ней молча.
+    #
+    # Своей ошибкой добор партию не роняет. Сетка уже снята и оплачена,
+    # и терять её из-за того, что второй запрос не задался, глупо:
+    # показов в кэше просто не будет, а это прочерк, с которым читатель
+    # умеет работать.
+    deepened = 0
+    if deep > 0 and reels:
+        try:
+            deepened = deepen(reels, deep)
+        except NoTrends as e:
+            print(f"  {t.human}: показы не добрались — {e}")
+
     # Окно уезжает в кэш, потому что режет по нему читатель: актор свой
     # же фильтр не держит — закреплённые ролики приходят мимо него.
     since = ((datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
@@ -251,7 +371,19 @@ def pull(b: Brand, t: trends.Target, limit: int, days: int = DAYS) -> int:
     })
     skipped = len(rows) - len(reels)
     print(f"  {t.human}: {len(reels)} роликов"
-          + (f", {skipped} записей не рилсы — не взяты" if skipped else ""))
+          + (f", {skipped} записей не рилсы — не взяты" if skipped else "")
+          + (f", показы добраны у {deepened}" if deepened else ""))
+
+    # Пустая партия у профиля это чаще всего не «ничего не вышло», а
+    # закрытая дверь: возрастное ограничение отдаёт страницу без постов и
+    # тем же кодом 200. Замер 23.10: `@sunlower` так не открылся ни
+    # анонимным браузером, ни актором — вернулась одна пустая запись.
+    # Читатель назовёт это «роликов меньше пяти», что уведёт человека
+    # чинить не то.
+    if not reels and t.kind == "user":
+        print(f"  {t.human}: пусто. Проверь профиль руками: закрытый или "
+              "с возрастным ограничением отдаёт страницу без постов, и "
+              "это не чинится ни ключом, ни лимитом.")
     return len(reels)
 
 
@@ -275,6 +407,10 @@ def main() -> None:
     ap.add_argument("--days", type=int, default=DAYS,
                     help=f"за сколько дней брать ролики, по умолчанию {DAYS}; "
                          "0 — без границы")
+    ap.add_argument("--deep", type=int, default=DEEP,
+                    help=f"скольким кандидатам добрать показы и длину "
+                         f"вторым запросом, по умолчанию {DEEP}; 0 — не "
+                         "добирать (дешевле, но показов в кэше не будет)")
     ap.add_argument("--show", action="store_true", help="что лежит в кэше")
     ap.add_argument("--dry", action="store_true", help="что бы запросил")
     args = ap.parse_args()
@@ -311,11 +447,13 @@ def main() -> None:
 
     print(f"Целей {len(found)}, до {args.limit} записей на каждую, "
           + (f"за последние {args.days} дней" if args.days > 0 else "без границы по дате")
+          + (f", плюс добор показов у {args.deep} на цель" if args.deep > 0
+             else ", без добора показов")
           + ". Прогон платный.")
     total = 0
     for t in found:
         try:
-            total += pull(b, t, args.limit, args.days)
+            total += pull(b, t, args.limit, args.days, args.deep)
         except NoTrends as e:
             print(f"  {t.human}: не снялось — {e}")
     print(f"Снято роликов: {total}")
